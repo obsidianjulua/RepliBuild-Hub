@@ -21,3 +21,9 @@ description = "Lightweight, simple and fast XML parser for C++ with XPath suppor
 version = "1.15"
 language = "cpp"
 tags = ["xml", "parser", "cpp", "xpath"]
+
+[duktape]
+description = "Embeddable Javascript engine with a focus on portability and compact footprint"
+version = "2.7.0"
+language = "c"
+tags = ["javascript", "scripting", "embedded"]

@@ -1,0 +1,39 @@
+[project]
+name = "duktape"
+uuid = "141c002f-ec71-4e88-9ebf-0c6a520deebe"
+root = "."
+
+[dependencies]
+duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0" }
+
+[compile]
+flags = ["-fPIC"]
+parallel = true
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+strip_symbols = false
+type = "shared"
+
+[wrap]
+use_clang_jl = true
+style = "clang"
+language = "c"
+enabled = true
+shim_headers = ["duktape.h"]
+
+[wrap.macros.duk_peval_string]
+ret = "int"
+args = ["void*", "const char*"]
+
+[types]
+allow_unknown_enums = false
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
