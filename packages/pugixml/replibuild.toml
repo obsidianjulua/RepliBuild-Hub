@@ -1,0 +1,32 @@
+[project]
+name = "pugixml"
+uuid = "1e53df11-b979-4cc5-ae16-70a8a666cfc7"
+root = "."
+
+[dependencies]
+pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1.15" }
+
+[compile]
+flags = ["-std=c++17", "-fPIC"]
+parallel = true
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+style = "clang"
+language = "cpp"
+use_clang_jl = true
+enabled = true
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
