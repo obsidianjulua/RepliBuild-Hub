@@ -1,0 +1,29 @@
+[project]
+name = "tinyxml2"
+version = "10.0.0"
+root = "."
+
+[dependencies.tinyxml2]
+type = "git"
+url = "https://github.com/leethomason/tinyxml2.git"
+tag = "10.0.0"
+exclude = ["xmltest.cpp"]
+
+[compile]
+flags = ["-O2", "-fPIC", "-std=c++17"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+
+[types]
+strictness = "warn"
+
+[cache]
+enabled = true

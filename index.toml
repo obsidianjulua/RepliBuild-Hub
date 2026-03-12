@@ -9,3 +9,9 @@ description = "Lua 5.4 scripting language"
 version = "5.4.7"
 language = "c"
 tags = ["scripting", "embedded"]
+
+[tinyxml2]
+description = "Simple, small C++ XML parser"
+version = "10.0.0"
+language = "cpp"
+tags = ["xml", "parser", "cpp"]
