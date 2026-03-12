@@ -1,0 +1,29 @@
+[project]
+name = "cjson"
+version = "1.7.18"
+root = "."
+
+[dependencies.cjson]
+type = "git"
+url = "https://github.com/DaveGamble/cJSON.git"
+tag = "v1.7.18"
+exclude = ["test", "fuzzing", "tests"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+
+[types]
+strictness = "warn"
+
+[cache]
+enabled = true

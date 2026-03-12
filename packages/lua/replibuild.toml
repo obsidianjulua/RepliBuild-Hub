@@ -1,0 +1,29 @@
+[project]
+name = "lua"
+version = "5.4.7"
+root = "."
+
+[dependencies.lua]
+type = "git"
+url = "https://github.com/lua/lua.git"
+tag = "v5.4.7"
+exclude = ["onelua.c", "lua.c", "luac.c", "ltests.c"]
+
+[compile]
+flags = ["-O2", "-fPIC", "-DLUA_USE_LINUX"]
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+
+[types]
+strictness = "warn"
+
+[cache]
+enabled = true

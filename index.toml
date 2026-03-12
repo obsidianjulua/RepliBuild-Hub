@@ -1,0 +1,11 @@
+[cjson]
+description = "Ultralightweight JSON parser in C"
+version = "1.7.18"
+language = "c"
+tags = ["json", "parser"]
+
+[lua]
+description = "Lua 5.4 scripting language"
+version = "5.4.7"
+language = "c"
+tags = ["scripting", "embedded"]
