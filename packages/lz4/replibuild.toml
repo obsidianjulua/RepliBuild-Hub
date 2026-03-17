@@ -35,6 +35,7 @@ args = ["int"]
 [types]
 strictness = "warn"
 allow_unknown_structs = true
+allow_function_pointers = true
 
 [cache]
 enabled = true

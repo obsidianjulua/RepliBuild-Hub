@@ -21,13 +21,22 @@ type = "shared"
 
 [wrap]
 language = "c"
+shim_headers = ["mpack.h"]
 
-# No varargs. The C11 _Generic mpack_write() macro cannot be shimmed —
+# No varargs in public API.
+# The C11 _Generic mpack_write()/mpack_write_kv() macros cannot be shimmed —
 # users call the typed functions directly: mpack_write_i32, mpack_write_cstr, etc.
+# mpack_writer_init_stack/mpack_reader_init_stack use stack allocation, cannot be shimmed.
+
+# mpack_expect_cstr_match wraps mpack_expect_str_match with strlen
+[wrap.macros.mpack_expect_cstr_match]
+ret = "void"
+args = ["mpack_reader_t*", "const char*"]
 
 [types]
 strictness = "warn"
 allow_unknown_structs = true
+allow_function_pointers = true
 
 [cache]
 enabled = true
