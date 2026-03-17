@@ -44,11 +44,14 @@ args = ["z_stream*", "int"]
 ret = "int"
 args = ["z_stream*", "int", "unsigned char*"]
 
+# gzprintf(gzFile file, const char *format, ...)
+# Each entry lists ONLY the variadic arg types (fixed args come from DWARF)
 [wrap.varargs]
 gzprintf = [
-    ["Any", "Cstring", "Cint"],
-    ["Any", "Cstring", "Cdouble"],
-    ["Any", "Cstring", "Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
 ]
 
 [types]

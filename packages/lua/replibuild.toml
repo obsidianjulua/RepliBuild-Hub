@@ -21,9 +21,176 @@ type = "shared"
 
 [wrap]
 language = "c"
+shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
+
+# lua_pushfstring(lua_State *L, const char *fmt, ...)
+# Each entry lists ONLY the variadic arg types (fixed args come from DWARF)
+[wrap.varargs]
+lua_pushfstring = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Any"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+
+# ── lua.h macros ──
+
+[wrap.macros.lua_pop]
+ret = "void"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_newtable]
+ret = "void"
+args = ["lua_State*"]
+
+[wrap.macros.lua_tostring]
+ret = "const char*"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_tonumber]
+ret = "double"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_tointeger]
+ret = "long long"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_pcall]
+ret = "int"
+args = ["lua_State*", "int", "int", "int"]
+
+[wrap.macros.lua_call]
+ret = "void"
+args = ["lua_State*", "int", "int"]
+
+[wrap.macros.lua_yield]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isfunction]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_istable]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isnil]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isboolean]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isthread]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_islightuserdata]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isnone]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_isnoneornil]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_pushcfunction]
+ret = "void"
+args = ["lua_State*", "lua_CFunction"]
+
+[wrap.macros.lua_register]
+ret = "void"
+args = ["lua_State*", "const char*", "lua_CFunction"]
+
+[wrap.macros.lua_insert]
+ret = "void"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_remove]
+ret = "void"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_replace]
+ret = "void"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_pushglobaltable]
+ret = "void"
+args = ["lua_State*"]
+
+[wrap.macros.lua_newuserdata]
+ret = "void*"
+args = ["lua_State*", "size_t"]
+
+[wrap.macros.lua_getuservalue]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_setuservalue]
+ret = "int"
+args = ["lua_State*", "int"]
+
+[wrap.macros.lua_upvalueindex]
+ret = "int"
+args = ["int"]
+
+# ── lauxlib.h macros ──
+
+[wrap.macros.luaL_dofile]
+ret = "int"
+args = ["lua_State*", "const char*"]
+
+[wrap.macros.luaL_dostring]
+ret = "int"
+args = ["lua_State*", "const char*"]
+
+[wrap.macros.luaL_typename]
+ret = "const char*"
+args = ["lua_State*", "int"]
+
+[wrap.macros.luaL_loadbuffer]
+ret = "int"
+args = ["lua_State*", "const char*", "size_t", "const char*"]
+
+[wrap.macros.luaL_argcheck]
+ret = "void"
+args = ["lua_State*", "int", "int", "const char*"]
+
+[wrap.macros.luaL_checkstring]
+ret = "const char*"
+args = ["lua_State*", "int"]
+
+[wrap.macros.luaL_optstring]
+ret = "const char*"
+args = ["lua_State*", "int", "const char*"]
+
+[wrap.macros.luaL_getmetatable]
+ret = "int"
+args = ["lua_State*", "const char*"]
+
+[wrap.macros.luaL_loadfile]
+ret = "int"
+args = ["lua_State*", "const char*"]
+
+[wrap.macros.luaL_checkversion]
+ret = "void"
+args = ["lua_State*"]
+
+[wrap.macros.luaL_pushfail]
+ret = "void"
+args = ["lua_State*"]
 
 [types]
 strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
 
 [cache]
 enabled = true

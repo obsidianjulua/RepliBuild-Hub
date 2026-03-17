@@ -21,9 +21,15 @@ type = "shared"
 
 [wrap]
 language = "c"
+shim_headers = ["cJSON.h"]
+
+# cJSON_Version() is a function, not macro — no macros needed
+# cJSON_ArrayForEach is a for-loop macro, cannot be shimmed
 
 [types]
 strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
 
 [cache]
 enabled = true

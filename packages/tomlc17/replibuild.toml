@@ -1,0 +1,33 @@
+[project]
+name = "tomlc17"
+version = "2026.03.02"
+root = "."
+
+[dependencies.tomlc17]
+type = "git"
+url = "https://github.com/cktan/tomlc17.git"
+tag = "R260302"
+exclude = ["test", "simple", "unittest"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+aot_thunks = false
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["tomlc17.h"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

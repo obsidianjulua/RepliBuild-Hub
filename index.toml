@@ -33,3 +33,45 @@ description = "A massively spiffy yet delicately unobtrusive compression library
 version = "1.3.1"
 language = "c"
 tags = ["compression", "zlib"]
+
+[fmt]
+description = "Modern C++ formatting library (printf/Python alternative)"
+version = "12.1.0"
+language = "cpp"
+tags = ["formatting", "strings", "cpp"]
+
+[xxhash]
+description = "Extremely fast non-cryptographic hash algorithm"
+version = "0.8.3"
+language = "c"
+tags = ["hashing", "performance"]
+
+[tomlc17]
+description = "C library for parsing TOML v1.0 files"
+version = "2026.03.02"
+language = "c"
+tags = ["toml", "parser", "config"]
+
+[sqlite]
+description = "Self-contained, serverless, zero-configuration SQL database engine"
+version = "3.49.1"
+language = "c"
+tags = ["database", "sql", "embedded"]
+
+[lz4]
+description = "Extremely fast lossless compression algorithm"
+version = "1.10.0"
+language = "c"
+tags = ["compression", "performance"]
+
+[miniz]
+description = "Single-file zlib-replacement with ZIP archive support"
+version = "3.1.1"
+language = "c"
+tags = ["compression", "zip", "zlib"]
+
+[mpack]
+description = "C implementation of MessagePack with a simple streaming API"
+version = "1.1.1"
+language = "c"
+tags = ["serialization", "messagepack", "binary"]

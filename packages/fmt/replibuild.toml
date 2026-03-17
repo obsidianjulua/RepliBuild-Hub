@@ -1,0 +1,33 @@
+[project]
+name = "fmt"
+version = "12.1.0"
+root = "."
+
+[dependencies.fmt]
+type = "git"
+url = "https://github.com/fmtlib/fmt.git"
+tag = "12.1.0"
+exclude = ["test", "doc", "support", "benchmark"]
+
+[compile]
+flags = ["-O2", "-fPIC", "-std=c++20"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+templates = ["fmt::format_int", "fmt::basic_memory_buffer<char>"]
+template_headers = ["<fmt/format.h>"]
+
+[cache]
+enabled = true

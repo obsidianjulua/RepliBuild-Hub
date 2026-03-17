@@ -1,0 +1,40 @@
+[project]
+name = "lz4"
+version = "1.10.0"
+root = "."
+
+[dependencies.lz4]
+type = "git"
+url = "https://github.com/lz4/lz4.git"
+tag = "v1.10.0"
+exclude = ["tests", "programs", "cmake", "contrib", "doc", "examples", "ossfuzz", "build"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["lz4.h", "lz4hc.h", "lz4frame.h"]
+
+# LZ4_COMPRESSBOUND is a pure arithmetic macro — shim it for Julia access
+[wrap.macros.LZ4_COMPRESSBOUND]
+ret = "int"
+args = ["int"]
+
+[wrap.macros.LZ4_DECODER_RING_BUFFER_SIZE]
+ret = "int"
+args = ["int"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+
+[cache]
+enabled = true

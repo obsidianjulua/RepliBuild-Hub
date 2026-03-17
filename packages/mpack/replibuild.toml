@@ -1,0 +1,33 @@
+[project]
+name = "mpack"
+version = "1.1.1"
+root = "."
+
+[dependencies.mpack]
+type = "git"
+url = "https://github.com/ludocode/mpack.git"
+tag = "v1.1.1"
+exclude = ["test", "docs", "tools"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+
+# No varargs. The C11 _Generic mpack_write() macro cannot be shimmed —
+# users call the typed functions directly: mpack_write_i32, mpack_write_cstr, etc.
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+
+[cache]
+enabled = true

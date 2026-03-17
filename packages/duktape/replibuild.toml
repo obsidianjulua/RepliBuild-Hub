@@ -1,10 +1,10 @@
 [project]
 name = "duktape"
-uuid = "141c002f-ec71-4e88-9ebf-0c6a520deebe"
+version = "2.7.0"
 root = "."
 
 [dependencies]
-duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0" }
+duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0", exclude = ["src-input", "tests", "extras", "examples", "doc", "config", "debugger", "polyfills", "tools", "licenses"] }
 
 [compile]
 flags = ["-fPIC"]
@@ -25,9 +25,235 @@ language = "c"
 enabled = true
 shim_headers = ["duktape.h"]
 
+# ── Context creation ──
+
+[wrap.macros.duk_create_heap_default]
+ret = "duk_context*"
+args = []
+
+# ── Error handling (non-variadic) ──
+
+[wrap.macros.duk_throw]
+ret = "int"
+args = ["duk_context*"]
+
+[wrap.macros.duk_fatal]
+ret = "int"
+args = ["duk_context*", "const char*"]
+
+# ── Stack move ──
+
+[wrap.macros.duk_xmove_top]
+ret = "void"
+args = ["duk_context*", "duk_context*", "int"]
+
+[wrap.macros.duk_xcopy_top]
+ret = "void"
+args = ["duk_context*", "duk_context*", "int"]
+
+# ── Push macros ──
+
+[wrap.macros.duk_push_thread]
+ret = "int"
+args = ["duk_context*"]
+
+[wrap.macros.duk_push_thread_new_globalenv]
+ret = "int"
+args = ["duk_context*"]
+
+[wrap.macros.duk_push_buffer]
+ret = "void*"
+args = ["duk_context*", "size_t", "int"]
+
+[wrap.macros.duk_push_fixed_buffer]
+ret = "void*"
+args = ["duk_context*", "size_t"]
+
+[wrap.macros.duk_push_dynamic_buffer]
+ret = "void*"
+args = ["duk_context*", "size_t"]
+
+[wrap.macros.duk_push_external_buffer]
+ret = "void"
+args = ["duk_context*"]
+
+# ── Eval macros (stack-based source) ──
+
+[wrap.macros.duk_eval]
+ret = "void"
+args = ["duk_context*"]
+
+[wrap.macros.duk_eval_noresult]
+ret = "void"
+args = ["duk_context*"]
+
+[wrap.macros.duk_peval]
+ret = "int"
+args = ["duk_context*"]
+
+[wrap.macros.duk_peval_noresult]
+ret = "int"
+args = ["duk_context*"]
+
+# ── Eval string macros ──
+
+[wrap.macros.duk_eval_string]
+ret = "void"
+args = ["duk_context*", "const char*"]
+
+[wrap.macros.duk_eval_string_noresult]
+ret = "void"
+args = ["duk_context*", "const char*"]
+
 [wrap.macros.duk_peval_string]
 ret = "int"
-args = ["void*", "const char*"]
+args = ["duk_context*", "const char*"]
+
+[wrap.macros.duk_peval_string_noresult]
+ret = "int"
+args = ["duk_context*", "const char*"]
+
+# ── Eval lstring macros ──
+
+[wrap.macros.duk_eval_lstring]
+ret = "void"
+args = ["duk_context*", "const char*", "size_t"]
+
+[wrap.macros.duk_eval_lstring_noresult]
+ret = "void"
+args = ["duk_context*", "const char*", "size_t"]
+
+[wrap.macros.duk_peval_lstring]
+ret = "int"
+args = ["duk_context*", "const char*", "size_t"]
+
+[wrap.macros.duk_peval_lstring_noresult]
+ret = "int"
+args = ["duk_context*", "const char*", "size_t"]
+
+# ── Compile macros (stack-based source) ──
+
+[wrap.macros.duk_compile]
+ret = "void"
+args = ["duk_context*", "unsigned int"]
+
+[wrap.macros.duk_pcompile]
+ret = "int"
+args = ["duk_context*", "unsigned int"]
+
+# ── Compile string macros ──
+
+[wrap.macros.duk_compile_string]
+ret = "void"
+args = ["duk_context*", "unsigned int", "const char*"]
+
+[wrap.macros.duk_compile_string_filename]
+ret = "void"
+args = ["duk_context*", "unsigned int", "const char*"]
+
+[wrap.macros.duk_pcompile_string]
+ret = "int"
+args = ["duk_context*", "unsigned int", "const char*"]
+
+[wrap.macros.duk_pcompile_string_filename]
+ret = "int"
+args = ["duk_context*", "unsigned int", "const char*"]
+
+# ── Compile lstring macros ──
+
+[wrap.macros.duk_compile_lstring]
+ret = "void"
+args = ["duk_context*", "unsigned int", "const char*", "size_t"]
+
+[wrap.macros.duk_compile_lstring_filename]
+ret = "void"
+args = ["duk_context*", "unsigned int", "const char*", "size_t"]
+
+[wrap.macros.duk_pcompile_lstring]
+ret = "int"
+args = ["duk_context*", "unsigned int", "const char*", "size_t"]
+
+[wrap.macros.duk_pcompile_lstring_filename]
+ret = "int"
+args = ["duk_context*", "unsigned int", "const char*", "size_t"]
+
+# ── Type check macros ──
+
+[wrap.macros.duk_is_null_or_undefined]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_callable]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_primitive]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_object_coercible]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_eval_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_range_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_reference_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_syntax_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_type_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_is_uri_error]
+ret = "int"
+args = ["duk_context*", "int"]
+
+# ── Require macros ──
+
+[wrap.macros.duk_require_type_mask]
+ret = "void"
+args = ["duk_context*", "int", "unsigned int"]
+
+[wrap.macros.duk_require_callable]
+ret = "void"
+args = ["duk_context*", "int"]
+
+[wrap.macros.duk_require_object_coercible]
+ret = "void"
+args = ["duk_context*", "int"]
+
+# ── Coercion macros ──
+
+[wrap.macros.duk_to_buffer]
+ret = "void*"
+args = ["duk_context*", "int", "size_t*"]
+
+[wrap.macros.duk_to_fixed_buffer]
+ret = "void*"
+args = ["duk_context*", "int", "size_t*"]
+
+[wrap.macros.duk_to_dynamic_buffer]
+ret = "void*"
+args = ["duk_context*", "int", "size_t*"]
+
+[wrap.macros.duk_safe_to_string]
+ret = "const char*"
+args = ["duk_context*", "int"]
 
 [types]
 allow_unknown_enums = false

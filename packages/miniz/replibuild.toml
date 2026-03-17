@@ -1,0 +1,42 @@
+[project]
+name = "miniz"
+version = "3.1.1"
+root = "."
+
+[dependencies.miniz]
+type = "git"
+url = "https://github.com/richgel999/miniz.git"
+tag = "3.1.1"
+exclude = ["tests", "examples", "doc", "amalgamation"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+
+[link]
+enable_lto = true
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["miniz.h"]
+
+# tinfl_init is a macro (not a function) — sets decompressor state to 0
+[wrap.macros.tinfl_init]
+ret = "void"
+args = ["tinfl_decompressor*"]
+
+# tinfl_get_adler32 is a macro — reads m_check_adler32 field
+[wrap.macros.tinfl_get_adler32]
+ret = "unsigned int"
+args = ["tinfl_decompressor*"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
