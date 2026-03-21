@@ -52,12 +52,6 @@ version = "2026.03.02"
 language = "c"
 tags = ["toml", "parser", "config"]
 
-[sqlite]
-description = "Self-contained, serverless, zero-configuration SQL database engine"
-version = "3.49.1"
-language = "c"
-tags = ["database", "sql", "embedded"]
-
 [lz4]
 description = "Extremely fast lossless compression algorithm"
 version = "1.10.0"
