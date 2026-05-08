@@ -1,0 +1,141 @@
+[project]
+name = "sqlite"
+version = "3.52.0"
+
+[dependencies.sqlite]
+type = "git"
+url = "https://github.com/algoritnl/sqlite-amalgamation.git"
+exclude = ["shell.c", "tests", "cmake", ".github"]
+
+[compile]
+flags = ["-O2", "-fPIC", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_COLUMN_METADATA", "-DSQLITE_DQS=0"]
+
+[link]
+enable_lto = false
+optimization_level = "0"
+link_libraries = ["pthread", "dl", "m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["sqlite3.h"]
+
+# ── Variadic functions ──
+# sqlite3_mprintf(const char *fmt, ...) → char*
+# sqlite3_snprintf(int n, char *buf, const char *fmt, ...) → char*
+[wrap.varargs]
+sqlite3_mprintf = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+    ["Cint", "Cstring"],
+    ["Cstring", "Cint", "Cstring"],
+]
+sqlite3_snprintf = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+sqlite3_log = [
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+
+# ── Destructor sentinels ──
+# SQLITE_STATIC = ((sqlite3_destructor_type)0)
+# SQLITE_TRANSIENT = ((sqlite3_destructor_type)-1)
+# Value macros (no "args" key) — shimmed as bare expressions, not function calls
+
+[wrap.macros.SQLITE_STATIC]
+ret = "sqlite3_destructor_type"
+
+[wrap.macros.SQLITE_TRANSIENT]
+ret = "sqlite3_destructor_type"
+
+# ── Result codes (value macros) ──
+
+[wrap.macros.SQLITE_OK]
+ret = "int"
+
+[wrap.macros.SQLITE_ERROR]
+ret = "int"
+
+[wrap.macros.SQLITE_BUSY]
+ret = "int"
+
+[wrap.macros.SQLITE_MISUSE]
+ret = "int"
+
+[wrap.macros.SQLITE_ROW]
+ret = "int"
+
+[wrap.macros.SQLITE_DONE]
+ret = "int"
+
+[wrap.macros.SQLITE_CONSTRAINT]
+ret = "int"
+
+[wrap.macros.SQLITE_ABORT]
+ret = "int"
+
+[wrap.macros.SQLITE_NOMEM]
+ret = "int"
+
+# ── Fundamental type codes (returned by sqlite3_column_type) ──
+
+[wrap.macros.SQLITE_INTEGER]
+ret = "int"
+
+[wrap.macros.SQLITE_FLOAT]
+ret = "int"
+
+[wrap.macros.SQLITE_TEXT]
+ret = "int"
+
+[wrap.macros.SQLITE_BLOB]
+ret = "int"
+
+[wrap.macros.SQLITE_NULL]
+ret = "int"
+
+# ── Open flags (for sqlite3_open_v2) ──
+
+[wrap.macros.SQLITE_OPEN_READONLY]
+ret = "int"
+
+[wrap.macros.SQLITE_OPEN_READWRITE]
+ret = "int"
+
+[wrap.macros.SQLITE_OPEN_CREATE]
+ret = "int"
+
+[wrap.macros.SQLITE_OPEN_MEMORY]
+ret = "int"
+
+[wrap.macros.SQLITE_OPEN_NOMUTEX]
+ret = "int"
+
+[wrap.macros.SQLITE_OPEN_FULLMUTEX]
+ret = "int"
+
+# ── UTF encoding flags (for sqlite3_create_function_v2) ──
+
+[wrap.macros.SQLITE_UTF8]
+ret = "int"
+
+[wrap.macros.SQLITE_DETERMINISTIC]
+ret = "int"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

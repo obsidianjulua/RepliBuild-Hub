@@ -69,3 +69,9 @@ description = "C implementation of MessagePack with a simple streaming API"
 version = "1.1.1"
 language = "c"
 tags = ["serialization", "messagepack", "binary"]
+
+[sqlite]
+description = "Self-contained SQL database engine"
+version = "3.51.1"
+language = "c"
+tags = ["database", "sql", "embedded"]

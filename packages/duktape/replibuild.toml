@@ -4,7 +4,7 @@ version = "2.7.0"
 root = "."
 
 [dependencies]
-duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0", exclude = ["src-input", "tests", "extras", "examples", "doc", "config", "debugger", "polyfills", "tools", "licenses"] }
+duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0", exclude = ["src-input", "tests", "extras", "examples", "doc", "config", "debugger", "polyfills", "tools", "licenses", "misc", "dukweb"] }
 
 [compile]
 flags = ["-fPIC"]

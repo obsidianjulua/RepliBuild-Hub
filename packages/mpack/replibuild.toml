@@ -21,7 +21,7 @@ type = "shared"
 
 [wrap]
 language = "c"
-shim_headers = ["mpack.h"]
+shim_headers = ["mpack/mpack.h"]
 
 # No varargs in public API.
 # The C11 _Generic mpack_write()/mpack_write_kv() macros cannot be shimmed —

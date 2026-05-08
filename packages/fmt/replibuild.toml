@@ -26,7 +26,7 @@ language = "cpp"
 strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
-templates = ["fmt::format_int", "fmt::basic_memory_buffer<char>"]
+templates = ["fmt::basic_memory_buffer<char>"]
 template_headers = ["<fmt/format.h>"]
 
 [cache]
