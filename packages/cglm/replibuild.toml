@@ -1,0 +1,42 @@
+[project]
+name = "cglm"
+version = "0.9.6"
+root = "."
+
+[dependencies.cglm]
+type = "git"
+url = "https://github.com/recp/cglm.git"
+tag = "v0.9.6"
+# src/*.c are thin glmc_* wrappers (CGLM_EXPORT) around the inline glm_* API.
+# Exclude the test tree, the Windows-only sources, and the empty Swift stub.
+exclude = ["test", "win", "swift"]
+
+[compile]
+# Headers live under include/cglm; src files use ../include relative paths but
+# -Iinclude lets the shim-header path resolve too.
+flags = ["-O2", "-fPIC", "-Iinclude"]
+
+[link]
+# Large function count (whole-module llvmcall segfaults at scale) -> force Tier 3 ccall.
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["cglm/call.h"]
+
+# cglm's library API is the glmc_* "call" functions — all real exported symbols,
+# recovered from DWARF. The glm_* API is header-only inline (not in the .so).
+# Types vec3/vec4/mat4 are float-array typedefs that decay to float* at the ABI.
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

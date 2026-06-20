@@ -1,3 +1,9 @@
+[cglm]
+description = "Highly optimized graphics math (glm) for C — SIMD vec/mat/quat"
+version = "0.9.6"
+language = "c"
+tags = ["math", "graphics", "simd", "linear-algebra"]
+
 [cjson]
 description = "Ultralightweight JSON parser in C"
 version = "1.7.18"
