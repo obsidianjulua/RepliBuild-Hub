@@ -1,0 +1,73 @@
+[project]
+name = "box2d3"
+version = "3.1.1"
+root = "."
+
+# Box2D 3.x is a full C17 rewrite with a flat, handle-based API (b2WorldId,
+# b2BodyId). The library proper is the 35 .c under src/; samples/test/benchmark
+# and the extern/ task-system dep are excluded. SIMD defaults to SSE2 (baseline
+# on x86_64); AVX2 only engages under -mavx2, so no special flags are needed.
+[dependencies.box2d]
+type = "git"
+url = "https://github.com/erincatto/box2d.git"
+tag = "v3.1.1"
+exclude = ["samples", "test", "benchmark", "extern", "shared", "docs"]
+
+[compile]
+# gnu17 (not c17): timer.c uses POSIX clock_gettime/CLOCK_MONOTONIC, which strict
+# ISO C hides. The GNU dialect exposes them (equivalent to -D_GNU_SOURCE) — this
+# is the configure-time feature-macro box2d's CMake sets, supplied by hand.
+#
+# Namespace trim to box2d's real public API. Two flags work as a pair:
+#   -fvisibility=hidden : hide everything by default
+#   -Dbox2d_EXPORTS     : make B2_API expand to visibility("default") so the
+#                         public entry points stay exported (base.h only enables
+#                         the export attribute when box2d_EXPORTS is defined —
+#                         the macro CMake auto-sets for a SHARED target).
+# Together these export only the public b2* API instead of every non-static
+# internal (b2SolveContactsTask, b2CreateContact, internal solver structs…).
+# RepliBuild wraps the exported-symbol set (nm -g --defined-only), so this is
+# what trims the generated namespace. Omit either flag and you get all-or-nothing.
+flags = ["-O2", "-fPIC", "-std=gnu17", "-fvisibility=hidden", "-Dbox2d_EXPORTS"]
+
+[link]
+# LTO off → no llvmcall bitcode → functions dispatch through ccall (Tier 3).
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m", "pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# box2d.h pulls in base/collision/id/types but NOT math_functions.h (where B2_PI
+# lives), so include it explicitly for the macro shims.
+shim_headers = ["box2d/box2d.h", "box2d/math_functions.h"]
+
+# ── Value macros (compiler-erased constants) ──
+# Box2D 3.x has no variadic functions (logging is callback-based, not printf),
+# so there is no [wrap.varargs] residue. The constants below are #define value
+# macros; without shims they never reach DWARF. Function-like id macros
+# (B2_IS_NULL/B2_ID_EQUALS) and B2_ASSERT are intentionally omitted — trivial in
+# Julia / not callable values.
+
+[wrap.macros.B2_PI]
+ret = "float"
+
+[wrap.macros.B2_MAX_POLYGON_VERTICES]
+ret = "int"
+
+[wrap.macros.B2_DEFAULT_CATEGORY_BITS]
+ret = "unsigned long long"
+
+[wrap.macros.B2_DEFAULT_MASK_BITS]
+ret = "unsigned long long"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

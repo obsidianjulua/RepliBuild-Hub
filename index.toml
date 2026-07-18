@@ -10,6 +10,12 @@ version = "2.4.1"
 language = "cpp"
 tags = ["physics", "simulation", "2d", "games", "cpp"]
 
+[box2d3]
+description = "Box2D 3.x physics engine — the C17 rewrite with a flat, handle-based API (b2WorldId/b2BodyId)"
+version = "3.1.1"
+language = "c"
+tags = ["physics", "simulation", "2d", "games"]
+
 [cjson]
 description = "Ultralightweight JSON parser in C"
 version = "1.7.18"
