@@ -4,6 +4,12 @@ version = "0.9.6"
 language = "c"
 tags = ["math", "graphics", "simd", "linear-algebra"]
 
+[box2d]
+description = "Box2D 2.4 physics engine — the C++ API line (worlds, bodies, fixtures, joints)"
+version = "2.4.1"
+language = "cpp"
+tags = ["physics", "simulation", "2d", "games", "cpp"]
+
 [cjson]
 description = "Ultralightweight JSON parser in C"
 version = "1.7.18"

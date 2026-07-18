@@ -1,0 +1,133 @@
+[project]
+name = "box2d"
+version = "2.4.1"
+root = "."
+
+# Box2D 2.4.x is the last C++ API line (3.x is pure C). The library proper is the
+# ~45 .cpp under src/{collision,common,dynamics,rope}. Everything else in the repo is
+# the GUI testbed (GLFW/imgui/glad), unit tests, and vendored extern/ deps — all of
+# which discover() swept in and all of which must be excluded.
+[dependencies.box2d]
+type = "git"
+url = "https://github.com/erincatto/box2d.git"
+tag = "v2.4.1"
+exclude = ["testbed", "unit-test", "extern", "docs"]
+
+[compile]
+# -fstandalone-debug: clang's default "limited" debug info emits some
+# header-only aggregates (b2BodyDef, b2FixtureDef — the def structs users
+# must fill) as DW_AT_declaration-only stubs, which wrap to empty Julia
+# structs. Standalone debug info materializes their full member layout.
+# DWARF is RepliBuild's input format — this flag is load-bearing, not bloat.
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# Umbrella header for macro shims. box2d.h includes its siblings by leaf name,
+# so the resolver's include/box2d path resolves them.
+shim_headers = ["box2d/box2d.h"]
+
+# ── Variadic functions ──
+# b2Log(const char* fmt, ...) and b2Dump(const char* fmt, ...) — printf-style
+# joint/world dumpers. List ONLY the variadic arg types; the fixed `const char*`
+# format comes from DWARF. (Both confirmed present: b2Log weak, b2Dump defined.)
+[wrap.varargs]
+b2Log = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cint", "Cint"],
+    ["Cdouble", "Cdouble"],
+    ["Cstring", "Cint"],
+]
+b2Dump = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cint", "Cint"],
+    ["Cdouble", "Cdouble"],
+    ["Cdouble", "Cdouble", "Cdouble"],
+    ["Cstring", "Cint"],
+]
+
+# ── Value macros (compiler-erased constants) ──
+# b2_settings.h / b2_common.h tuning constants. No "args" key → emitted as bare
+# expression shims (`return MACRO;`). Function-like macros (B2_NOT_USED, b2Assert)
+# are intentionally omitted — they are no-ops/asserts, not callable values.
+# box2d's public API is STL-free (metadata stl_methods = 0), so there is no
+# [wrap.stl] residue to declare.
+
+[wrap.macros.b2_maxPolygonVertices]
+ret = "int"
+
+[wrap.macros.b2_maxManifoldPoints]
+ret = "int"
+
+[wrap.macros.b2_maxSubSteps]
+ret = "int"
+
+[wrap.macros.b2_maxTOIContacts]
+ret = "int"
+
+[wrap.macros.b2_pi]
+ret = "float"
+
+[wrap.macros.b2_lengthUnitsPerMeter]
+ret = "float"
+
+[wrap.macros.b2_linearSlop]
+ret = "float"
+
+[wrap.macros.b2_polygonRadius]
+ret = "float"
+
+[wrap.macros.b2_angularSlop]
+ret = "float"
+
+[wrap.macros.b2_aabbExtension]
+ret = "float"
+
+[wrap.macros.b2_aabbMultiplier]
+ret = "float"
+
+[wrap.macros.b2_maxLinearCorrection]
+ret = "float"
+
+[wrap.macros.b2_maxAngularCorrection]
+ret = "float"
+
+[wrap.macros.b2_maxTranslation]
+ret = "float"
+
+[wrap.macros.b2_maxRotation]
+ret = "float"
+
+[wrap.macros.b2_baumgarte]
+ret = "float"
+
+[wrap.macros.b2_toiBaumgarte]
+ret = "float"
+
+[wrap.macros.b2_timeToSleep]
+ret = "float"
+
+[wrap.macros.b2_linearSleepTolerance]
+ret = "float"
+
+[wrap.macros.b2_angularSleepTolerance]
+ret = "float"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
