@@ -13,7 +13,13 @@ exclude = ["test", "fuzzing", "tests"]
 flags = ["-O2", "-fPIC"]
 
 [link]
-enable_lto = true
+# LTO off → Tier 3 ccall (Hub doctrine). Verified 2026-07-11: with Tier 1 on,
+# llvmcall'd cJSON_Parse writes the parse error into the EMBEDDED module's
+# file-local `static global_error`, while ccall'd cJSON_GetErrorPtr (Cstring
+# return → never Tier 1) reads the .so's copy — mixed-tier dispatch diverges
+# on internal statics, so GetErrorPtr always returned NULL after a failed
+# Tier-1 parse.
+enable_lto = false
 optimization_level = "2"
 
 [binary]
@@ -25,6 +31,15 @@ shim_headers = ["cJSON.h"]
 
 # cJSON_Version() is a function, not macro — no macros needed
 # cJSON_ArrayForEach is a for-loop macro, cannot be shimmed
+
+# ── Owned char* returns ──
+# The cJSON_Print* family returns buffers allocated through cJSON's hooks;
+# the caller must release them with cJSON_free. The wrapper copies to a
+# Julia String and frees through that symbol (v2.5.10 [wrap.cstring_owned]).
+[wrap.cstring_owned]
+cJSON_Print = "cJSON_free"
+cJSON_PrintUnformatted = "cJSON_free"
+cJSON_PrintBuffered = "cJSON_free"
 
 [types]
 strictness = "warn"

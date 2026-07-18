@@ -13,7 +13,9 @@ exclude = ["test", "examples", "contrib", "doc", "amiga", "msdos", "os400", "qnx
 flags = ["-O2", "-fPIC", "-DHAVE_UNISTD_H", "-D_LARGEFILE64_SOURCE=1", "-DHAVE_HIDDEN"]
 
 [link]
-enable_lto = true
+# LTO off → Tier 3 ccall (Hub doctrine; see cjson for the mixed-tier
+# static-state divergence that motivated aligning every Hub config).
+enable_lto = false
 optimization_level = "2"
 
 [binary]
