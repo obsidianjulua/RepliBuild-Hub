@@ -7,7 +7,7 @@ real Julia package** rather than a verify script.
 
 The layering discipline demonstrated here:
 
-- `lib/` holds the vendored RepliBuild output (`Box2d.jl`, `libbox2d.so`,
+- `lib/` holds RepliBuild's build + wrap output (`Box2d.jl`, `libbox2d.so`,
   `compilation_metadata.json`, `thunk_manifest.json`) exactly as `wrap()`
   produced it. It is the ABI layer; it is never edited.
 - `src/BoxWorld.jl` (this file) is the ergonomic layer: Julia-idiomatic types,
@@ -25,7 +25,7 @@ using JSON
 using Libdl
 using RepliBuild   # the wrapper dispatches Tier 2 through RepliBuild.JITManager
 
-# ── ABI layer: the vendored, generated wrapper ────────────────────────────────
+# ── ABI layer: the generated wrapper ──────────────────────────────────────────
 # The generated module resolves its shared library sibling-first, so the copy
 # in lib/ is self-contained. Its __init__ registers this binary's JIT engine.
 include(joinpath(@__DIR__, "..", "lib", "Box2d.jl"))
