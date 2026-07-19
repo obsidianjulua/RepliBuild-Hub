@@ -1,0 +1,15 @@
+name = "BoxWorld"
+uuid = "b0c57a1d-2e6f-4b8a-9c3d-8f1e5a7d4b26"
+authors = ["John <archjulialua@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

@@ -1,0 +1,93 @@
+[project]
+name = "blake3"
+version = "1.8.5"
+root = "."
+
+[dependencies.blake3]
+type = "git"
+url = "https://github.com/BLAKE3-team/BLAKE3.git"
+tag = "1.8.5"
+# The C library lives entirely under c/. We build the PORTABLE path only:
+# blake3.c + blake3_dispatch.c + blake3_portable.c. Every SIMD translation unit
+# needs its own -march flag (per-file flags → violates the one-flag-set gate),
+# so they are excluded and compiled out via the BLAKE3_NO_* defines below; the
+# runtime dispatch in blake3_dispatch.c then falls straight through to *_portable.
+# Also drop the TBB C++ TU and the CLI/example mains.
+exclude = [
+    "blake3_sse2.c",
+    "blake3_sse41.c",
+    "blake3_avx2.c",
+    "blake3_avx512.c",
+    "blake3_neon.c",
+    "blake3_tbb.cpp",
+    "example.c",
+    "example_tbb.c",
+    "main.c",
+]
+
+[compile]
+# The BLAKE3_NO_* set disables every SIMD branch in blake3_dispatch.c, giving a
+# self-contained portable build with no undefined *_sse2/_avx2/... symbols.
+# No -I needed: the library TUs (all in c/) resolve their headers as siblings,
+# and the macro shim reaches the vendored header via the shim_headers subpath
+# below (see the note there).
+flags = [
+    "-O2", "-fPIC",
+    "-DBLAKE3_NO_SSE2",
+    "-DBLAKE3_NO_SSE41",
+    "-DBLAKE3_NO_AVX2",
+    "-DBLAKE3_NO_AVX512",
+    "-DBLAKE3_NO_NEON",
+]
+
+[link]
+# LTO off → Tier 3 ccall dispatch. This is a correctness-critical hash: ccall
+# keeps a single copy of blake3_dispatch.c's static CPU-feature cache, avoiding
+# the mixed-tier static-divergence class (cf. cjson). Matches lua/sqlite/cjson/cglm.
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# BLAKE3 ships its public header at c/blake3.h (non-standard subdir). The macro
+# shim is generated in the build cache, NOT in c/, so it can't resolve a bare
+# "blake3.h" by sibling lookup the way the library TUs do — it would fall through
+# to a system-installed /usr/include/blake3.h (a DIFFERENT version: libblake3
+# 1.8.4 here), silently baking the wrong BLAKE3_VERSION_STRING into the shim.
+# The subpath "c/blake3.h" resolves against the auto-added absolute clone root
+# and can never collide with a system header. (Diagnosed 2026-07-18.)
+shim_headers = ["c/blake3.h"]
+
+# ── Value macros (compiler-erased public constants) ──
+# blake3.h #defines these — DWARF can't see them, so they are declared here as
+# bare-expression shims (ret only, no args). BLAKE3_OUT_LEN in particular is the
+# canonical finalize() output size, part of the API contract.
+
+[wrap.macros.BLAKE3_KEY_LEN]
+ret = "int"
+
+[wrap.macros.BLAKE3_OUT_LEN]
+ret = "int"
+
+[wrap.macros.BLAKE3_BLOCK_LEN]
+ret = "int"
+
+[wrap.macros.BLAKE3_CHUNK_LEN]
+ret = "int"
+
+[wrap.macros.BLAKE3_MAX_DEPTH]
+ret = "int"
+
+[wrap.macros.BLAKE3_VERSION_STRING]
+ret = "const char*"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

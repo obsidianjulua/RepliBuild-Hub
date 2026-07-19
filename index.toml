@@ -93,3 +93,9 @@ description = "Self-contained SQL database engine"
 version = "3.51.1"
 language = "c"
 tags = ["database", "sql", "embedded"]
+
+[blake3]
+description = "BLAKE3 cryptographic hash — fast, secure, parallelizable (portable-C build)"
+version = "1.8.5"
+language = "c"
+tags = ["hashing", "crypto", "performance"]
