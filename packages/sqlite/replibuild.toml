@@ -1,11 +1,18 @@
 [project]
 name = "sqlite"
-version = "3.52.0"
+version = "3.53.3"
 
+# Amalgamation mirror. The original algoritnl/sqlite-amalgamation went private
+# (git prompts for a username → clone fails), so we track rhuijben's mirror, which
+# follows upstream on master (3.53.3 here). Its version *tags* are frozen at 3.8.10,
+# so pin the exact master commit instead — reproducible, and `git checkout <sha>` is
+# supported. The whole repo has only two .c files (sqlite3.c + shell.c); excluding
+# the shell CLI leaves a single self-contained amalgamation TU (no configure/codegen).
 [dependencies.sqlite]
 type = "git"
-url = "https://github.com/algoritnl/sqlite-amalgamation.git"
-exclude = ["shell.c", "tests", "cmake", ".github"]
+url = "https://github.com/rhuijben/sqlite-amalgamation.git"
+tag = "717732275b11daf24c44c3621bf11e09c4216316"   # = SQLITE_VERSION 3.53.3
+exclude = ["shell.c"]
 
 [compile]
 flags = ["-O2", "-fPIC", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_COLUMN_METADATA", "-DSQLITE_DQS=0"]
@@ -46,6 +53,14 @@ sqlite3_log = [
     ["Cstring", "Cint"],
     ["Cstring", "Cstring"],
 ]
+
+# ── Owned char* returns ──
+# sqlite3_mprintf allocates its result via sqlite3_malloc; the caller must release
+# it with sqlite3_free. Declare it owned so the wrapper copies to a Julia String and
+# frees the C buffer (v2.5.10 [wrap.cstring_owned]) instead of leaking on every call.
+# (sqlite3_snprintf writes into a caller-provided buffer — NOT owned — so it is absent.)
+[wrap.cstring_owned]
+sqlite3_mprintf = "sqlite3_free"
 
 # ── Destructor sentinels ──
 # SQLITE_STATIC = ((sqlite3_destructor_type)0)

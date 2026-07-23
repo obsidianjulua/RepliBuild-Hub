@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # SQLite Hub package — integration test
 #
-# Tests the full RepliBuild pipeline for SQLite 3.51.1:
+# Tests the full RepliBuild pipeline for SQLite 3.53.3:
 #   clean → build → load wrapper → exercise API
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/sqlite/test.jl
@@ -297,30 +297,26 @@ end
 end
 
 @testset "Varargs: sqlite3_mprintf" begin
+    # sqlite3_mprintf is declared [wrap.cstring_owned] → the wrapper returns an owned
+    # Julia String (the sqlite3_malloc'd buffer is copied out and sqlite3_free'd
+    # internally). Callers use the String directly — no pointer handling, no manual free.
+
     # No varargs
-    ptr = Sqlite.sqlite3_mprintf("hello mprintf")
-    @test ptr != C_NULL
-    @test unsafe_string(ptr) == "hello mprintf"
-    Sqlite.sqlite3_free(Ptr{Cvoid}(ptr))
+    @test Sqlite.sqlite3_mprintf("hello mprintf") == "hello mprintf"
 
     # With integer arg
-    ptr = Sqlite.sqlite3_mprintf_Cint("%d apples", Cint(42))
-    @test unsafe_string(ptr) == "42 apples"
-    Sqlite.sqlite3_free(Ptr{Cvoid}(ptr))
+    @test Sqlite.sqlite3_mprintf_Cint("%d apples", Cint(42)) == "42 apples"
 
     # With string arg (Cstring = Ptr{UInt8}, need GC.@preserve)
     let s = "sqlite"
         GC.@preserve s begin
-            ptr = Sqlite.sqlite3_mprintf_Cstring("name=%s", Base.unsafe_convert(Cstring, s))
-            @test unsafe_string(ptr) == "name=sqlite"
-            Sqlite.sqlite3_free(Ptr{Cvoid}(ptr))
+            @test Sqlite.sqlite3_mprintf_Cstring("name=%s",
+                Base.unsafe_convert(Cstring, s)) == "name=sqlite"
         end
     end
 
     # With double arg
-    ptr = Sqlite.sqlite3_mprintf_Cdouble("pi=%.2f", 3.14)
-    @test unsafe_string(ptr) == "pi=3.14"
-    Sqlite.sqlite3_free(Ptr{Cvoid}(ptr))
+    @test Sqlite.sqlite3_mprintf_Cdouble("pi=%.2f", 3.14) == "pi=3.14"
 end
 
 @testset "Multiple statements / transactions" begin
