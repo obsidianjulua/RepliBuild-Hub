@@ -23,6 +23,12 @@ type = "shared"
 language = "c"
 shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
 
+# Tier 1: per-function sliced llvmcall (un-parked 2026-07-22). Functions whose
+# closure touches setjmp/longjmp (lua's protected-call surface) demote to
+# ccall until allow_setjmp is flipped after more differential testing.
+[wrap.tier1]
+enable = true
+
 # lua_pushfstring(lua_State *L, const char *fmt, ...)
 # Each entry lists ONLY the variadic arg types (fixed args come from DWARF)
 [wrap.varargs]
@@ -33,6 +39,21 @@ lua_pushfstring = [
     ["Any"],
     ["Cstring", "Cint"],
     ["Cstring", "Cstring"],
+]
+
+# lua_gc(lua_State *L, int what, ...) — data args for GCSTEP/GCGEN/GCINC;
+# no-data calls (GCCOLLECT, GCCOUNT, ...) go through the base wrapper
+lua_gc = [
+    ["Cint"],
+    ["Cint", "Cint"],
+    ["Cint", "Cint", "Cint"],
+]
+
+# luaL_error(lua_State *L, const char *fmt, ...) — longjmps; only callable
+# from inside a lua_CFunction running under pcall
+luaL_error = [
+    ["Cstring"],
+    ["Cint"],
 ]
 
 # ── lua.h macros ──
@@ -186,6 +207,131 @@ args = ["lua_State*"]
 [wrap.macros.luaL_pushfail]
 ret = "void"
 args = ["lua_State*"]
+
+# ── Value macros (compiler-erased constants) ──
+
+# Thread status codes
+[wrap.macros.LUA_OK]
+ret = "int"
+
+[wrap.macros.LUA_YIELD]
+ret = "int"
+
+[wrap.macros.LUA_ERRRUN]
+ret = "int"
+
+[wrap.macros.LUA_ERRSYNTAX]
+ret = "int"
+
+[wrap.macros.LUA_ERRMEM]
+ret = "int"
+
+[wrap.macros.LUA_ERRERR]
+ret = "int"
+
+# Type tags
+[wrap.macros.LUA_TNONE]
+ret = "int"
+
+[wrap.macros.LUA_TNIL]
+ret = "int"
+
+[wrap.macros.LUA_TBOOLEAN]
+ret = "int"
+
+[wrap.macros.LUA_TLIGHTUSERDATA]
+ret = "int"
+
+[wrap.macros.LUA_TNUMBER]
+ret = "int"
+
+[wrap.macros.LUA_TSTRING]
+ret = "int"
+
+[wrap.macros.LUA_TTABLE]
+ret = "int"
+
+[wrap.macros.LUA_TFUNCTION]
+ret = "int"
+
+[wrap.macros.LUA_TUSERDATA]
+ret = "int"
+
+[wrap.macros.LUA_TTHREAD]
+ret = "int"
+
+# Registry / references
+[wrap.macros.LUA_REGISTRYINDEX]
+ret = "int"
+
+[wrap.macros.LUA_RIDX_GLOBALS]
+ret = "long long"
+
+[wrap.macros.LUA_RIDX_MAINTHREAD]
+ret = "long long"
+
+[wrap.macros.LUA_NOREF]
+ret = "int"
+
+[wrap.macros.LUA_REFNIL]
+ret = "int"
+
+# Misc sentinels
+[wrap.macros.LUA_MULTRET]
+ret = "int"
+
+[wrap.macros.LUA_MINSTACK]
+ret = "int"
+
+[wrap.macros.LUA_VERSION_NUM]
+ret = "int"
+
+# lua_gc options
+[wrap.macros.LUA_GCSTOP]
+ret = "int"
+
+[wrap.macros.LUA_GCRESTART]
+ret = "int"
+
+[wrap.macros.LUA_GCCOLLECT]
+ret = "int"
+
+[wrap.macros.LUA_GCCOUNT]
+ret = "int"
+
+[wrap.macros.LUA_GCCOUNTB]
+ret = "int"
+
+[wrap.macros.LUA_GCSTEP]
+ret = "int"
+
+[wrap.macros.LUA_GCISRUNNING]
+ret = "int"
+
+[wrap.macros.LUA_GCGEN]
+ret = "int"
+
+[wrap.macros.LUA_GCINC]
+ret = "int"
+
+# Comparison / arithmetic ops
+[wrap.macros.LUA_OPEQ]
+ret = "int"
+
+[wrap.macros.LUA_OPLT]
+ret = "int"
+
+[wrap.macros.LUA_OPLE]
+ret = "int"
+
+[wrap.macros.LUA_OPADD]
+ret = "int"
+
+[wrap.macros.LUA_OPMUL]
+ret = "int"
+
+[wrap.macros.LUA_OPUNM]
+ret = "int"
 
 [types]
 strictness = "warn"
