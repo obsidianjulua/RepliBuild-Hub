@@ -23,9 +23,17 @@ type = "shared"
 language = "c"
 shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
 
-# Tier 1: per-function sliced llvmcall (un-parked 2026-07-22). Functions whose
-# closure touches setjmp/longjmp (lua's protected-call surface) demote to
-# ccall until allow_setjmp is flipped after more differential testing.
+# Tier 1: per-function sliced llvmcall (un-parked 2026-07-22).
+#
+# setjmp status (verified 2026-07-31): the hazard gate is DIRECT-reach only —
+# it demotes a function whose own slice body calls setjmp/longjmp or a
+# returns_twice callee. Lua trips it nowhere: the protected-call machinery
+# (_setjmp inside luaD_rawrunprotected) is .so-side behind promoted __rb_lua_*
+# declares, so lua_error / lua_pcallk / lua_callk / lua_resume / lua_yieldk
+# are all Tier 1 with zero setjmp_family hazards, and allow_setjmp is a no-op
+# for this package. luaL_error is ccall because it is VARIADIC, not because of
+# setjmp. longjmp across Julia frames is tier-independent (ccall has the
+# identical exposure) and is exercised live by test_deep.jl (jl_fail callback).
 [wrap.tier1]
 enable = true
 
