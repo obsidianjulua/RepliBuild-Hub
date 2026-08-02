@@ -99,3 +99,9 @@ description = "BLAKE3 cryptographic hash — fast, secure, parallelizable (porta
 version = "1.8.5"
 language = "c"
 tags = ["hashing", "crypto", "performance"]
+
+[miniaudio]
+description = "Single-file audio playback/capture/synthesis library — no link-time deps, dlopens its backend"
+version = "0.11.25"
+language = "c"
+tags = ["audio", "playback", "capture", "dsp", "single-header"]

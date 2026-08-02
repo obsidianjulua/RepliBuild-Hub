@@ -1,0 +1,61 @@
+[project]
+name = "miniaudio"
+version = "0.11.25"
+root = "."
+
+# Single-header library that SHIPS its own implementation TU: upstream's
+# miniaudio.c is literally `#define MINIAUDIO_IMPLEMENTATION` + the include,
+# so no shim header is needed here — discovery finds miniaudio.c and compiles
+# the whole 95k-line header as one translation unit.
+#
+# Everything else in the repo is excluded: extras/ (31 .c/.h), examples/ (23),
+# tests/ (16), tools/ and external/ (2 each) would otherwise all be swept into
+# the build as extra sources.
+[dependencies.miniaudio]
+type = "git"
+url = "https://github.com/mackron/miniaudio.git"
+tag = "0.11.25"
+exclude = ["tests", "examples", "extras", "external", "tools", "research",
+           "website", "camal", "data", "resources", "docs"]
+
+[compile]
+flags = ["-O2", "-fPIC"]
+aot_thunks = false
+
+[link]
+# LTO off -> Tier 3 ccall for anything the slicer doesn't take. The
+# whole-module `Base.llvmcall` payload is scale-limited and duplicates
+# file-local statics (see cjson); sliced Tier 1 below is the supported path.
+enable_lto = false
+optimization_level = "2"
+# miniaudio needs no link-time AUDIO deps: it dlopen()s the backend
+# (ALSA/PulseAudio/PipeWire/JACK) at ma_context_init time. libm is a different
+# matter and must be linked explicitly: a shared library links fine with `sin`
+# left undefined, so without this the .so carries only libc in DT_NEEDED and
+# the Tier-1 pre-flight — which scopes lookup to the .so plus its DT_NEEDED
+# chain — demotes all 51 slices that declare sin/pow/log to ccall.
+# (Key is `link_libraries`; `extra_link_libs` is [ingest]-only and is silently
+# ignored here.)
+link_libraries = ["m", "pthread", "dl"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["miniaudio.h"]
+
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
