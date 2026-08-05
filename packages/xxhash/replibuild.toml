@@ -13,7 +13,10 @@ exclude = ["tests", "cmake_unofficial", "cli", "doc", "xxh_x86dispatch.c", "xxh_
 flags = ["-O2", "-fPIC"]
 
 [link]
-enable_lto = true
+# LTO off -> Tier 3 ccall for anything the slicer doesn't take. The
+# whole-module `Base.llvmcall` payload is scale-limited and duplicates
+# file-local statics (see cjson); sliced Tier 1 below is the supported path.
+enable_lto = false
 optimization_level = "2"
 
 [binary]
@@ -22,6 +25,13 @@ type = "shared"
 [wrap]
 language = "c"
 shim_headers = ["xxhash.h"]
+
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
 
 # XXH_versionNumber and XXH_VERSION_NUMBER are constants, not function macros
 # Core hashing functions (XXH32, XXH64, XXH3_64bits etc.) are real functions

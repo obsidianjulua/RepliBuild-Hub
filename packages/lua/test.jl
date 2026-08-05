@@ -2,7 +2,7 @@
 # Lua Hub package — integration test
 #
 # Tests the full RepliBuild pipeline for Lua 5.4.7:
-#   clean → build (with LTO) → load wrapper → exercise API
+#   clean → build → load wrapper → exercise API
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/lua/test.jl
 
@@ -30,14 +30,14 @@ const TOML_PATH = joinpath(PKG_DIR, "replibuild.toml")
     @test isfile(joinpath(julia_dir, "Lua.jl"))
 end
 
-@testset "LTO bitcode generation" begin
-    julia_dir = joinpath(PKG_DIR, "julia")
-    @test isfile(joinpath(julia_dir, "lua_lto.bc"))
-    @test isfile(joinpath(julia_dir, "lua_lto.ll"))
+@testset "IR artifacts" begin
+    build_dir = joinpath(PKG_DIR, "build")
+    @test isfile(joinpath(build_dir, "lua_linked.ll"))
+    @test isfile(joinpath(build_dir, "lua_opt.ll"))
+    @test isfile(joinpath(build_dir, "replibuild_shims.ll"))
 
-    # Verify the bitcode is non-trivial
-    bc_size = filesize(joinpath(julia_dir, "lua_lto.bc"))
-    @test bc_size > 100_000  # should be ~600KB
+    # Verify the linked IR is non-trivial
+    @test filesize(joinpath(build_dir, "lua_linked.ll")) > 1_000_000
 end
 
 # ── Load wrapper ─────────────────────────────────────────────────────────────
@@ -77,6 +77,18 @@ include(joinpath(PKG_DIR, "julia", "Lua.jl"))
     @test isdefined(Lua, :lua_pushfstring_Cstring)
     @test isdefined(Lua, :lua_pushfstring_Cint)
     @test isdefined(Lua, :lua_pushfstring_Cdouble)
+    @test isdefined(Lua, :lua_gc_Cint)
+    @test isdefined(Lua, :lua_gc_Cint_Cint)
+    @test isdefined(Lua, :lua_gc_Cint_Cint_Cint)
+    @test isdefined(Lua, :luaL_error_Cstring)
+
+    # Value macros (constants shimmed from lua.h)
+    @test isdefined(Lua, :LUA_OK)
+    @test isdefined(Lua, :LUA_ERRRUN)
+    @test isdefined(Lua, :LUA_TTABLE)
+    @test isdefined(Lua, :LUA_REGISTRYINDEX)
+    @test isdefined(Lua, :LUA_MULTRET)
+    @test isdefined(Lua, :LUA_GCCOLLECT)
 
     # Metadata
     @test haskey(Lua.METADATA, "llvm_version")

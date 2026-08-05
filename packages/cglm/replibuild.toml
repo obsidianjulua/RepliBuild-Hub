@@ -29,6 +29,13 @@ type = "shared"
 language = "c"
 shim_headers = ["cglm/call.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # cglm's library API is the glmc_* "call" functions — all real exported symbols,
 # recovered from DWARF. The glm_* API is header-only inline (not in the .so).
 # Types vec3/vec4/mat4 are float-array typedefs that decay to float* at the ABI.

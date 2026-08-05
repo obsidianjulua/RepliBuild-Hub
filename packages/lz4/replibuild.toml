@@ -13,7 +13,10 @@ exclude = ["tests", "programs", "cmake", "contrib", "doc", "examples", "ossfuzz"
 flags = ["-O2", "-fPIC"]
 
 [link]
-enable_lto = true
+# LTO off -> Tier 3 ccall for anything the slicer doesn't take. The
+# whole-module `Base.llvmcall` payload is scale-limited and duplicates
+# file-local statics (see cjson); sliced Tier 1 below is the supported path.
+enable_lto = false
 optimization_level = "2"
 
 [binary]
@@ -21,7 +24,20 @@ type = "shared"
 
 [wrap]
 language = "c"
-shim_headers = ["lz4.h", "lz4hc.h", "lz4frame.h"]
+# lz4 keeps its public headers under lib/, and the macro shim is generated in
+# the build cache rather than beside them — so a bare "lz4.h" has no sibling to
+# find and falls through to the system liblz4 (/usr/include/lz4.h here), baking
+# a foreign version's macro values in silently. The in-clone subpath resolves
+# against the absolute clone root and cannot collide. (Same class as blake3's
+# c/blake3.h; caught by verify_shim_headers.)
+shim_headers = ["lib/lz4.h", "lib/lz4hc.h", "lib/lz4frame.h"]
+
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
 
 # LZ4_COMPRESSBOUND is a pure arithmetic macro — shim it for Julia access
 [wrap.macros.LZ4_COMPRESSBOUND]

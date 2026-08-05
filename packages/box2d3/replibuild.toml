@@ -45,6 +45,13 @@ language = "c"
 # lives), so include it explicitly for the macro shims.
 shim_headers = ["box2d/box2d.h", "box2d/math_functions.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # ── Value macros (compiler-erased constants) ──
 # Box2D 3.x has no variadic functions (logging is callback-based, not printf),
 # so there is no [wrap.varargs] residue. The constants below are #define value

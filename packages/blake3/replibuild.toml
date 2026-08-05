@@ -61,6 +61,13 @@ language = "c"
 # and can never collide with a system header. (Diagnosed 2026-07-18.)
 shim_headers = ["c/blake3.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # ── Value macros (compiler-erased public constants) ──
 # blake3.h #defines these — DWARF can't see them, so they are declared here as
 # bare-expression shims (ret only, no args). BLAKE3_OUT_LEN in particular is the

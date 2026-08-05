@@ -3,15 +3,29 @@ name = "duktape"
 version = "2.7.0"
 root = "."
 
+# PREPARED-SOURCE mirror, not the main repo. svaarala/duktape ships no
+# duktape.c/duktape.h at all — they are emitted by tools/configure.py (a Python
+# code generator) from src-input/, which RepliBuild's source pipeline does not
+# run. duktape-releases carries the official prepared distribution per release
+# tag, so `src/` there is the same amalgamated TU the upstream tarball ships.
+# Same precedent as sqlite tracking an amalgamation mirror.
+#
+# Everything outside src/ is excluded: src-separate/ and src-noline/ are
+# alternate renderings of the SAME library (duplicate symbols if compiled
+# alongside), src-input/ is the generator's input, and the rest is tooling,
+# examples and the debugger client.
 [dependencies]
-duktape = { type = "git", url = "https://github.com/svaarala/duktape.git", tag = "v2.7.0", exclude = ["src-input", "tests", "extras", "examples", "doc", "config", "debugger", "polyfills", "tools", "licenses", "misc", "dukweb"] }
+duktape = { type = "git", url = "https://github.com/svaarala/duktape-releases.git", tag = "v2.7.0", exclude = ["src-input", "src-separate", "src-noline", "tools", "config", "debugger", "examples", "extras", "polyfills", "licenses"] }
 
 [compile]
 flags = ["-fPIC"]
 parallel = true
 
 [link]
-enable_lto = true
+# LTO off -> Tier 3 ccall for anything the slicer doesn't take. The
+# whole-module `Base.llvmcall` payload is scale-limited and duplicates
+# file-local statics (see cjson); sliced Tier 1 below is the supported path.
+enable_lto = false
 optimization_level = "2"
 
 [binary]
@@ -23,7 +37,17 @@ use_clang_jl = true
 style = "clang"
 language = "c"
 enabled = true
-shim_headers = ["duktape.h"]
+# In-clone subpath: the prepared header sits at src/duktape.h, and the macro
+# shim is generated in the build cache, so a bare "duktape.h" resolves to the
+# system-installed /usr/include/duktape.h instead (caught by verify_shim_headers).
+shim_headers = ["src/duktape.h"]
+
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
 
 # ── Context creation ──
 

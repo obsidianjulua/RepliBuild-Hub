@@ -29,6 +29,13 @@ type = "shared"
 language = "c"
 shim_headers = ["sqlite3.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # ── Variadic functions ──
 # sqlite3_mprintf(const char *fmt, ...) → char*
 # sqlite3_snprintf(int n, char *buf, const char *fmt, ...) → char*

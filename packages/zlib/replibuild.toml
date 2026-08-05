@@ -25,6 +25,13 @@ type = "shared"
 language = "c"
 shim_headers = ["zlib.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # Init macros append ZLIB_VERSION + sizeof(z_stream) to the real _-suffixed symbols
 [wrap.macros.deflateInit]
 ret = "int"
@@ -45,6 +52,112 @@ args = ["z_stream*", "int"]
 [wrap.macros.inflateBackInit]
 ret = "int"
 args = ["z_stream*", "int", "unsigned char*"]
+
+
+# ── Value macros (compiler-erased public constants) ──
+# zlib publishes its entire status/flush/level/strategy vocabulary as bare
+# #defines, so DWARF cannot see any of it and callers were left writing magic
+# numbers. Shimmed here as bare-expression macros. Asserting them against
+# zlib.h in test_deep.jl doubles as the shim-header canary: this box has a
+# system zlib, and a shim that resolved /usr/include/zlib.h instead of the
+# vendored 1.3.1 copy would show up as wrong constants and nothing else.
+
+[wrap.macros.Z_OK]
+ret = "int"
+
+[wrap.macros.Z_STREAM_END]
+ret = "int"
+
+[wrap.macros.Z_NEED_DICT]
+ret = "int"
+
+[wrap.macros.Z_ERRNO]
+ret = "int"
+
+[wrap.macros.Z_STREAM_ERROR]
+ret = "int"
+
+[wrap.macros.Z_DATA_ERROR]
+ret = "int"
+
+[wrap.macros.Z_MEM_ERROR]
+ret = "int"
+
+[wrap.macros.Z_BUF_ERROR]
+ret = "int"
+
+[wrap.macros.Z_VERSION_ERROR]
+ret = "int"
+
+[wrap.macros.Z_NO_FLUSH]
+ret = "int"
+
+[wrap.macros.Z_PARTIAL_FLUSH]
+ret = "int"
+
+[wrap.macros.Z_SYNC_FLUSH]
+ret = "int"
+
+[wrap.macros.Z_FULL_FLUSH]
+ret = "int"
+
+[wrap.macros.Z_FINISH]
+ret = "int"
+
+[wrap.macros.Z_BLOCK]
+ret = "int"
+
+[wrap.macros.Z_TREES]
+ret = "int"
+
+[wrap.macros.Z_NO_COMPRESSION]
+ret = "int"
+
+[wrap.macros.Z_BEST_SPEED]
+ret = "int"
+
+[wrap.macros.Z_BEST_COMPRESSION]
+ret = "int"
+
+[wrap.macros.Z_DEFAULT_COMPRESSION]
+ret = "int"
+
+[wrap.macros.Z_FILTERED]
+ret = "int"
+
+[wrap.macros.Z_HUFFMAN_ONLY]
+ret = "int"
+
+[wrap.macros.Z_RLE]
+ret = "int"
+
+[wrap.macros.Z_FIXED]
+ret = "int"
+
+[wrap.macros.Z_DEFAULT_STRATEGY]
+ret = "int"
+
+[wrap.macros.Z_BINARY]
+ret = "int"
+
+[wrap.macros.Z_TEXT]
+ret = "int"
+
+[wrap.macros.Z_UNKNOWN]
+ret = "int"
+
+[wrap.macros.Z_DEFLATED]
+ret = "int"
+
+[wrap.macros.MAX_WBITS]
+ret = "int"
+
+[wrap.macros.MAX_MEM_LEVEL]
+ret = "int"
+
+# ZLIB_VERSION is a string literal, not an int.
+[wrap.macros.ZLIB_VERSION]
+ret = "const char*"
 
 # gzprintf(gzFile file, const char *format, ...)
 # Each entry lists ONLY the variadic arg types (fixed args come from DWARF)

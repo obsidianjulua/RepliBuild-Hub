@@ -29,6 +29,13 @@ type = "shared"
 language = "c"
 shim_headers = ["cJSON.h"]
 
+# Per-function bitcode slicing (declarations-only slices bound to the .so).
+# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
+# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
+# output mode. Off by default upstream; on here so the Hub exercises it.
+[wrap.tier1]
+enable = true
+
 # cJSON_Version() is a function, not macro — no macros needed
 # cJSON_ArrayForEach is a for-loop macro, cannot be shimmed
 
@@ -40,6 +47,11 @@ shim_headers = ["cJSON.h"]
 cJSON_Print = "cJSON_free"
 cJSON_PrintUnformatted = "cJSON_free"
 cJSON_PrintBuffered = "cJSON_free"
+# Same ownership contract, easy to miss because it lives in cJSON_Utils.c:
+# it returns a cJSONUtils_strdup() buffer (cJSON's allocator) that the caller
+# must release. Without this the wrapper copied to a Julia String and leaked
+# the C buffer on every call.
+cJSONUtils_FindPointerFromObjectTo = "cJSON_free"
 
 [types]
 strictness = "warn"
