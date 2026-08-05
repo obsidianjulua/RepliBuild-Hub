@@ -1,0 +1,133 @@
+[project]
+name = "llamacpp"
+version = "b10286"
+root = "."
+
+# llama.cpp = libllama (src/) + ggml (ggml/src/), CPU backend only.
+#
+# Admission-gate notes (why this is a source-build candidate and not an ingest):
+#   * No configure script and no code generator on the path we build. The only
+#     .in templates in the repo are pkg-config files (llama.pc.in, ggml.pc.in)
+#     and common/build-info.cpp.in — none of them a header the core needs, and
+#     common/ is excluded anyway.
+#   * src/ and ggml/src/ pull in ZERO vendored deps (checked: no nlohmann,
+#     minja, or cpp-httplib includes anywhere under either tree). vendor/ is
+#     exclusively for common/ and tools/.
+#   * One uniform flag set works because the arch- and backend-specific TUs are
+#     all in their own directories and get excluded rather than re-flagged.
+[dependencies.llamacpp]
+type = "git"
+url = "https://github.com/ggml-org/llama.cpp.git"
+tag = "b10286"
+exclude = [
+    # ── Consumers, not the library ──
+    # (tests/, examples/, docs/ are already dropped by the resolver's walkdir filter)
+    "common/",          # CLI arg parsing + chat glue; needs the generated build-info.cpp
+    "tools/",
+    "app/",
+    "pocs/",
+    # vendor/cpp-httplib/httplib.cpp is the one compilable TU under vendor/.
+    # Nothing in src/ or ggml/src/ includes it (only tools/ does), but the
+    # resolver walks the whole tree, so without this it compiles in and drags
+    # the entire httplib::Server C++ surface into the DWARF the wrapper is
+    # generated from.
+    "vendor/",
+
+    # ── Non-CPU ggml backends (each needs its own SDK + per-target flags) ──
+    "ggml-cuda/",
+    "ggml-metal/",
+    "ggml-vulkan/",
+    "ggml-sycl/",
+    "ggml-opencl/",
+    "ggml-blas/",
+    "ggml-rpc/",
+    "ggml-cann/",
+    "ggml-hip/",
+    "ggml-musa/",
+    "ggml-webgpu/",
+    "ggml-zdnn/",
+    "ggml-zendnn/",
+    "ggml-hexagon/",
+    "ggml-openvino/",
+    "ggml-virtgpu/",
+    "ggml-et/",         # also the one backend with a real code generator (uberkernel .in files)
+
+    # ── Non-x86 CPU arch variants (intrinsics for other ISAs) ──
+    "arch/arm/",
+    "arch/loongarch/",
+    "arch/powerpc/",
+    "arch/riscv/",
+    "arch/s390/",
+    "arch/wasm/",
+    "kleidiai/",        # ARM
+    "spacemit/",        # RISC-V
+
+    # ── x86 TUs that need flags the single flag set can't carry ──
+    "amx/",             # needs -mamx-int8/-mamx-tile
+    "cpu-feats.cpp",    # runtime feature scoring; only built for GGML_BACKEND_DL variants
+
+    # NOTE: ggml-backend-dl.cpp must NOT be excluded. The name suggests it is
+    # gated on GGML_BACKEND_DL, but ggml-backend-reg.cpp calls dl_load_library
+    # / dl_get_sym / dl_error UNCONDITIONALLY (no GGML_BACKEND_DL guard appears
+    # in that file at all). Dropping it links a .so with three undefined
+    # symbols, which only surfaces when something links against it.
+]
+
+[compile]
+# -march=x86-64-v3: the SIMD level ggml's x86 path wants (AVX2 + FMA + F16C +
+# BMI2), applied uniformly instead of per-file. Verified against this box's
+# Ryzen 5 5600 (Zen 3 — full v3).
+# -fstandalone-debug: load-bearing, same reason as box2d. llama.h's public
+# "def" structs (llama_model_params, llama_context_params) are header-only
+# aggregates the user must fill; clang's default limited debug info emits them
+# as DW_AT_declaration-only stubs, which wrap to EMPTY Julia structs.
+# -DGGML_USE_CPU: makes ggml-backend-reg.cpp statically register the CPU
+# backend. Without it the registry is empty and every model load fails.
+# GGML_VERSION/GGML_COMMIT: ggml.c returns these straight out of
+# ggml_version()/ggml_commit() and CMake injects them as string defines
+# (ggml/CMakeLists.txt:409). Nothing declares them in a header, so without
+# these two ggml.c is the ONE TU in the tree that fails to compile.
+flags = [
+    "-O2", "-fPIC", "-std=c++17",
+    "-march=x86-64-v3",
+    "-fstandalone-debug",
+    "-DNDEBUG",
+    "-DGGML_USE_CPU",
+    "-D_GNU_SOURCE",
+    '-DGGML_VERSION="0.18.1"',
+    '-DGGML_COMMIT="b10286"',
+]
+parallel = true
+
+# The resolver auto-adds <clone>, <clone>/include and <clone>/src only. ggml
+# lives at a non-standard depth, so its three include roots are named here.
+# These are relative to the package dir because build() cd's there first.
+include_dirs = [
+    ".replibuild_cache/deps/llamacpp/ggml/include",
+    ".replibuild_cache/deps/llamacpp/ggml/src",
+    ".replibuild_cache/deps/llamacpp/ggml/src/ggml-cpu",
+]
+
+[link]
+# LTO off — C++ default, and the whole-module llvmcall payload is parked
+# anyway. Tier 2/3 for this one.
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m", "pthread", "dl"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# Both public headers are extern "C"; llama.h is the API proper, ggml.h carries
+# the tensor/backend surface llama.h's types are built on.
+shim_headers = ["llama.h", "ggml.h"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

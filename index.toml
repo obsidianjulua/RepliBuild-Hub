@@ -105,3 +105,9 @@ description = "Single-file audio playback/capture/synthesis library — no link-
 version = "0.11.25"
 language = "c"
 tags = ["audio", "playback", "capture", "dsp", "single-header"]
+
+[llamacpp]
+description = "LLM inference in C/C++ — the ggml runtime, GGUF loader, tokenizer and sampling API"
+version = "b10286"
+language = "cpp"
+tags = ["llm", "inference", "ml", "ggml", "gguf", "cpp"]
