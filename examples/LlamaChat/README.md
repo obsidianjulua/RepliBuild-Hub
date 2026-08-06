@@ -14,6 +14,16 @@ start!("qwen2.5-coder:1.5b-base")         # switch models
 chatrepl()                                # interactive
 ```
 
+Replies render as **markdown** in the terminal — fenced code blocks get syntax
+highlighting, lists and emphasis get formatted — via Julia's `Markdown` stdlib.
+It is on by default whenever output is a tty, off for pipes and files.
+
+```julia
+chat("show me a julia function")             # streams, then renders formatted
+chat("..."; markdown = false)                # raw text only
+md(r)                                        # render any Response after the fact
+```
+
 Or from a shell:
 
 ```console
@@ -99,6 +109,36 @@ package goes through `_is_eog`, which pins the conversion.
 multi-byte code points routinely split across two tokens. Streaming them
 straight to the terminal corrupts it. `_take_utf8!` holds a partial tail back
 until it completes.
+
+## Markdown vs. streaming
+
+These two want opposite things. Markdown has no meaning until a block is
+closed — a fence, a list, a table only has a shape once it ends — so it cannot
+be rendered incrementally. Streaming tokens is the whole feel of a chat REPL, so
+neither one gets dropped:
+
+1. tokens stream live as plain text, exactly as before;
+2. once the reply is complete, the lines it occupied are erased and reprinted
+   through the markdown renderer.
+
+The erase is `\e[nA` + `\e[0J`, so `n` has to be exactly right. Two things make
+that non-obvious, and both have tests:
+
+- **Soft wrap and wide characters.** `n` is not `count('\n')` — a long line
+  wraps to several terminal rows, and CJK/emoji take two columns each.
+  `_wrapped_lines` accounts for both.
+- **A trailing newline shifts the cursor.** The caller prints the reply plus one
+  newline. A reply that already ends in `\n` has advanced a line of its own, so
+  the cursor sits one row further down. Models end replies with `\n` constantly;
+  getting this wrong strands the first line of every such reply above the
+  re-render. That is `_redraw_up`.
+
+The redraw is skipped — leaving the raw text alone — when output is not a tty,
+or when the reply is taller than the window, because the top of it has already
+scrolled out of the region `\e[0J` can reach. A reply truncated at `max_tokens`
+is malformed markdown by construction (unterminated fence, half a table), so the
+renderer is wrapped in a fallback to raw text: a formatting problem must never
+cost a finished generation.
 
 ## Incremental KV reuse
 

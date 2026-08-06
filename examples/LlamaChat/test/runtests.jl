@@ -1,6 +1,7 @@
 using Test
 using LlamaChat
 using RepliBuild
+using Markdown
 
 const LC = LlamaChat
 
@@ -51,6 +52,67 @@ end
 
     p = UInt8[]
     @test LC._take_utf8!(p) == ""
+end
+
+@testset "terminal line accounting for the markdown redraw" begin
+    # The redraw erases exactly the lines the raw text occupied, so this count
+    # has to include soft wraps and double-width characters — an undercount
+    # leaves debris on screen, an overcount eats the line above.
+    @test LC._wrapped_lines("", 80) == 0
+    @test LC._wrapped_lines("abc", 80) == 1
+    @test LC._wrapped_lines("a\nb", 80) == 2
+    @test LC._wrapped_lines("a\nb\n", 80) == 2      # trailing newline ends line 2
+    @test LC._wrapped_lines(repeat("x", 80), 80) == 1
+    @test LC._wrapped_lines(repeat("x", 81), 80) == 2
+    @test LC._wrapped_lines(repeat("x", 160), 80) == 2
+    @test LC._wrapped_lines(repeat("日", 40), 80) == 1   # 2 columns each
+    @test LC._wrapped_lines(repeat("日", 41), 80) == 2
+    @test LC._wrapped_lines("hi", 0) == 2                # width clamps to 1: one char per line
+
+    # Distance the cursor travels back up. The caller prints the reply plus one
+    # newline; a reply that already ends in a newline sits one line further up.
+    @test LC._redraw_up("one line", 80) == 1
+    @test LC._redraw_up("one line\n", 80) == 2           # models end replies this way
+    @test LC._redraw_up("a\nb", 80) == 2
+    @test LC._redraw_up("a\nb\n", 80) == 3
+    @test LC._redraw_up("a\n\n", 80) == 3
+    @test LC._redraw_up(repeat("x", 81), 80) == 2        # soft wrap counts
+end
+
+@testset "markdown parsing and fallback" begin
+    m = md("# Title\n\nsome `code` here")
+    @test m isa Markdown.MD
+    @test occursin("Title", sprint(show, MIME"text/plain"(), m))
+
+    # A reply truncated at max_tokens is malformed by construction — an
+    # unterminated fence must never cost us the generation.
+    out = sprint(io -> LC._show_markdown(io, "text\n\n```julia\nx = 1"))
+    @test occursin("x = 1", out)
+    out2 = sprint(io -> LC._show_markdown(io, "| a | b |\n|---|"))
+    @test !isempty(out2)
+
+    # Non-tty: never emit cursor-movement escapes into a pipe or a file.
+    buf = IOBuffer()
+    @test LC._rerender_markdown(buf, "# hi") == false
+    @test isempty(take!(buf))
+end
+
+@testset "Response markdown display" begin
+    base = Response("**bold**", 1, 1, 0.1, 0.1, :eog, false)
+    @test base.markdown == false                     # 7-arg form still works
+    @test sprint(show, MIME"text/plain"(), base) == "**bold**"
+
+    rendered = Response("**bold**", 1, 1, 0.1, 0.1, :eog, false, true)
+    shown = sprint(show, MIME"text/plain"(), rendered)
+    @test shown != "**bold**"                        # went through the renderer
+    @test occursin("bold", shown)
+
+    # Streamed responses still show throughput, markdown or not — the text is
+    # already on screen.
+    streamed = Response("**bold**", 1, 1, 0.1, 0.1, :eog, true, true)
+    @test occursin("tok", sprint(show, MIME"text/plain"(), streamed))
+
+    @test md(rendered) isa Markdown.MD
 end
 
 @testset "model resolution" begin

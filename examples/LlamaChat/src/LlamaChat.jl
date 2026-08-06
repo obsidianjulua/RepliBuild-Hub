@@ -38,10 +38,15 @@ chat("now make it about DWARF")            # remembers the turn before
 start!("qwen2.5-coder:1.5b-base")          # switch models
 chatrepl()                                 # interactive
 ```
+
+Replies stream as plain text and are then reprinted as rendered markdown when
+output is a terminal — see the "Terminal markdown" section below for why those
+two are reconciled by a redraw rather than done at once.
 """
 module LlamaChat
 
 import JSON
+import Markdown
 
 # ── ABI layer: the generated wrapper ─────────────────────────────────────────
 # Resolves its shared library sibling-first, so the copy in lib/ is
@@ -60,7 +65,7 @@ include(joinpath(@__DIR__, "..", "lib", "Llamacpp.jl"))
 import .Llamacpp
 const L = Llamacpp
 
-export chat, chatrepl, start!, reset!, close!, ChatSession, Response,
+export chat, chatrepl, start!, reset!, close!, md, ChatSession, Response,
        list_models, resolve_model, run_demo
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +225,88 @@ function _ensure_backend(verbose::Bool)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Terminal markdown
+#
+# Markdown cannot be rendered incrementally — a fenced block, list or table only
+# has a shape once it is closed — so it is fundamentally at odds with streaming
+# tokens. Rather than give up one for the other, a streamed turn prints raw text
+# live and then, if it still occupies the visible screen, erases those lines and
+# reprints them formatted. When the reply scrolled past the top of the terminal
+# the erase can't reach it, so the raw text is simply left in place.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_istty(io::IO) = io isa Base.TTY
+
+# Terminal lines a string occupies at width `w`, counting soft wraps. Wide (CJK,
+# emoji) characters take two columns, which is why this is not `count('\n')`.
+function _wrapped_lines(s::AbstractString, w::Integer)
+    w = max(Int(w), 1)
+    lines, col = 0, 0
+    for c in s
+        if c == '\n'
+            lines += 1; col = 0
+        else
+            cw = max(textwidth(c), 0)
+            if col + cw > w
+                lines += 1; col = cw
+            else
+                col += cw
+            end
+        end
+    end
+    return lines + (col > 0 ? 1 : 0)
+end
+
+# Julia's markdown backend can throw on pathological input (and a reply cut off
+# at max_tokens is pathological by construction — an unterminated fence, a
+# half-written table). Falling back to the raw text is always acceptable;
+# throwing away a finished generation is not.
+function _show_markdown(io::IO, text::AbstractString)
+    try
+        show(io, MIME"text/plain"(), md(text))
+    catch e
+        e isa InterruptException && rethrow()
+        print(io, text)
+    end
+    return nothing
+end
+
+# How far up the cursor must travel to reach the reply's first line, given that
+# the caller printed `raw` and then exactly one newline.
+#
+# A reply that does NOT end in a newline leaves the cursor mid-way along its
+# last line, so the trailing println lands it n lines below the start. A reply
+# that DOES end in a newline has already advanced a line of its own, putting the
+# cursor one further down — and models end replies with "\n" all the time, so
+# getting this wrong leaves the first line of every such reply stranded above
+# the re-render.
+_redraw_up(raw::AbstractString, w::Integer) =
+    _wrapped_lines(raw, w) + (endswith(raw, '\n') ? 1 : 0)
+
+"""
+Replace `raw`, just streamed to `io`, with its markdown rendering. Expects the
+cursor one line below the reply (i.e. the caller printed exactly one newline
+after it).
+
+Returns false without touching the screen when the redraw would be unsafe —
+not a tty, or the text is taller than the window, in which case part of it has
+already scrolled out of the erasable region.
+"""
+function _rerender_markdown(io::IO, raw::AbstractString)
+    _istty(io) || return false
+    isempty(strip(raw)) && return false
+    h, w = displaysize(io)
+    up = _redraw_up(raw, w)
+    (up == 0 || up + 1 >= h) && return false
+    print(io, "\e[$(up)A")                 # onto the reply's first line
+    print(io, "\r\e[0J")                   # column 0, erase everything below
+    _show_markdown(io, raw)
+    println(io)
+    flush(io)
+    return true
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Response — what chat() hands back
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -231,7 +318,12 @@ struct Response
     t_gen::Float64
     stop::Symbol           # :eog | :max_tokens | :ctx_full | :decode_error
     streamed::Bool
+    markdown::Bool         # was it rendered as markdown (or should it be)
 end
+
+# Markdown defaults off, so older 7-arg construction keeps working.
+Response(text, np, ng, tp, tg, stop, streamed) =
+    Response(text, np, ng, tp, tg, stop, streamed, false)
 
 Base.String(r::Response)          = r.text
 Base.print(io::IO, r::Response)   = print(io, r.text)
@@ -240,6 +332,17 @@ Base.length(r::Response)          = length(r.text)
 Base.isempty(r::Response)         = isempty(r.text)
 Base.:(*)(a::AbstractString, r::Response) = a * r.text
 Base.:(*)(r::Response, a::AbstractString) = r.text * a
+
+"""
+    md(x) -> Markdown.MD
+
+Parse `x` (a `Response` or a string) as Markdown. The result renders with
+Julia's terminal markdown backend — code blocks, emphasis, lists, tables — so
+`md(r)` at the REPL displays a formatted reply, and `md(r)` is also the escape
+hatch when a turn was streamed raw and you want it formatted after the fact.
+"""
+md(s::AbstractString) = Markdown.parse(s)
+md(r::Response)       = Markdown.parse(r.text)
 
 function _stats_line(r::Response)
     pps = r.t_prompt > 0 ? r.n_prompt / r.t_prompt : 0.0
@@ -250,10 +353,13 @@ function _stats_line(r::Response)
 end
 
 # When the text already streamed to the terminal, echoing it again as the REPL
-# return value is just noise — show the throughput instead.
+# return value is just noise — show the throughput instead. A response that was
+# NOT streamed still owes the caller its content, formatted if it asked for it.
 function Base.show(io::IO, ::MIME"text/plain", r::Response)
     if r.streamed
         printstyled(io, _stats_line(r); color = :light_black)
+    elseif r.markdown
+        _show_markdown(io, r.text)
     else
         print(io, r.text)
     end
@@ -617,15 +723,21 @@ conversation, so follow-up turns see what came before; `reset!` clears it.
 
   `max_tokens` cap on generated tokens (default 512)
   `stream`     print tokens as they arrive (default true)
+  `markdown`   render the finished reply as markdown (default: true on a tty)
   `io`         where to stream (default stdout)
 
 The reply is `r.text`. When streamed, the REPL shows a throughput line instead
-of repeating the text.
+of repeating the text; `md(r)` re-renders it formatted at any time.
+
+With both `stream` and `markdown` on, tokens appear live as plain text and the
+reply is reprinted formatted once it is complete — see `_rerender_markdown` for
+when that redraw is skipped.
 """
 chat(prompt::AbstractString; kwargs...) = chat(session(), prompt; kwargs...)
 
 function chat(s::ChatSession, prompt::AbstractString;
-              max_tokens::Integer = 512, stream::Bool = true, io::IO = stdout)
+              max_tokens::Integer = 512, stream::Bool = true, io::IO = stdout,
+              markdown::Bool = _istty(io))   # must follow io — defaults see only earlier kwargs
     s.isopen || error("session is closed")
 
     push!(s.history, "user" => String(prompt))
@@ -670,7 +782,13 @@ function chat(s::ChatSession, prompt::AbstractString;
         rethrow()
     end
     t_gen = (time_ns() - t1) / 1e9
-    stream && (println(io); flush(io))
+    if stream
+        println(io)
+        # The redraw needs the cursor one line below the reply, which the
+        # println above guarantees.
+        markdown && _rerender_markdown(io, text)
+        flush(io)
+    end
 
     push!(s.history, "assistant" => text)
     # The generated bytes sit immediately after the assistant header, so the KV
@@ -679,7 +797,7 @@ function chat(s::ChatSession, prompt::AbstractString;
     # of the next turn's delta, which keeps cache and transcript in step.
     append!(s.decoded, codeunits(text))
 
-    return Response(text, length(toks), ngen, t_prompt, t_gen, stop, stream)
+    return Response(text, length(toks), ngen, t_prompt, t_gen, stop, stream, markdown)
 end
 
 reset!() = reset!(session())
@@ -689,10 +807,11 @@ close!() = (s = _SESSION[]; s === nothing ? nothing : close!(s))
     chatrepl([session])
 
 Interactive loop. Commands: `/reset`, `/system <text>`, `/model <name>`,
-`/stats`, `/exit`.
+`/md`, `/stats`, `/exit`.
 """
 function chatrepl(s::ChatSession = session())
-    println("$(s.name) — /reset /system <text> /model <name> /stats /exit")
+    usemd = _istty(stdout)
+    println("$(s.name) — /reset /system <text> /model <name> /md /stats /exit")
     while true
         print("\n"); printstyled("> "; bold = true); flush(stdout)
         # eof() before readline(), not after: on a tty it blocks until a byte is
@@ -719,9 +838,13 @@ function chatrepl(s::ChatSession = session())
                 close!(s)
                 s = start!(String(rest))
                 println("(now: $(s.name))")
+            elseif verb == "/md"
+                usemd = !usemd
+                println("(markdown rendering $(usemd ? "on" : "off"))")
             elseif verb == "/stats"
                 println("$(s.name)  $(s.n_past)/$(s.n_ctx) tokens  " *
-                        "$(length(s.history)) messages  $(length(s.decoded)) transcript bytes")
+                        "$(length(s.history)) messages  $(length(s.decoded)) transcript bytes  " *
+                        "markdown=$(usemd)")
             else
                 println("unknown command: $verb")
             end
@@ -730,7 +853,7 @@ function chatrepl(s::ChatSession = session())
 
         print("\n")
         try
-            r = chat(s, line)
+            r = chat(s, line; markdown = usemd)
             printstyled(_stats_line(r), "\n"; color = :light_black)
         catch e
             e isa InterruptException && rethrow()

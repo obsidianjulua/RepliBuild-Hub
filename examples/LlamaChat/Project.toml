@@ -6,6 +6,7 @@ version = "0.1.0"
 [deps]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Markdown = "d6f4376e-aef5-505a-96c1-9c027394607a"
 RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
 
 [extras]
