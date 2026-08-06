@@ -1,0 +1,144 @@
+# LlamaChat.jl
+
+A multi-turn chat app built on the RepliBuild-generated **llama.cpp b10286**
+wrapper — the reference example for **driving a wrapped C library whose entire
+entry surface crosses by value**, and the counterpart to `BoxWorld` (which
+covers the C++ object-model side).
+
+```julia
+using LlamaChat
+
+chat("write a haiku about pointers")
+chat("now make it about DWARF")           # remembers the turn before
+start!("qwen2.5-coder:1.5b-base")         # switch models
+chatrepl()                                # interactive
+```
+
+Or from a shell:
+
+```console
+$ julia --project=examples/LlamaChat examples/LlamaChat/chat.jl        # REPL
+$ julia --project=examples/LlamaChat examples/LlamaChat/chat.jl "hi"   # one-shot
+```
+
+Or just:
+
+```julia
+julia> LlamaChat.run_demo()
+```
+
+Models are named the way ollama names them — `"qwen3-coder"`, `"gemma4:e2b"`,
+`"igorls/gemma-4-E4B-it-heretic-GGUF:latest"` — and resolved through the local
+manifest store (`$OLLAMA_MODELS`, default `/var/lib/ollama`). A path to a
+`.gguf` works too. `list_models()` shows what is on the box.
+
+The default is **qwen3-coder** (30B-A3B): a MoE, so only ~3B parameters are
+active per token, which makes an 18 GB model *faster* on CPU than a dense 8 GB
+one. Measured on a Ryzen 5 5600 (6 threads, CPU-only): ~43 tok/s prompt,
+~20 tok/s generation, 35 s one-time load. Override with `$LLAMACPP_CHAT_MODEL`.
+
+## Layout
+
+```
+LlamaChat/
+├── Project.toml         # depends on RepliBuild (the wrapper dispatches through its JIT)
+├── lib/                 # RepliBuild build + wrap output — the ABI layer, never edited
+│   ├── Llamacpp.jl
+│   ├── libllamacpp.so
+│   ├── compilation_metadata.json
+│   └── thunk_manifest.json
+├── src/LlamaChat.jl     # the ergonomic layer — sessions, templating, KV bookkeeping
+├── chat.jl              # thin launcher for shell use
+└── test/runtests.jl
+```
+
+The package precompiles normally (~9 s for the 3.9 MB wrapper); the JIT engine
+initializes at load time from the wrapper's `__init__`.
+
+## What it exercises
+
+`packages/llamacpp/test_deep.jl` pins the ABI against a native C oracle. This
+package is the other half: it drives the same surface the way an application
+does, where a broken crossing is *legible* — garbage text instead of a
+plausible float vector.
+
+- **MEMORY-class structs returned and passed by value** — `llama_model_params`
+  (72 B), `llama_context_params` (160 B), `llama_batch`,
+  `llama_sampler_chain_params`. Every one is both a return value and an
+  argument.
+- **An array of C structs built on the Julia side** — `llama_chat_message[]`,
+  with the role/content byte buffers kept alive across the call.
+- **Out-params into plain Julia arrays** — `llama_tokenize`,
+  `llama_token_to_piece`, both with the negative-return "your buffer was too
+  small, here is the size" protocol.
+- **Cstring returns** — `llama_model_chat_template`.
+- **Tier-2 MLIR-JIT dispatch** — `llama_model_load_from_file`,
+  `llama_init_from_model`.
+
+## Three traps this package documents
+
+Each of these is invisible on the happy path, so each has a test.
+
+**1. `import` the wrapper, never `using` it.** A wrapper generated from C++
+DWARF exports thousands of names harvested from every TU in the debug info,
+libstdc++ included. llamacpp exports `error` — from `codecvt_base::result.error`
+— so `using .Llamacpp` turns a bare `error("...")` into an ambiguous binding and
+*every failure path in the file* dies with `UndefVarError: error not defined`
+instead of raising. Nothing goes wrong until something goes wrong. Import the
+module, go through `L.`.
+
+**2. Name collisions pick the tier for you.** `llama_vocab_is_eog` is emitted
+twice: a Tier-3 ccall `(vocab, ::Int32)` and a Tier-2 JIT thunk `(this,
+::Integer)` for the C++ member function of the same name. `Tuple{Any,Int32}` is
+strictly more specific, so an `Int32` token reaches the ccall — but a plain
+`Int`, Julia's default literal type, silently routes through the JIT and drags
+in a `libJLCS.so` dependency the ccall path does not need. Every token in this
+package goes through `_is_eog`, which pins the conversion.
+
+**3. A token is not a character.** `llama_token_to_piece` returns bytes, and
+multi-byte code points routinely split across two tokens. Streaming them
+straight to the terminal corrupts it. `_take_utf8!` holds a partial tail back
+until it completes.
+
+## Incremental KV reuse
+
+The session keeps `s.decoded` — the exact transcript bytes backing the KV
+cache. Each turn re-renders the whole conversation through the chat template,
+then feeds the model only the byte-suffix it has not seen. The generated text is
+appended to `s.decoded` immediately after the assistant header, so cache and
+transcript stay in step; the closing `<|im_end|>` is sampled but deliberately
+not decoded, arriving instead as part of the next turn's delta.
+
+If a template re-renders earlier turns (some do), the prefix check fails and the
+cache is rebuilt from scratch rather than extended onto a transcript the model
+never saw. `test/runtests.jl` asserts both the prefix invariant and that turn 2
+costs far fewer prompt tokens than a full re-decode would — that assertion is
+what catches a regression in the reuse path.
+
+## Building the wrapper
+
+`lib/` is RepliBuild output, not vendored source. With RepliBuild installed:
+
+```julia
+using RepliBuild
+RepliBuild.build("packages/llamacpp/replibuild.toml")   # → libllamacpp.so + compilation_metadata.json
+RepliBuild.wrap("packages/llamacpp/replibuild.toml")    # → Llamacpp.jl
+```
+
+then copy the four artifacts into `lib/`. A cold rebuild is a 200 MB clone,
+195 TUs and a 252 MB DWARF dump — roughly 19 minutes — so it is deliberately not
+a routine step.
+
+## Setup
+
+`RepliBuild` is a local path dependency:
+
+```julia
+julia> using Pkg
+julia> Pkg.develop(path="/path/to/RepliBuild.jl")
+julia> Pkg.test()
+```
+
+Tests pick the smallest generative model in the local ollama store (embedding
+models are skipped) and warn-and-skip the live half entirely if none is present.
+Override with `$LLAMACHAT_TEST_MODEL`.
