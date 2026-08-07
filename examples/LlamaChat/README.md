@@ -45,7 +45,14 @@ manifest store (`$OLLAMA_MODELS`, default `/var/lib/ollama`). A path to a
 The default is **qwen3-coder** (30B-A3B): a MoE, so only ~3B parameters are
 active per token, which makes an 18 GB model *faster* on CPU than a dense 8 GB
 one. Measured on a Ryzen 5 5600 (6 threads, CPU-only): ~43 tok/s prompt,
-~20 tok/s generation, 35 s one-time load. Override with `$LLAMACPP_CHAT_MODEL`.
+~20 tok/s generation, 35 s one-time load. Override with `$LLAMACPP_CHAT_MODEL`;
+`default_model()` reports what bare `chat("...")` will open.
+
+Both environment variables are read when they are used, not when the package is
+loaded, so setting one mid-session takes effect on the next `start!`. (They were
+`const`s initialised from `ENV` at module scope, which Julia evaluates during
+*precompilation* and freezes into the `.ji` — so `$LLAMACPP_CHAT_MODEL` silently
+did nothing for anyone whose first `using LlamaChat` came before they set it.)
 
 ## Layout
 
@@ -90,12 +97,19 @@ plausible float vector.
 Each of these is invisible on the happy path, so each has a test.
 
 **1. `import` the wrapper, never `using` it.** A wrapper generated from C++
-DWARF exports thousands of names harvested from every TU in the debug info,
-libstdc++ included. llamacpp exports `error` — from `codecvt_base::result.error`
-— so `using .Llamacpp` turns a bare `error("...")` into an ambiguous binding and
-*every failure path in the file* dies with `UndefVarError: error not defined`
-instead of raising. Nothing goes wrong until something goes wrong. Import the
-module, go through `L.`.
+DWARF takes a name from every symbol that reached the debug info, libstdc++
+included — this one defines 6,527. Import the module and go through `L.`.
+
+This was a correctness trap before it was a hygiene one, and the fix is worth
+knowing about: llamacpp defines `error` (from `codecvt_base::result.error`) and
+used to *export* it, so `using .Llamacpp` turned a bare `error("...")` in the
+caller into an ambiguous binding and every failure path in that file raised
+`UndefVarError: error not defined` instead of its message — invisible until
+something went wrong, because the happy path never touches it. Debugging that
+here is what prompted RepliBuild to withhold Base/Core-colliding names from
+`export` (they stay defined and reachable as `L.error`; the wrapper carries a
+banner naming them — `all`, `error`, `stat`, `symlink`). `using` is no longer
+unsafe, just unwise at this scale.
 
 **2. Name collisions pick the tier for you.** `llama_vocab_is_eog` is emitted
 twice: a Tier-3 ccall `(vocab, ::Int32)` and a Tier-2 JIT thunk `(this,
@@ -114,31 +128,48 @@ until it completes.
 
 These two want opposite things. Markdown has no meaning until a block is
 closed — a fence, a list, a table only has a shape once it ends — so it cannot
-be rendered incrementally. Streaming tokens is the whole feel of a chat REPL, so
-neither one gets dropped:
+be rendered token by token. Streaming is the whole feel of a chat REPL, so
+neither gets dropped: text streams live, and **each block is reprinted formatted
+the moment it closes**.
 
-1. tokens stream live as plain text, exactly as before;
-2. once the reply is complete, the lines it occupied are erased and reprinted
-   through the markdown renderer.
+A block closes on a blank line, or on a closing code fence. Both are cheap to
+spot one line at a time, which is all a token stream gives you. The redraw is
+`\e[nA` + `\e[0J` over just that block's rows.
 
-The erase is `\e[nA` + `\e[0J`, so `n` has to be exactly right. Two things make
-that non-obvious, and both have tests:
+Per *block* rather than per reply, because `\e[0J` can only erase what is still
+on screen. The first version redrew the whole reply once at the end, which meant
+any reply taller than the window stayed raw forever — its top had already
+scrolled into scrollback. That is most answers of substance: a 47-row reply
+needed a 49-row terminal. Blocks are individually short, so doing it per block
+removes the height limit instead of working around it, and formats sooner
+besides — a code fence is highlighted as soon as it ends, not after the last
+token.
+
+Four things make this less obvious than it looks, and each has a test:
 
 - **Soft wrap and wide characters.** `n` is not `count('\n')` — a long line
   wraps to several terminal rows, and CJK/emoji take two columns each.
   `_wrapped_lines` accounts for both.
-- **A trailing newline shifts the cursor.** The caller prints the reply plus one
-  newline. A reply that already ends in `\n` has advanced a line of its own, so
-  the cursor sits one row further down. Models end replies with `\n` constantly;
-  getting this wrong strands the first line of every such reply above the
-  re-render. That is `_redraw_up`.
+- **Flush before the partial line prints.** A block frequently closes in the
+  middle of a token. If the whole chunk were printed first, the cursor would be
+  neither at column 0 nor `n` rows down, and `\e[0J` would eat the text after
+  the block. `_emit!` prints line by line for exactly this reason.
+- **Blank lines inside a block.** A blank line inside a fence does not close it,
+  and blank lines are *interior* to an indented code block — closing on one
+  would split it and the second half would stop being code.
+- **Token boundaries are arbitrary.** Segmentation must not depend on where the
+  model split its output; `_segment` drives the same text one byte at a time to
+  prove it.
 
-The redraw is skipped — leaving the raw text alone — when output is not a tty,
-or when the reply is taller than the window, because the top of it has already
-scrolled out of the region `\e[0J` can reach. A reply truncated at `max_tokens`
-is malformed markdown by construction (unterminated fence, half a table), so the
-renderer is wrapped in a fallback to raw text: a formatting problem must never
-cost a finished generation.
+A block is left raw when output is not a tty, or when that single block is
+taller than the window. A reply truncated at `max_tokens` is malformed markdown
+by construction (unterminated fence, half a table), so the renderer is wrapped
+in a fallback to raw text: a formatting problem must never cost a finished
+generation.
+
+Note that a model writing literal `•` characters instead of `-` list markers is
+emitting paragraph text, not a list, and renders as one — that is the model's
+choice, not the renderer's.
 
 ## Incremental KV reuse
 

@@ -68,15 +68,173 @@ end
     @test LC._wrapped_lines(repeat("日", 40), 80) == 1   # 2 columns each
     @test LC._wrapped_lines(repeat("日", 41), 80) == 2
     @test LC._wrapped_lines("hi", 0) == 2                # width clamps to 1: one char per line
+end
 
-    # Distance the cursor travels back up. The caller prints the reply plus one
-    # newline; a reply that already ends in a newline sits one line further up.
-    @test LC._redraw_up("one line", 80) == 1
-    @test LC._redraw_up("one line\n", 80) == 2           # models end replies this way
-    @test LC._redraw_up("a\nb", 80) == 2
-    @test LC._redraw_up("a\nb\n", 80) == 3
-    @test LC._redraw_up("a\n\n", 80) == 3
-    @test LC._redraw_up(repeat("x", 81), 80) == 2        # soft wrap counts
+@testset "markdown block segmentation" begin
+    # A block is renderable the moment it is unambiguously closed: a blank line
+    # outside a fence, or a closing fence. Everything here is about not closing
+    # one early, because a half-block renders as the wrong thing entirely.
+    @test LC._segment("para one\n\npara two\n") == ["para one\n\n", "para two\n"]
+
+    # A blank line INSIDE a fence must not split it — this is the case that
+    # turns a code block into two paragraphs of source.
+    fenced = "```julia\nf(x) = 1\n\ng(x) = 2\n```\n"
+    @test LC._segment(fenced) == [fenced]
+
+    # A fence closes its block immediately, without waiting for a blank line:
+    # syntax highlighting is the whole reason to render early.
+    @test LC._segment("```\ncode\n```\ntext after\n") ==
+          ["```\ncode\n```\n", "text after\n"]
+
+    # "```julia" carries an info string, so it opens rather than closes.
+    @test length(LC._segment("````\n```julia\nnested\n```\n````\n")) == 1
+
+    # Blank lines are interior to an INDENTED code block; closing on one would
+    # split it and the second half would stop being code. The consequence is
+    # that the run stays open until a blank line arrives with the code already
+    # behind us, so the code and the prose after it render as one block — which
+    # parses to exactly the same thing, just later and in one go.
+    indented = "    line one\n\n    line two\n\nprose\n"
+    @test LC._segment(indented) == [indented]
+    @test LC._segment(indented * "\nmore\n") == [indented * "\n", "more\n"]
+
+    # Headings and lists ride on the blank-line rule.
+    @test LC._segment("# H\n\n- a\n- b\n\n") == ["# H\n\n", "- a\n- b\n\n"]
+
+    # A trailing block with no closing blank line still gets flushed.
+    @test LC._segment("only a paragraph") == ["only a paragraph\n"]
+    # ...and an unterminated fence (a reply cut off at max_tokens) comes out
+    # whole rather than being dropped.
+    @test LC._segment("```julia\nx = 1") == ["```julia\nx = 1\n"]
+
+    @test isempty(LC._segment(""))
+
+    # Tokens do not respect line boundaries. Segmentation must not depend on
+    # where the model happened to split, so drive the same text one byte at a
+    # time — including multi-byte characters, which must not be cut mid-point.
+    doc = "# Título\n\nprose 日本語\n\n```julia\nx = 1\n```\n\ntail\n"
+    whole = LC._segment(doc)
+    for n in (1, 2, 3, 7, 64)
+        @test LC._segment(doc; chunk = n) == whole
+    end
+    @test join(whole) == doc
+end
+
+# A terminal just far enough along to prove the cursor math: an undercount
+# leaves debris on screen and an overcount eats the line above, and neither is
+# visible in the escape sequence itself — only in what the screen ends up
+# holding. Handles what the renderer emits: text, \n, \e[<n>A, \r, \e[0J.
+function screen(out::AbstractString; w = 80, h = 40)
+    rows = [Char[]]                      # per-row Chars: the renderer emits ≡ and •
+    r, c = 1, 1
+    ensure(n) = while length(rows) < n; push!(rows, Char[]); end
+    put(ch) = begin
+        ensure(r)
+        row = rows[r]
+        while length(row) < c - 1; push!(row, ' '); end
+        length(row) >= c ? (row[c] = ch) : push!(row, ch)
+        c += 1
+        c > w && (r += 1; c = 1; ensure(r))
+    end
+    i = firstindex(out)
+    while i <= lastindex(out)
+        ch = out[i]
+        if ch == '\e' && i < lastindex(out) && out[nextind(out, i)] == '['
+            j = nextind(out, i, 2)
+            while j <= lastindex(out) && !isletter(out[j]); j = nextind(out, j); end
+            body, verb = out[nextind(out, i, 2):prevind(out, j)], out[j]
+            if verb == 'A'
+                r = max(1, r - (isempty(body) ? 1 : parse(Int, body)))
+            elseif verb == 'J' && body in ("", "0")
+                ensure(r)
+                length(rows[r]) >= c && deleteat!(rows[r], c:length(rows[r]))
+                length(rows) > r && deleteat!(rows, (r+1):length(rows))
+            end
+            i = nextind(out, j); continue
+        elseif ch == '\n'
+            r += 1; c = 1; ensure(r)
+        elseif ch == '\r'
+            c = 1
+        else
+            put(ch)
+        end
+        i = nextind(out, i)
+    end
+    return rstrip(join((rstrip(String(row)) for row in rows), "\n"))
+end
+
+@testset "block rendering replaces exactly its own rows" begin
+    # Sanity-check the simulator itself before trusting it as an oracle.
+    @test screen("abc") == "abc"
+    @test screen("one\ntwo\n") == "one\ntwo"
+    @test screen("one\ntwo\n\e[2A\rX") == "Xne\ntwo"
+    @test screen("one\ntwo\n\e[2A\r\e[0J") == ""
+    @test screen("keep\none\ntwo\n\e[2A\r\e[0Jnew\n") == "keep\nnew"
+
+    render(doc; w = 80, h = 40, chunk = typemax(Int)) = begin
+        buf = IOBuffer()
+        io  = IOContext(buf, :displaysize => (h, w), :color => false)
+        sk  = LC._MDSink(io; render = true)
+        i = firstindex(doc)
+        while i <= lastindex(doc)
+            j = thisind(doc, min(i + chunk - 1, lastindex(doc)))
+            LC._emit!(sk, SubString(doc, i, j)); i = nextind(doc, j)
+        end
+        LC._finish!(sk)
+        screen(String(take!(buf)); w = w, h = h)
+    end
+
+    # Raw markdown must not survive: the source line is gone, the rendered
+    # heading is there. Debris from a short redraw shows up as the '#' still
+    # being on screen.
+    out = render("# Title\n\nsome prose\n")
+    @test !occursin("# Title", out)
+    @test occursin("Title", out)
+    @test occursin("≡", out)                      # heading rule
+    @test occursin("some prose", out)
+
+    # The line ABOVE the reply must survive — an overcount eats it.
+    out = render("para\n\n")
+    sk_out = let buf = IOBuffer()
+        io = IOContext(buf, :displaysize => (40, 80), :color => false)
+        print(io, "PROMPT LINE\n")
+        sk = LC._MDSink(io; render = true)
+        LC._emit!(sk, "para\n\n"); LC._finish!(sk)
+        screen(String(take!(buf)))
+    end
+    @test startswith(sk_out, "PROMPT LINE")
+    @test occursin("para", sk_out)
+
+    # Several blocks in sequence: each redraw must land on its own rows, so
+    # nothing earlier is clobbered and nothing raw is left behind.
+    doc = "# H\n\nfirst para\n\n- a\n- b\n\nlast para\n"
+    out = render(doc)
+    for want in ("H", "first para", "a", "b", "last para")
+        @test occursin(want, out)
+    end
+    @test !occursin("# H", out)
+    @test !occursin("- a", out)
+    # ...and the order is preserved.
+    @test findfirst("first para", out).start < findfirst("last para", out).start
+
+    # Independent of how the stream was chopped.
+    @test render(doc; chunk = 1) == out
+    @test render(doc; chunk = 5) == out
+
+    # A block taller than the window is left raw rather than half-erased: its
+    # top has already scrolled past what \e[0J can reach.
+    tall = join(("line $i" for i in 1:30), "\n") * "\n\n"
+    out = render(tall; h = 10)
+    @test occursin("line 1", out) && occursin("line 30", out)
+
+    # Not a tty (render = false) must emit no escapes at all — a pipe or a file
+    # gets plain text.
+    buf = IOBuffer()
+    sk = LC._MDSink(buf; render = false)
+    LC._emit!(sk, "# Title\n\nprose\n"); LC._finish!(sk)
+    plain = String(take!(buf))
+    @test !occursin('\e', plain)
+    @test plain == "# Title\n\nprose\n"
 end
 
 @testset "markdown parsing and fallback" begin
@@ -91,10 +249,14 @@ end
     out2 = sprint(io -> LC._show_markdown(io, "| a | b |\n|---|"))
     @test !isempty(out2)
 
-    # Non-tty: never emit cursor-movement escapes into a pipe or a file.
+    # Non-tty: never emit cursor-movement escapes into a pipe or a file. The
+    # sink's `render` defaults to off, so a plain IO passes text straight
+    # through — the block redraw is opt-in, not opt-out.
     buf = IOBuffer()
-    @test LC._rerender_markdown(buf, "# hi") == false
-    @test isempty(take!(buf))
+    sk = LC._MDSink(buf)
+    LC._emit!(sk, "# hi\n\nthere\n")
+    LC._finish!(sk)
+    @test String(take!(buf)) == "# hi\n\nthere\n"
 end
 
 @testset "Response markdown display" begin
@@ -120,6 +282,51 @@ end
     @test all(sz -> sz > 0, last.(LC.list_models()))
     @test LC.resolve_model(@__FILE__) == @__FILE__      # a path passes through
     @test_throws ErrorException LC.resolve_model("definitely-not-a-model:v0")
+end
+
+@testset "env overrides are read when used, not baked at precompile" begin
+    # These were `const X = get(ENV, ...)` at module scope. Julia evaluates that
+    # during PRECOMPILATION and freezes the result into the .ji, so the
+    # documented overrides did nothing once the package had been compiled once —
+    # silently: you got the default model and a perfectly good answer from the
+    # wrong 17 GB file. Setting the variable inside this process and observing
+    # the accessor is exactly the case that used to fail.
+    withenv("LLAMACPP_CHAT_MODEL" => "sentinel-model:v0") do
+        @test LC.default_model() == "sentinel-model:v0"
+    end
+    withenv("LLAMACPP_CHAT_MODEL" => nothing) do
+        @test LC.default_model() == "qwen3-coder"        # documented default
+    end
+
+    withenv("OLLAMA_MODELS" => "/nonexistent-store") do
+        @test LC.ollama_root() == "/nonexistent-store"
+        # ...and it is actually consulted, not just readable: no manifests there.
+        @test isempty(LC.list_models())
+    end
+    withenv("OLLAMA_MODELS" => nothing) do
+        @test LC.ollama_root() == "/var/lib/ollama"
+    end
+    # Restored afterwards — the live testsets below resolve real models.
+    @test !isempty(LC.list_models())
+end
+
+@testset "the wrapper withholds Base-shadowing names from export" begin
+    # llamacpp defines `error` (codecvt_base::result.error), `all`, `stat` and
+    # `symlink`. Exporting them made `using .Llamacpp` shadow the caller's
+    # Base bindings, so every failure path in THIS file raised
+    # `UndefVarError: error not defined` instead of its message. RepliBuild
+    # withholds them now; they stay defined and reachable through `L.`.
+    exported = Set(String.(names(LC.L)))
+    for n in ("error", "all", "stat", "symlink")
+        @test !(n in exported)                       # not exported...
+        @test isdefined(LC.L, Symbol(n))             # ...but still defined
+    end
+    # Reachable, and still the library's own thing rather than Base's.
+    @test LC.L.error isa LC.L.result
+    @test LC.L.error !== Base.error
+    # The wrapper says so in the file, which is also how you spot a stale lib/.
+    @test occursin("Withheld from `export`",
+                   read(joinpath(@__DIR__, "..", "lib", "Llamacpp.jl"), String))
 end
 
 @testset "by-value param structs (the ABI this package stresses)" begin

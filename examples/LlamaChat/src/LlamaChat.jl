@@ -39,9 +39,10 @@ start!("qwen2.5-coder:1.5b-base")          # switch models
 chatrepl()                                 # interactive
 ```
 
-Replies stream as plain text and are then reprinted as rendered markdown when
-output is a terminal — see the "Terminal markdown" section below for why those
-two are reconciled by a redraw rather than done at once.
+Replies stream as plain text and each markdown block is reprinted formatted as
+soon as it closes — see `_MDSink` for why streaming and markdown have to be
+reconciled by a redraw at all, and why it is done per block rather than once at
+the end.
 """
 module LlamaChat
 
@@ -54,32 +55,61 @@ import Markdown
 # what Tier-2 entry points (model load, context init) dispatch through.
 #
 # `import`, deliberately NOT `using`. A wrapper generated from C++ DWARF
-# exports thousands of names harvested from every TU that landed in the debug
-# info — libstdc++ included — and several of them shadow Base. llamacpp exports
-# `error` (from `codecvt_base::result.error`), so `using .Llamacpp` makes a bare
-# `error("...")` call an ambiguous binding: every failure path in this file dies
-# with `UndefVarError: error not defined` instead of raising. It is invisible
-# until something actually goes wrong, because the happy path never calls it.
-# Importing the module and going through `L.` keeps this namespace clean.
+# harvests a name from every symbol that reached the debug info — libstdc++
+# included — and this one defines 6,527. Importing the module and reaching
+# through `L.` keeps that out of this namespace entirely.
+#
+# It used to be a correctness matter as well, and that is worth recording
+# because it cost a debugging session here: llamacpp defines `error` (from
+# `codecvt_base::result.error`) and used to EXPORT it, so `using .Llamacpp`
+# made a bare `error("...")` in this file an ambiguous binding and every
+# failure path raised `UndefVarError: error not defined` instead of its
+# message — invisible until something actually went wrong, since the happy
+# path never calls it. RepliBuild fixes that upstream now: names colliding
+# with a Base/Core export are withheld from `export` (still defined, still
+# reachable as `L.error`), and the wrapper carries a banner listing them —
+# here: `all`, `error`, `stat`, `symlink`. So `using` is no longer a hazard,
+# just a poor idea at this scale.
 include(joinpath(@__DIR__, "..", "lib", "Llamacpp.jl"))
 import .Llamacpp
 const L = Llamacpp
 
 export chat, chatrepl, start!, reset!, close!, md, ChatSession, Response,
-       list_models, resolve_model, run_demo
+       list_models, resolve_model, default_model, run_demo
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model resolution — ollama's blob store, so you can say "qwen3-coder" instead
 # of "/var/lib/ollama/blobs/sha256-1194192cf2a1...".
 # ─────────────────────────────────────────────────────────────────────────────
 
-const OLLAMA_ROOT = get(ENV, "OLLAMA_MODELS", "/var/lib/ollama")
-const REGISTRY    = "registry.ollama.ai"
+const REGISTRY = "registry.ollama.ai"
 
-# qwen3-coder is 30B-A3B: MoE, so only ~3B params are active per token. On CPU
-# that makes an 18 GB model faster than a dense 8 GB one, and it has a chat
-# template baked into the GGUF. Override with $LLAMACPP_CHAT_MODEL.
-const DEFAULT_MODEL = get(ENV, "LLAMACPP_CHAT_MODEL", "qwen3-coder")
+# Both of these read ENV at CALL time. They were `const X = get(ENV, ...)` at
+# module scope, which is evaluated during PRECOMPILATION and frozen into the
+# .ji — so the documented overrides did nothing for anyone whose first `using
+# LlamaChat` predated their setting the variable, and did so silently: you got
+# the default model, loaded it, and got a perfectly good answer from the wrong
+# 17 GB file. Reading them here also means a change takes effect immediately,
+# without a restart or a forced recompile.
+
+"""
+    ollama_root() -> String
+
+Where the ollama blob store lives (`\$OLLAMA_MODELS`, default `/var/lib/ollama`).
+"""
+ollama_root() = get(ENV, "OLLAMA_MODELS", "/var/lib/ollama")
+
+"""
+    default_model() -> String
+
+The model bare `chat("...")` opens (`\$LLAMACPP_CHAT_MODEL`, default
+`qwen3-coder`).
+
+qwen3-coder is 30B-A3B: MoE, so only ~3B params are active per token. On CPU
+that makes an 18 GB model faster than a dense 8 GB one, and it has a chat
+template baked into the GGUF.
+"""
+default_model() = get(ENV, "LLAMACPP_CHAT_MODEL", "qwen3-coder")
 
 function _manifest_path(name::AbstractString)
     spec, tag = if occursin(':', name)
@@ -94,7 +124,7 @@ function _manifest_path(name::AbstractString)
     else
         ("library", spec)
     end
-    p = joinpath(OLLAMA_ROOT, "manifests", REGISTRY, ns, model, tag)
+    p = joinpath(ollama_root(), "manifests", REGISTRY, ns, model, tag)
     return isfile(p) ? p : nothing
 end
 
@@ -111,12 +141,12 @@ function resolve_model(name::AbstractString)
     if mp === nothing
         avail = try join(sort(first.(list_models())), ", ") catch; "" end
         error("no such model: \"$name\" (not a file, and no ollama manifest under " *
-              "$OLLAMA_ROOT)" * (isempty(avail) ? "" : "\n  available: $avail"))
+              "$(ollama_root()))" * (isempty(avail) ? "" : "\n  available: $avail"))
     end
     manifest = JSON.parsefile(mp)
     for layer in manifest["layers"]
         layer["mediaType"] == "application/vnd.ollama.image.model" || continue
-        blob = joinpath(OLLAMA_ROOT, "blobs", replace(layer["digest"], ':' => '-'))
+        blob = joinpath(ollama_root(), "blobs", replace(layer["digest"], ':' => '-'))
         isfile(blob) || error("manifest $mp points at a missing blob: $blob")
         return blob
     end
@@ -130,7 +160,7 @@ Every ollama model visible in the local blob store, as (name, bytes).
 """
 function list_models()
     out = Tuple{String,Int}[]
-    root = joinpath(OLLAMA_ROOT, "manifests", REGISTRY)
+    root = joinpath(ollama_root(), "manifests", REGISTRY)
     isdir(root) || return out
     for (dir, _, files) in walkdir(root), f in files
         rel = relpath(joinpath(dir, f), root)
@@ -271,39 +301,215 @@ function _show_markdown(io::IO, text::AbstractString)
     return nothing
 end
 
-# How far up the cursor must travel to reach the reply's first line, given that
-# the caller printed `raw` and then exactly one newline.
+# ── Block segmentation ───────────────────────────────────────────────────────
 #
-# A reply that does NOT end in a newline leaves the cursor mid-way along its
-# last line, so the trailing println lands it n lines below the start. A reply
-# that DOES end in a newline has already advanced a line of its own, putting the
-# cursor one further down — and models end replies with "\n" all the time, so
-# getting this wrong leaves the first line of every such reply stranded above
-# the re-render.
-_redraw_up(raw::AbstractString, w::Integer) =
-    _wrapped_lines(raw, w) + (endswith(raw, '\n') ? 1 : 0)
+# A block is rendered the moment it is unambiguously closed, which is either a
+# blank line (outside a fence) or a closing code fence. Both are cheap to
+# recognise from a line at a time, which is all a token stream gives you.
+
+const _FENCE = r"^ {0,3}(`{3,}|~{3,})"
+
+# The opening run of a fenced code block, or "" if this line does not open one.
+_fence_open(line::AbstractString) =
+    (m = match(_FENCE, line)) === nothing ? "" : String(m.captures[1])
+
+# Whether `line` closes a fence opened by `open`: same character, at least as
+# long, and nothing after it — a closing fence carries no info string, which is
+# what stops "```julia" inside a block from being read as the close.
+function _fence_closes(line::AbstractString, open::AbstractString)
+    m = match(_FENCE, line)
+    m === nothing && return false
+    run = String(m.captures[1])
+    (first(run) == first(open) && length(run) >= length(open)) || return false
+    return isempty(strip(chopprefix(line, m.match)))
+end
+
+# Four spaces or a tab: an indented code block. Blank lines belong to it, so a
+# blank line must NOT close a block that is in the middle of one.
+_indented_code(line::AbstractString) = startswith(line, "    ") || startswith(line, "\t")
 
 """
-Replace `raw`, just streamed to `io`, with its markdown rendering. Expects the
-cursor one line below the reply (i.e. the caller printed exactly one newline
-after it).
+Streaming sink that renders each markdown block as soon as it closes.
 
-Returns false without touching the screen when the redraw would be unsafe —
-not a tty, or the text is taller than the window, in which case part of it has
-already scrolled out of the erasable region.
+Markdown has no meaning until a block is closed — a fence, a list, a table only
+has a shape once it ends — so a reply cannot be rendered token by token. The
+first version of this streamed the whole reply raw and redrew it once at the
+end, which meant any reply taller than the window stayed raw forever: `\\e[0J`
+cannot erase what has already scrolled into scrollback, so the redraw had to be
+skipped rather than shred the terminal. In practice that is most replies of
+substance — a 47-row answer needs a 49-row window.
+
+Blocks are individually short, so redrawing one at a time removes the height
+limit instead of working around it, and formats sooner besides: a code fence
+gets syntax-highlighted the moment it closes rather than after the last token.
+
+Raw text still streams live, character by character. When a block closes,
+exactly the rows it occupies are erased and reprinted formatted.
+
+`render = false` makes this a plain passthrough (not a tty, or markdown off).
 """
-function _rerender_markdown(io::IO, raw::AbstractString)
-    _istty(io) || return false
+mutable struct _MDSink
+    io::IO
+    render::Bool
+    block::IOBuffer     # complete lines of the block being accumulated
+    partial::String     # bytes after the last newline — printed, not yet a line
+    fence::String       # the opening run while inside a code fence, else ""
+    indented::Bool      # last non-blank line was indented code
+    col0::Bool          # cursor is at column 0
+end
+
+_MDSink(io::IO; render::Bool = false) =
+    _MDSink(io, render, IOBuffer(), "", "", false, true)
+
+"""
+Feed one complete line (including its newline). Returns the block's raw text if
+this line closed one, `nothing` otherwise.
+"""
+function _feed_line!(sk::_MDSink, line::AbstractString)
+    write(sk.block, line)
+    body = rstrip(line, '\n')
+
+    if !isempty(sk.fence)
+        if _fence_closes(body, sk.fence)
+            sk.fence = ""
+            return _take_block!(sk)
+        end
+        return nothing
+    end
+
+    op = _fence_open(body)
+    if !isempty(op)
+        sk.fence = op
+        sk.indented = false
+        return nothing
+    end
+
+    if isempty(strip(body))
+        # Blank lines are interior to an indented code block, so one only ends
+        # a block when we are not in the middle of one. When we are, the block
+        # keeps growing and closes at the next blank line after the code ends —
+        # which renders code + prose together, and parses identically.
+        sk.indented && return nothing
+        return _take_block!(sk)
+    end
+
+    sk.indented = _indented_code(body)
+    return nothing
+end
+
+function _take_block!(sk::_MDSink)
+    raw = String(take!(sk.block))
+    sk.indented = false
+    return isempty(raw) ? nothing : raw
+end
+
+"""
+Render one closed block in place of the raw lines already on screen.
+
+The caller guarantees the cursor sits at column 0 immediately below those
+lines — which is why `_emit!` prints line by line and flushes BEFORE printing
+the partial line that follows: with the partial already on screen the cursor
+would be neither at column 0 nor `up` rows down, and `\\e[0J` would eat it.
+"""
+function _render_block!(sk::_MDSink, raw::AbstractString)
     isempty(strip(raw)) && return false
-    h, w = displaysize(io)
-    up = _redraw_up(raw, w)
+    h, w = displaysize(sk.io)
+    up = _wrapped_lines(raw, w)
+    # A single block taller than the window has already scrolled; leave it raw.
     (up == 0 || up + 1 >= h) && return false
-    print(io, "\e[$(up)A")                 # onto the reply's first line
-    print(io, "\r\e[0J")                   # column 0, erase everything below
-    _show_markdown(io, raw)
-    println(io)
-    flush(io)
+    # Reproduce the raw block's own trailing blank lines so the spacing the
+    # stream established is preserved — the renderer emits no trailing newline
+    # of its own, so the first one also ends its last line.
+    body = rstrip(raw, '\n')
+    trailing = max(1, ncodeunits(raw) - ncodeunits(body))
+    print(sk.io, "\e[$(up)A\r\e[0J")
+    _show_markdown(sk.io, body)
+    print(sk.io, "\n"^trailing)
+    sk.col0 = true
     return true
+end
+
+"""
+Stream `chunk` and render any block it completes.
+
+Lines are printed one at a time rather than as one `print(chunk)` so that a
+block closing mid-chunk is redrawn while the cursor is still directly below it.
+"""
+function _emit!(sk::_MDSink, chunk::AbstractString; onblock = b -> _render_block!(sk, b))
+    isempty(chunk) && return nothing
+    if !sk.render
+        print(sk.io, chunk)
+        sk.col0 = endswith(chunk, '\n')
+        flush(sk.io)
+        return nothing
+    end
+
+    rest = SubString(chunk)
+    while (i = findfirst('\n', rest)) !== nothing
+        head = SubString(rest, 1, i)
+        print(sk.io, head)
+        sk.col0 = true
+        blk = _feed_line!(sk, sk.partial * head)
+        sk.partial = ""
+        blk === nothing || onblock(blk)
+        rest = SubString(rest, nextind(rest, i))
+    end
+    if !isempty(rest)
+        print(sk.io, rest)
+        sk.partial *= rest
+        sk.col0 = false
+    end
+    flush(sk.io)
+    return nothing
+end
+
+"""
+Close the stream: render whatever block is still open and leave the cursor at
+column 0 on a fresh line.
+"""
+function _finish!(sk::_MDSink; onblock = b -> _render_block!(sk, b))
+    if sk.render
+        if !isempty(sk.partial)
+            # Give the last line the newline it never got, so this block ends at
+            # column 0 like every other one and the cursor math is unchanged.
+            print(sk.io, "\n")
+            sk.col0 = true
+            blk = _feed_line!(sk, sk.partial * "\n")
+            sk.partial = ""
+            blk === nothing || onblock(blk)
+        end
+        # An unterminated fence (a reply cut off at max_tokens) lands here;
+        # _show_markdown's fallback is what keeps that from costing the text.
+        blk = _take_block!(sk)
+        blk === nothing || onblock(blk)
+    end
+    sk.col0 || print(sk.io, "\n")
+    sk.col0 = true
+    flush(sk.io)
+    return nothing
+end
+
+"""
+    _segment(text; chunk = typemax(Int)) -> Vector{String}
+
+The blocks the streaming renderer would flush for `text`, delivered `chunk`
+bytes at a time. Exists so the tests can prove segmentation does not depend on
+where the token boundaries happen to fall — a model splits text at its own
+whims, and a splitter that only works on whole lines would look fine until it
+did not.
+"""
+function _segment(text::AbstractString; chunk::Integer = typemax(Int))
+    sk = _MDSink(devnull; render = true)
+    blocks = String[]
+    collect_block = b -> push!(blocks, b)
+    i = firstindex(text)
+    while i <= lastindex(text)
+        j = thisind(text, min(i + Int(chunk) - 1, lastindex(text)))
+        _emit!(sk, SubString(text, i, j); onblock = collect_block)
+        i = nextind(text, j)
+    end
+    _finish!(sk; onblock = collect_block)
+    return blocks
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,7 +594,7 @@ mutable struct ChatSession
 end
 
 """
-    ChatSession(model = DEFAULT_MODEL; kwargs...)
+    ChatSession(model = default_model(); kwargs...)
 
 Load a model and open a context. `model` is an ollama name or a path.
 
@@ -401,7 +607,7 @@ Load a model and open a context. `model` is an ollama name or a path.
   `seed`         default random
   `verbose`      let llama.cpp's loader log to stderr (default false)
 """
-function ChatSession(model::AbstractString = DEFAULT_MODEL;
+function ChatSession(model::AbstractString = default_model();
                      system::AbstractString = "",
                      n_ctx::Integer = 4096,
                      n_batch::Integer = 512,
@@ -609,7 +815,7 @@ end
 # Generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-function _generate!(s::ChatSession, max_tokens::Int, stream::Bool, io::IO)
+function _generate!(s::ChatSession, max_tokens::Int, stream::Bool, sink::_MDSink)
     piece   = Vector{UInt8}(undef, 256)
     pending = UInt8[]
     out     = IOBuffer()
@@ -675,7 +881,7 @@ function _generate!(s::ChatSession, max_tokens::Int, stream::Bool, io::IO)
         chunk = _take_utf8!(pending)
         if !isempty(chunk)
             write(out, chunk)
-            stream && (print(io, chunk); flush(io))
+            stream && _emit!(sink, chunk)
         end
     end
 
@@ -684,7 +890,7 @@ function _generate!(s::ChatSession, max_tokens::Int, stream::Bool, io::IO)
     if !isempty(pending)
         tail = String(pending)
         write(out, tail)
-        stream && print(io, tail)
+        stream && _emit!(sink, tail)
     end
     return String(take!(out)), ngen, stop
 end
@@ -696,12 +902,12 @@ end
 const _SESSION = Ref{Union{Nothing,ChatSession}}(nothing)
 
 """
-    start!(model = DEFAULT_MODEL; kwargs...) -> ChatSession
+    start!(model = default_model(); kwargs...) -> ChatSession
 
 Open (or replace) the session that bare `chat("...")` talks to. Same keywords
 as [`ChatSession`](@ref).
 """
-function start!(model::AbstractString = DEFAULT_MODEL; kwargs...)
+function start!(model::AbstractString = default_model(); kwargs...)
     cur = _SESSION[]
     cur !== nothing && cur.isopen && close!(cur)
     _SESSION[] = ChatSession(model; kwargs...)
@@ -723,15 +929,15 @@ conversation, so follow-up turns see what came before; `reset!` clears it.
 
   `max_tokens` cap on generated tokens (default 512)
   `stream`     print tokens as they arrive (default true)
-  `markdown`   render the finished reply as markdown (default: true on a tty)
+  `markdown`   render as markdown (default: true on a tty)
   `io`         where to stream (default stdout)
 
 The reply is `r.text`. When streamed, the REPL shows a throughput line instead
 of repeating the text; `md(r)` re-renders it formatted at any time.
 
-With both `stream` and `markdown` on, tokens appear live as plain text and the
-reply is reprinted formatted once it is complete — see `_rerender_markdown` for
-when that redraw is skipped.
+With both `stream` and `markdown` on, tokens appear live as plain text and each
+markdown block is reprinted formatted the moment it closes — so a code fence is
+highlighted as soon as it ends, and reply length does not matter. See `_MDSink`.
 """
 chat(prompt::AbstractString; kwargs...) = chat(session(), prompt; kwargs...)
 
@@ -771,8 +977,11 @@ function chat(s::ChatSession, prompt::AbstractString;
     t_prompt = (time_ns() - t0) / 1e9
 
     t1 = time_ns()
+    # Blocks are rendered as they close, so the reply formats progressively and
+    # its height never matters — see `_MDSink`.
+    sink = _MDSink(io; render = stream && markdown && _istty(io))
     text, ngen, stop = try
-        _generate!(s, Int(max_tokens), stream, io)
+        _generate!(s, Int(max_tokens), stream, sink)
     catch
         # Generation died partway: the cache holds tokens no transcript records.
         # Drop the cache (not the conversation) so the next turn rebuilds from a
@@ -782,13 +991,8 @@ function chat(s::ChatSession, prompt::AbstractString;
         rethrow()
     end
     t_gen = (time_ns() - t1) / 1e9
-    if stream
-        println(io)
-        # The redraw needs the cursor one line below the reply, which the
-        # println above guarantees.
-        markdown && _rerender_markdown(io, text)
-        flush(io)
-    end
+    # Renders the block still open and leaves the cursor at column 0.
+    stream && _finish!(sink)
 
     push!(s.history, "assistant" => text)
     # The generated bytes sit immediately after the assistant header, so the KV
@@ -864,13 +1068,13 @@ function chatrepl(s::ChatSession = session())
 end
 
 """
-    run_demo(; model = DEFAULT_MODEL)
+    run_demo(; model = default_model())
 
 Two turns on a fresh session, printed. The second turn is the interesting one:
 it only tokenizes the new tail of the transcript, so the prompt-token count
 covers just that turn rather than the whole conversation.
 """
-function run_demo(; model::AbstractString = DEFAULT_MODEL)
+function run_demo(; model::AbstractString = default_model())
     s = ChatSession(model; n_ctx = 2048, system = "You are terse.")
     try
         println("── turn 1 ", "─"^50)
