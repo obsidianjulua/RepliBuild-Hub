@@ -599,7 +599,7 @@ end
 Load a model and open a context. `model` is an ollama name or a path.
 
   `system`       system prompt (default none)
-  `n_ctx`        context window (default 4096)
+  `n_ctx`        context window (default 32768; model trains to 262144)
   `n_threads`    default = physical cores (SMT threads / 2)
   `n_gpu_layers` default 0 — this build is CPU-only (no ggml GPU backends)
   `temp`         default 0.7; `temp <= 0` selects greedy sampling
@@ -609,7 +609,7 @@ Load a model and open a context. `model` is an ollama name or a path.
 """
 function ChatSession(model::AbstractString = default_model();
                      system::AbstractString = "",
-                     n_ctx::Integer = 4096,
+                     n_ctx::Integer = 32768,
                      n_batch::Integer = 512,
                      n_threads::Integer = max(1, Sys.CPU_THREADS ÷ 2),
                      n_gpu_layers::Integer = 0,
@@ -927,7 +927,7 @@ end
 Send `prompt` as a user turn and generate the reply. The session keeps the
 conversation, so follow-up turns see what came before; `reset!` clears it.
 
-  `max_tokens` cap on generated tokens (default 512)
+  `max_tokens` cap on generated tokens (default 4096)
   `stream`     print tokens as they arrive (default true)
   `markdown`   render as markdown (default: true on a tty)
   `io`         where to stream (default stdout)
@@ -942,7 +942,7 @@ highlighted as soon as it ends, and reply length does not matter. See `_MDSink`.
 chat(prompt::AbstractString; kwargs...) = chat(session(), prompt; kwargs...)
 
 function chat(s::ChatSession, prompt::AbstractString;
-              max_tokens::Integer = 512, stream::Bool = true, io::IO = stdout,
+              max_tokens::Integer = 4096, stream::Bool = true, io::IO = stdout,
               markdown::Bool = _istty(io))   # must follow io — defaults see only earlier kwargs
     s.isopen || error("session is closed")
 
