@@ -7,6 +7,7 @@ root = "."
 type = "git"
 url = "https://github.com/DaveGamble/cJSON.git"
 tag = "v1.7.18"
+commit = "acc76239bee01d8e9c858ae2cab296704e52d916"
 exclude = ["test", "fuzzing", "tests"]
 
 [compile]

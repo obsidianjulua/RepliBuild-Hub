@@ -7,6 +7,7 @@ root = "."
 type = "git"
 url = "https://github.com/ludocode/mpack.git"
 tag = "v1.1.1"
+commit = "79d3fcd3e04338b06e82d01a62f4aa98c7bad5f7"
 exclude = ["test", "docs", "tools"]
 
 [compile]

@@ -7,6 +7,7 @@ root = "."
 type = "git"
 url = "https://github.com/richgel999/miniz.git"
 tag = "3.1.1"
+commit = "d10b03cc73475af673df40f06e5cefd1d5f940d9"
 exclude = ["tests", "examples", "doc", "amalgamation"]
 
 [compile]

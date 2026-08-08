@@ -11,6 +11,7 @@ root = "."
 type = "git"
 url = "https://github.com/erincatto/box2d.git"
 tag = "v2.4.1"
+commit = "9ebbbcd960ad424e03e5de6e66a40764c16f51bc"
 exclude = ["testbed", "unit-test", "extern", "docs"]
 
 [compile]

@@ -7,6 +7,7 @@ root = "."
 type = "git"
 url = "https://github.com/cktan/tomlc17.git"
 tag = "R260302"
+commit = "fe98d4c7cbd170ece459b9a5ada32dac211404ab"
 exclude = ["test", "simple", "unittest"]
 
 [compile]

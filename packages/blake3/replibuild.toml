@@ -7,6 +7,7 @@ root = "."
 type = "git"
 url = "https://github.com/BLAKE3-team/BLAKE3.git"
 tag = "1.8.5"
+commit = "93a431c78a52d7ccf0f366f106467f5070e6075e"
 # The C library lives entirely under c/. We build the PORTABLE path only:
 # blake3.c + blake3_dispatch.c + blake3_portable.c. Every SIMD translation unit
 # needs its own -march flag (per-file flags → violates the one-flag-set gate),

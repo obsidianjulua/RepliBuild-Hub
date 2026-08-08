@@ -15,7 +15,7 @@ root = "."
 # alongside), src-input/ is the generator's input, and the rest is tooling,
 # examples and the debugger client.
 [dependencies]
-duktape = { type = "git", url = "https://github.com/svaarala/duktape-releases.git", tag = "v2.7.0", exclude = ["src-input", "src-separate", "src-noline", "tools", "config", "debugger", "examples", "extras", "polyfills", "licenses"] }
+duktape = { type = "git", url = "https://github.com/svaarala/duktape-releases.git", tag = "v2.7.0", commit = "5fda2196179bd30d06a59e76da77c67567b475ac", exclude = ["src-input", "src-separate", "src-noline", "tools", "config", "debugger", "examples", "extras", "polyfills", "licenses"] }
 
 [compile]
 flags = ["-fPIC"]

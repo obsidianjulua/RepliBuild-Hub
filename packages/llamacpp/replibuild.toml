@@ -19,6 +19,7 @@ root = "."
 type = "git"
 url = "https://github.com/ggml-org/llama.cpp.git"
 tag = "b10286"
+commit = "cd0fa6051abd04fd7f82ccb42ad378ec43885455"
 exclude = [
     # ── Consumers, not the library ──
     # (tests/, examples/, docs/ are already dropped by the resolver's walkdir filter)

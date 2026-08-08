@@ -12,6 +12,7 @@ version = "3.53.3"
 type = "git"
 url = "https://github.com/rhuijben/sqlite-amalgamation.git"
 tag = "717732275b11daf24c44c3621bf11e09c4216316"   # = SQLITE_VERSION 3.53.3
+commit = "717732275b11daf24c44c3621bf11e09c4216316"
 exclude = ["shell.c"]
 
 [compile]
