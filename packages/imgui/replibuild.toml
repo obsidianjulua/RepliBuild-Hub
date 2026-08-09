@@ -1,0 +1,39 @@
+[project]
+name = "imgui"
+version = "1.92.9b"
+root = "."
+
+[dependencies.imgui]
+type = "git"
+url = "https://github.com/ocornut/imgui.git"
+tag = "v1.92.9b"
+commit = "f1cc2ae15e53a861a874c3034aae6798fde194ab"
+# backends/ and examples/ need platform SDK headers (GLFW, SDL, DX, Vulkan, GL)
+# that are not present and are not part of the wrappable surface.
+# misc/freetype needs freetype headers.
+exclude = ["backends", "examples", "misc/freetype"]
+
+[compile]
+flags = ["-O2", "-fPIC", "-std=c++17"]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+style = "clang"
+use_clang_jl = true
+enabled = true
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

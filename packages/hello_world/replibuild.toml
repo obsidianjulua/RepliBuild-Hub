@@ -1,0 +1,54 @@
+[types]
+allow_unknown_enums = false
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[compile]
+parallel = true
+flags = ["-std=c++17", "-fPIC"]
+source_files = ["/home/john/Desktop/Projects/RepliBuild-Hub/packages/hello_world/src/hello_world.cpp"]
+include_dirs = ["/home/john/Desktop/Projects/RepliBuild-Hub/packages/hello_world/", "/home/john/Desktop/Projects/RepliBuild-Hub/packages/hello_world/src"]
+
+[link]
+enable_lto = false
+optimization_level = "0"
+
+[binary]
+strip_symbols = false
+type = "shared"
+
+[workflow]
+stages = ["discover", "compile", "link", "binary", "wrap"]
+
+[cache]
+enabled = true
+directory = ".replibuild_cache"
+
+[wrap]
+use_clang_jl = true
+style = "clang"
+language = "cpp"
+enabled = true
+
+[llvm]
+toolchain = "auto"
+
+[project]
+name = "project"
+root = "/home/john/Desktop/Projects/RepliBuild-Hub/packages/hello_world/"
+uuid = "e26ab1e0-2697-4a78-8d69-23336bdc5156"
+
+[paths]
+build = "build"
+cache = ".replibuild_cache"
+source = "src"
+output = "julia"
+include = "include"
+
+[discovery]
+max_depth = 10
+walk_dependencies = true
+enabled = true
+ignore_patterns = ["build", ".git", ".cache"]
+parse_ast = true
