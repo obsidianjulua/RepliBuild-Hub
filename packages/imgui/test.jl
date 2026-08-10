@@ -2,14 +2,16 @@
 # Dear ImGui Hub package — integration test
 #
 # Tests the full RepliBuild pipeline for Dear ImGui 1.92.9b (C++):
-#   clean → build → load wrapper → exercise API
+#   reset outputs → build → load wrapper → exercise API
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/imgui/test.jl
 #
-# DESTRUCTIVE: `RepliBuild.clean` deletes build/, julia/ (wrapper + .so) and
-# .replibuild_cache/ — including the vendored git clone of upstream — so this
-# re-clones imgui and recompiles six C++ translation units from cold. Reach for
-# test_deep.jl when the question is "does the wrapper work".
+# NON-DESTRUCTIVE to the SOURCE. `reset_outputs!` below deletes only what this
+# package generates — build/, julia/, .debug/ — and the content-hash marker. The
+# vendored git clone under .replibuild_cache/deps/ is preserved, so this
+# recompiles the six C++ translation units (~30s) without going back to GitHub
+# and without needing the network. `RepliBuild.clean` would take the clone too.
+# Reach for test_deep.jl when the question is only "does the wrapper work".
 #
 # imgui is a UI library with no backend here (backends/ and examples/ are
 # excluded by replibuild.toml — they need GLFW/SDL/DX/Vulkan/GL headers), so
@@ -67,6 +69,30 @@ function meta_offset(s::AbstractString, member::AbstractString)
     error("no member $member in $s")
 end
 
+"""
+Delete this package's generated output, preserving the vendored upstream source.
+
+Stands in for `RepliBuild.clean`, which also removes `.replibuild_cache/` — and
+that holds `deps/imgui`, the git clone. Cleaning it turns every run into a fresh
+clone from GitHub: slow, and it fails outright without network.
+
+The content-hash marker has to go with the outputs. `build()` skips the whole
+pipeline when the project is unchanged (`cache: project unchanged`), and that
+hash covers replibuild.toml + sources + project git HEAD — **not** RepliBuild's
+own source. So after an engine change the marker still matches, build() skips,
+and the `build/imgui_linked.ll` assertions below would fail on artifacts nothing
+regenerated. Deleting the marker is what makes this a real pipeline test rather
+than a check on whatever was lying around.
+"""
+function reset_outputs!()
+    for d in ("build", "julia", ".debug")
+        p = joinpath(PKG_DIR, d)
+        isdir(p) && rm(p; recursive = true)
+    end
+    marker = joinpath(PKG_DIR, ".replibuild_cache", "project_hash")
+    isfile(marker) && rm(marker)
+end
+
 vec2(x, y) = Imgui.ImVec2(Cfloat(x), Cfloat(y))
 
 # Call `f` with a pointer to a stack-pinned copy of `v` — see the Ref{T} note.
@@ -118,7 +144,16 @@ style_color(idx) = unsafe_load(
 @testset "Dear ImGui Hub Package" begin
 
 @testset "Build pipeline" begin
-    RepliBuild.clean(TOML_PATH)
+    deps_dir = joinpath(PKG_DIR, ".replibuild_cache", "deps")
+    had_clone = isdir(deps_dir)
+
+    reset_outputs!()
+
+    # The whole point of not calling RepliBuild.clean: if this ever regresses to
+    # a destructive reset, the next run silently becomes a network-dependent
+    # re-clone. Assert the source survived rather than trusting the helper.
+    had_clone && @test isdir(deps_dir)
+
     lib = RepliBuild.build(TOML_PATH)
     @test isfile(lib)
     @test endswith(lib, "libimgui.so") || endswith(lib, "libimgui.dylib")
