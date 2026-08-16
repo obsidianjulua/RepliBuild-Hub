@@ -1,13 +1,13 @@
 [project]
 name = "lua"
-version = "5.4.7"
+version = "5.5.1"
 root = "."
 
 [dependencies.lua]
 type = "git"
 url = "https://github.com/lua/lua.git"
-tag = "v5.4.7"
-commit = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
+tag = "v5.5.1"
+commit = "7579fc9d7ed90240487251dfb69168f8e64e9294"
 exclude = ["onelua.c", "lua.c", "luac.c", "ltests.c"]
 
 [compile]
@@ -25,6 +25,11 @@ language = "c"
 shim_headers = ["lua.h", "lauxlib.h", "lualib.h"]
 
 # Tier 1: per-function sliced llvmcall (un-parked 2026-07-22).
+#
+# NOTE 2026-08-16: the setjmp analysis below was verified against 5.4.7. The
+# 5.5.1 bump did not touch ldo.c's protected-call structure, but this has NOT
+# been re-verified against the new tree — check the wrap report for
+# setjmp_family demotions before trusting it.
 #
 # setjmp status (verified 2026-07-31): the hazard gate is DIRECT-reach only —
 # it demotes a function whose own slice body calls setjmp/longjmp or a
@@ -171,6 +176,23 @@ args = ["lua_State*", "int"]
 ret = "int"
 args = ["int"]
 
+# 5.5.1: was an exported function in 5.4.7, is now a compiler-erased macro
+# (#define lua_resetthread(L) lua_closethread(L,NULL)). Without this entry it
+# silently disappears from the wrapper.
+[wrap.macros.lua_resetthread]
+ret = "int"
+args = ["lua_State*"]
+
+# ── lualib.h macros ──
+
+# 5.5.1: SAME TRANSITION AS ABOVE, and this one is load-bearing — test.jl
+# asserts isdefined(Lua, :luaL_openlibs). In 5.4.7 it was LUALIB_API; in 5.5.1
+# it is #define luaL_openlibs(L) luaL_openselectedlibs(L, ~0, 0). The underlying
+# luaL_openselectedlibs is still exported and wraps from DWARF on its own.
+[wrap.macros.luaL_openlibs]
+ret = "void"
+args = ["lua_State*"]
+
 # ── lauxlib.h macros ──
 
 [wrap.macros.luaL_dofile]
@@ -292,7 +314,19 @@ ret = "int"
 [wrap.macros.LUA_MINSTACK]
 ret = "int"
 
+# 5.5.1: LUA_VERSION_NUM is no longer a literal (was 504); it is now derived as
+# LUA_VERSION_MAJOR_N * 100 + LUA_VERSION_MINOR_N. Wrapping the components too
+# so version checks don't have to re-derive them.
 [wrap.macros.LUA_VERSION_NUM]
+ret = "int"
+
+[wrap.macros.LUA_VERSION_MAJOR_N]
+ret = "int"
+
+[wrap.macros.LUA_VERSION_MINOR_N]
+ret = "int"
+
+[wrap.macros.LUA_VERSION_RELEASE_N]
 ret = "int"
 
 # lua_gc options
@@ -321,6 +355,34 @@ ret = "int"
 ret = "int"
 
 [wrap.macros.LUA_GCINC]
+ret = "int"
+
+# 5.5.1 GC rework: LUA_GCSETPAUSE (6) and LUA_GCSETSTEPMUL (7) are GONE,
+# replaced by LUA_GCPARAM + a parameter id. Note the renumbering — ISRUNNING
+# 9→6, GCGEN 10→7, GCINC 11→8 — which is why these must be regenerated from
+# the 5.5.1 headers rather than carried over.
+[wrap.macros.LUA_GCPARAM]
+ret = "int"
+
+[wrap.macros.LUA_GCPMINORMUL]
+ret = "int"
+
+[wrap.macros.LUA_GCPMAJORMINOR]
+ret = "int"
+
+[wrap.macros.LUA_GCPMINORMAJOR]
+ret = "int"
+
+[wrap.macros.LUA_GCPPAUSE]
+ret = "int"
+
+[wrap.macros.LUA_GCPSTEPMUL]
+ret = "int"
+
+[wrap.macros.LUA_GCPSTEPSIZE]
+ret = "int"
+
+[wrap.macros.LUA_GCPN]
 ret = "int"
 
 # Comparison / arithmetic ops

@@ -97,14 +97,49 @@ end
     @test Lua.LUA_TTHREAD() == 8
 
     # Registry / sentinels
-    @test Lua.LUA_REGISTRYINDEX() == -1_001_000
-    @test Lua.LUA_RIDX_MAINTHREAD() == 1
+    # 5.5 drift: REGISTRYINDEX was -(LUAI_MAXSTACK + 1000) = -1_001_000 and is
+    # now -(INT_MAX/2 + 1000); MAINTHREAD moved 1 → 3. GLOBALS stayed at 2.
+    @test Lua.LUA_REGISTRYINDEX() == -1_073_742_823
+    @test Lua.LUA_RIDX_MAINTHREAD() == 3
     @test Lua.LUA_RIDX_GLOBALS() == 2
     @test Lua.LUA_MULTRET() == -1
     @test Lua.LUA_NOREF() == -2
     @test Lua.LUA_REFNIL() == -1
     @test Lua.LUA_MINSTACK() == 20
-    @test Lua.LUA_VERSION_NUM() == 504
+    @test Lua.LUA_VERSION_NUM() == 505
+    @test Lua.LUA_VERSION_MAJOR_N() == 5
+    @test Lua.LUA_VERSION_MINOR_N() == 5
+    @test Lua.LUA_VERSION_RELEASE_N() == 1
+end
+
+@testset "5.5 GC parameter constants and LUA_GCPARAM" begin
+    # 5.5 renumbered the GC ops (ISRUNNING 9→6, GEN 10→7, INC 11→8) after
+    # deleting LUA_GCSETPAUSE/LUA_GCSETSTEPMUL, and moved every tunable behind
+    # LUA_GCPARAM + a parameter id.
+    @test Lua.LUA_GCISRUNNING() == 6
+    @test Lua.LUA_GCGEN() == 7
+    @test Lua.LUA_GCINC() == 8
+    @test Lua.LUA_GCPARAM() == 9
+
+    @test Lua.LUA_GCPMINORMUL() == 0
+    @test Lua.LUA_GCPMAJORMINOR() == 1
+    @test Lua.LUA_GCPMINORMAJOR() == 2
+    @test Lua.LUA_GCPPAUSE() == 3
+    @test Lua.LUA_GCPSTEPMUL() == 4
+    @test Lua.LUA_GCPSTEPSIZE() == 5
+    @test Lua.LUA_GCPN() == 6
+
+    L = Lua.luaL_newstate()
+    Lua.luaL_openlibs(L)
+
+    # val == -1 reads without setting; the read-back must match what we set.
+    pause = Lua.lua_gc_Cint_Cint(L, Lua.LUA_GCPARAM(), Cint(Lua.LUA_GCPPAUSE()), Cint(-1))
+    @test pause > 0
+    prev = Lua.lua_gc_Cint_Cint(L, Lua.LUA_GCPARAM(), Cint(Lua.LUA_GCPPAUSE()), Cint(150))
+    @test prev == pause
+    @test Lua.lua_gc_Cint_Cint(L, Lua.LUA_GCPARAM(), Cint(Lua.LUA_GCPPAUSE()), Cint(-1)) == 150
+
+    Lua.lua_close(L)
 end
 
 @testset "GC control (varargs overloads)" begin
@@ -123,8 +158,11 @@ end
     # GCSTEP with step size (1 variadic int)
     @test Lua.lua_gc_Cint(L, Lua.LUA_GCSTEP(), Cint(10)) in (0, 1)
 
-    # Mode switches return the previous mode:
-    # GCGEN takes (minormul, majormul), GCINC takes (pause, stepmul, stepsize)
+    # Mode switches return the previous mode. NOTE (5.5): GCGEN/GCINC no longer
+    # accept tuning parameters — those moved to LUA_GCPARAM — so the extra ints
+    # below are ignored by the collector. Kept as-is because it still exercises
+    # the lua_gc_Cint_Cint / _Cint_Cint_Cint varargs overloads, which is the
+    # point of this testset; the parameters themselves are covered above.
     prev = Lua.lua_gc_Cint_Cint(L, Lua.LUA_GCGEN(), Cint(0), Cint(0))
     @test prev == Lua.LUA_GCINC()
     prev = Lua.lua_gc_Cint_Cint_Cint(L, Lua.LUA_GCINC(), Cint(0), Cint(0), Cint(0))
