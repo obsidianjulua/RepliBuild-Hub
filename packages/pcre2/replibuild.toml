@@ -1,0 +1,170 @@
+[project]
+name = "pcre2"
+version = "10.45"
+root = "."
+
+[dependencies.pcre2]
+type = "git"
+url = "https://github.com/PCRE2Project/pcre2.git"
+tag = "pcre2-10.45"
+commit = "2dce7761b1831fd3f82a9c2bd5476259d945da4d"
+# `pcre2-10.45` is an ANNOTATED tag, so the ref resolves to a tag object
+# (aa8a3e5b…) and the commit below is what it points at. harvest.jl checks the
+# clone's HEAD against it.
+#
+# 43 .c files in the tree, 29 of them are libpcre2-8. The exclusions below came
+# out of `RepliBuildTooling.propose_toml` — the set difference between every
+# .c in the tree and the TUs cmake's own compile_commands.json attributes to
+# the pcre2-8-shared target — then were checked by hand. They fall in four
+# groups, and only the first is obvious:
+#
+#   #include'd, not compiled — pcre2_ucptables.c is pulled into pcre2_tables.c,
+#     and the pcre2_jit_* files into pcre2_jit_compile.c. Compiling them
+#     standalone is a duplicate-symbol link error at best.
+#   tools with main() — pcre2test, pcre2grep, pcre2demo, pcre2posix_test,
+#     pcre2_dftables (the chartables generator we sidestep, see [compile]).
+#   a different target — pcre2posix.c is libpcre2-posix, its own shared object
+#     with its own -D set. It is not part of libpcre2-8.
+#   not library code — pcre2_fuzzsupport.c (oss-fuzz entry point),
+#     pcre2_printint.c (debug dumper, #include'd by pcre2test), maint/ utilities.
+exclude = [
+    "maint/",
+    "src/pcre2_ucptables.c",
+    "src/pcre2_jit_match.c",
+    "src/pcre2_jit_misc.c",
+    "src/pcre2_jit_test.c",
+    "src/pcre2_dftables.c",
+    "src/pcre2_fuzzsupport.c",
+    "src/pcre2_printint.c",
+    "src/pcre2demo.c",
+    "src/pcre2grep.c",
+    "src/pcre2posix.c",
+    "src/pcre2posix_test.c",
+    "src/pcre2test.c",
+]
+
+[compile]
+# ONE uniform flag set over all 29 sources, taken from what cmake passes the
+# pcre2-8-shared target.
+#   HAVE_CONFIG_H         — makes the sources include config/config.h
+#   PCRE2_CODE_UNIT_WIDTH — pcre2 compiles its whole source set once PER code
+#                           unit width, and the width is baked into every symbol
+#                           name (pcre2_compile_8, _16, _32). 8 is the standard
+#                           build; 16/32 are off in harvest.jl so the tree
+#                           resolves to one target over one flag set.
+#   pcre2_8_shared_EXPORTS — cmake's per-target visibility define. Kept rather
+#                           than pruned: PCRE2_EXP_DECL keys off the export
+#                           macros, and guessing wrong about visibility empties
+#                           the dynamic symbol table without failing the build.
+flags = ["-O2", "-fPIC", "-DHAVE_CONFIG_H", "-DPCRE2_CODE_UNIT_WIDTH=8", "-Dpcre2_8_shared_EXPORTS", "-DNDEBUG"]
+parallel = true
+
+# `config/` holds cmake's configure output, checked in — see config/HARVEST.md
+# and harvest.jl. Three files that do not exist in a bare checkout:
+#   config.h            122 feature probes
+#   pcre2.h             the PUBLIC header, configure_file'd from src/pcre2.h.in
+#   pcre2_chartables.c  configure_file(COPYONLY) of src/pcre2_chartables.c.dist
+# config/ is listed FIRST on purpose. This machine has a system
+# /usr/include/pcre2.h from the distro package; an explicit -I outranks the
+# system search path, and verify_shim_headers fails loud if it ever does not.
+# Relative to the package dir — build() cd's here.
+include_dirs = [
+    "config",
+    ".replibuild_cache/deps/pcre2/src",
+]
+
+# pcre2_chartables.c is generated INTO the build tree, so it lives in config/
+# rather than in the clone. The resolver only walks the clone, so it is named
+# explicitly here; the TOML list is merged with what the resolver discovers.
+#
+# Upstream's default (PCRE2_REBUILD_CHARTABLES=OFF) is to configure_file the
+# checked-in .dist tables rather than run pcre2_dftables to build locale-derived
+# ones. That default is what we want twice over: it is a plain file copy at
+# configure time rather than a compile-and-run code generator, and it keeps the
+# tables locale-independent so the wrapped library behaves the same everywhere.
+source_files = ["config/pcre2_chartables.c"]
+
+[link]
+# LTO off, as in every other Hub package: the whole-module llvmcall payload is
+# scale-limited. Tier 1 slicing stays off here too — pcre2_compile/pcre2_match
+# do real work per call, so FFI overhead is not the cost that matters.
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["pcre2.h"]
+
+# ── Residue ──────────────────────────────────────────────────────────────────
+# pcre2 has no variadic functions and no function-like macros in its public API
+# — the surface is plain functions, and DWARF recovered all 105 of them with
+# real signatures. What the preprocessor DID erase is the constants, and for a
+# regex library that is not cosmetic: without them every caller has to hardcode
+# 0x00000008u for "caseless" and -1 for "no match" against a header they cannot
+# see. Types below match the header: option bits and info/config selectors are
+# uint32_t, error codes are int, and the two sentinels are PCRE2_SIZE (size_t),
+# so PCRE2_ZERO_TERMINATED lands as typemax(Csize_t) rather than wrapping to -1.
+#
+# The public names are macro aliases too: pcre2.h #defines `pcre2_compile` to
+# PCRE2_SUFFIX(pcre2_compile_) = pcre2_compile_8. Those are NOT shimmed here —
+# the _8 symbols are the ones that exist in the .so, they are what DWARF
+# reports, and adding an alias layer would hide the code-unit width the whole
+# build is pinned to. Callers use pcre2_compile_8.
+
+# Compile options
+[wrap.macros.PCRE2_CASELESS]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_MULTILINE]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_DOTALL]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_EXTENDED]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_ANCHORED]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_UTF]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_UCP]
+ret = "uint32_t"
+
+# Match options
+[wrap.macros.PCRE2_NOTEMPTY]
+ret = "uint32_t"
+
+# Sentinels — PCRE2_SIZE, i.e. size_t
+[wrap.macros.PCRE2_ZERO_TERMINATED]
+ret = "size_t"
+
+[wrap.macros.PCRE2_UNSET]
+ret = "size_t"
+
+# Error codes
+[wrap.macros.PCRE2_ERROR_NOMATCH]
+ret = "int"
+
+[wrap.macros.PCRE2_ERROR_PARTIAL]
+ret = "int"
+
+# Selectors for pcre2_pattern_info_8 / pcre2_config_8
+[wrap.macros.PCRE2_INFO_CAPTURECOUNT]
+ret = "uint32_t"
+
+[wrap.macros.PCRE2_CONFIG_VERSION]
+ret = "uint32_t"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

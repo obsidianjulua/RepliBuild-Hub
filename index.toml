@@ -111,3 +111,9 @@ description = "LLM inference in C/C++ — the ggml runtime, GGUF loader, tokeniz
 version = "b10286"
 language = "cpp"
 tags = ["llm", "inference", "ml", "ggml", "gguf", "cpp"]
+
+[pcre2]
+description = "Perl-compatible regular expressions (8-bit) — compile/match, captures, named groups, Unicode properties"
+version = "10.45"
+language = "c"
+tags = ["regex", "text", "parsing", "unicode"]

@@ -97,6 +97,41 @@ enabled = true
 
 When `use()` fetches this TOML, RepliBuild's `DependencyResolver` clones the git repo, injects the source files and include paths, then the standard pipeline takes over.
 
+## Packages with a `config/` directory
+
+Some libraries cannot be compiled from a bare checkout: the headers they need are
+produced by a configure step and are **not in git**. `curl` and `pcre2` are the current
+examples. Those packages carry a `config/` directory of **checked-in build artifacts**,
+plus a `harvest.jl` that regenerates them.
+
+This is deliberate, not vendored sloppiness. RepliBuild compiles
+all-sources-minus-excludes under one uniform flag set and never runs a configure step, so
+the generated files have to already exist. cmake's *configure* phase is not its build
+phase — it is a self-contained feature-detection pass that emits those files in seconds
+without a compiler touching a real source file — so it is run once, at authoring time,
+and its output travels with the package.
+
+```bash
+# Regenerate after a version bump, then diff config/
+julia --project=/path/to/RepliBuildTooling.jl packages/pcre2/harvest.jl
+```
+
+**If you bump such a package's version, you must re-run its `harvest.jl`.** A stale
+`config.h` does not fail the build — it produces a library that is self-consistently
+*not* the library (no Unicode support, a wrong-width integer type), which compiles,
+links and wraps cleanly. Diff the result: a changed `SIZEOF_*` or a vanished `SUPPORT_*`
+is real news. For the same reason, these packages' `test.jl` asserts behaviour that
+*depends on* the feature probes rather than just checking that functions exist.
+
+Each `config/` directory carries a generated `HARVEST.md` recording the exact cmake
+arguments used, the upstream commit, and the toolchain — read it before regenerating.
+The mechanics live in `RepliBuildTooling` (`cmake_probe`, `harvest_config`,
+`propose_toml`); see the CMake section of its `docs/src/introspect.md`.
+
+Libraries that generate at **build** time rather than configure time (libpng's
+`pnglibconf.h` comes out of an awk pipeline wired as a custom command) are *not* covered
+by this and need a shipped fallback or `RepliBuild.ingest()`.
+
 ## Environment Variable
 
 Override the hub URL for private registries or mirrors:
@@ -119,3 +154,5 @@ export REPLIBUILD_HUB_URL="https://raw.githubusercontent.com/your-org/your-hub/m
 - Point dependencies at stable tags, not branches
 - Include only the minimal flags needed — RepliBuild handles debug metadata and LTO automatically
 - Test that `use("<name>")` succeeds on a clean machine before submitting
+- If the library needs a generated `config.h`, don't hand-write it and don't give up —
+  see [Packages with a `config/` directory](#packages-with-a-config-directory)
