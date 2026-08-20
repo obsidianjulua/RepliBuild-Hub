@@ -70,23 +70,6 @@ end
 
 b3hex(args...; kw...) = bytes2hex(b3(args...; kw...))
 
-"""
-Does the Tier-1 `@generated` kernel actually generate an `llvmcall`?
-
-The argument types are read off the kernel's own method signature rather than
-written out here: a hand-written signature that doesn't match returns an EMPTY
-`code_typed` result, which reads as "no llvmcall" and passes a naive negative
-check while proving nothing. Empty is an error, not a verdict.
-"""
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 @testset "BLAKE3 Deep Tests" begin
 
 @testset "Build identity — portable, vendored header" begin
@@ -124,8 +107,8 @@ end
         @test occursin("define", read(joinpath(slices_dir, f), String))
     end
 
-    @test kernel_emits_llvmcall(Blake3._TIER1_blake3_hasher_init)
-    @test kernel_emits_llvmcall(Blake3._TIER1_blake3_hasher_finalize)
+    @test Blake3.dispatch_tier(:blake3_hasher_init) === :tier1
+    @test Blake3.dispatch_tier(:blake3_hasher_finalize) === :tier1
 
     # blake3_hasher_update is NOT sliced (it stays Tier 3), so every KAT below
     # is already a mixed-tier run: Tier-1 init/finalize around a Tier-3 update.

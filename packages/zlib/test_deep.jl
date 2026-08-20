@@ -35,15 +35,6 @@ include(WRAPPER)
 
 const Z = Zlib
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # ── Independent checksum oracles ─────────────────────────────────────────────
 # Reimplemented from the algorithm definitions, NOT from zlib — so agreement is
 # evidence about the wrapped library rather than a tautology.
@@ -222,8 +213,8 @@ end
 
     slices_dir = joinpath(PKG_DIR, "julia", "slices")
     @test isdir(slices_dir)
-    @test kernel_emits_llvmcall(Z._TIER1_crc32)
-    @test kernel_emits_llvmcall(Z._TIER1_adler32)
+    @test Z.dispatch_tier(:crc32) === :tier1
+    @test Z.dispatch_tier(:adler32) === :tier1
 
     # deflate/inflate themselves stay Tier 3, so every stream test below is a
     # mixed-tier run: Tier-1 init/end around a Tier-3 state machine.

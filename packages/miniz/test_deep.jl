@@ -35,15 +35,6 @@ include(WRAPPER)
 
 const M = Miniz
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # ── Independent checksum oracles (same algorithms, written from spec) ────────
 const CRC_TABLE = let t = zeros(UInt32, 256)
     for n in 0:255
@@ -101,8 +92,8 @@ end
     lls = filter(f -> endswith(f, ".ll"), readdir(slices_dir))
     @test length(lls) == length(M.TIER1_FUNCTIONS)
     @test "mz_crc32" in M.TIER1_FUNCTIONS
-    @test kernel_emits_llvmcall(M._TIER1_mz_crc32)
-    @test kernel_emits_llvmcall(M._TIER1_mz_adler32)
+    @test M.dispatch_tier(:mz_crc32) === :tier1
+    @test M.dispatch_tier(:mz_adler32) === :tier1
 end
 
 @testset "Checksums against independent implementations" begin

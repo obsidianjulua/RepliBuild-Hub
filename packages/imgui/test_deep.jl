@@ -68,17 +68,11 @@ include(WRAPPER)
 
 const META = JSON.parsefile(META_PATH)
 
-# DWARF sizes/offsets arrive as hex strings
-_num(v) = v isa Integer ? Int(v) :
-          startswith(v, "0x") ? parse(Int, v[3:end], base = 16) : parse(Int, v)
-
-meta_size(s::AbstractString) = _num(META["struct_definitions"][s]["byte_size"])
-function meta_offset(s::AbstractString, member::AbstractString)
-    for m in META["struct_definitions"][s]["members"]
-        m["name"] == member && return _num(m["offset"])
-    end
-    error("no member $member in $s")
-end
+# Sizes and offsets are emitted by the wrapper now (STRUCT_SIZES /
+# STRUCT_OFFSETS), read from the same DWARF the module was generated from —
+# no second copy of the hex-parsing, and no reaching into the metadata JSON.
+meta_size(s) = Imgui.struct_size(s)
+meta_offset(s, member) = Imgui.member_offset(s, member)
 
 const IO_BACKEND_FLAGS = meta_offset("ImGuiIO", "BackendFlags")
 const IO_DISPLAY_SIZE  = meta_offset("ImGuiIO", "DisplaySize")
@@ -97,6 +91,12 @@ withref(f, v::T) where {T} = (r = Ref(v); GC.@preserve r f(Base.unsafe_convert(P
 const _PINNED = Dict{String,String}()
 cs(s::AbstractString) = pointer(get!(_PINNED, String(s), String(s)))
 
+# A `char*` return arrives as `Union{String,Nothing}` — the wrapper applies the
+# NULL/copy policy itself now, on Tier 2 as well as on ccall (2026-08-12). The
+# pointer arms stay for values read out of blobs by hand, and for
+# `<name>_ptr` if a call site wants the raw pointer.
+cstr(x::AbstractString) = String(x)
+cstr(::Nothing) = ""
 cstr(x) = (p = reinterpret(Ptr{UInt8}, x); p == C_NULL ? "" : unsafe_string(p))
 
 # ImGuiIO is a 3048-byte blob (106 members) and ImGui_GetIO() hands back a

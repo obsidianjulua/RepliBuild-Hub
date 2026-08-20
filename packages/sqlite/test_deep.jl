@@ -34,15 +34,6 @@ include(WRAPPER)
 
 const S = Sqlite
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 "Open an in-memory database, run `f(db)`, always close."
@@ -170,9 +161,9 @@ end
     @test length(lls) == length(S.TIER1_FUNCTIONS)
     @test length(lls) > 200
 
-    @test kernel_emits_llvmcall(S._TIER1_sqlite3_column_count)
-    @test kernel_emits_llvmcall(S._TIER1_sqlite3_bind_int)
-    @test kernel_emits_llvmcall(S._TIER1_sqlite3_bind_int64)
+    @test S.dispatch_tier(:sqlite3_column_count) === :tier1
+    @test S.dispatch_tier(:sqlite3_bind_int) === :tier1
+    @test S.dispatch_tier(:sqlite3_bind_int64) === :tier1
 
     # Cstring returns can never be Tier 1, so errmsg/libversion stay ccall —
     # every test below is therefore a mixed-tier run.

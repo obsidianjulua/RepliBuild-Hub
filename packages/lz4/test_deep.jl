@@ -33,15 +33,6 @@ include(WRAPPER)
 
 const L = Lz4
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 const TEXT = repeat("lz4 is a very fast compressor. ", 700)
 const PAYLOADS = Dict(
     :tiny    => collect(codeunits("hello lz4")),
@@ -92,8 +83,8 @@ end
     lls = filter(f -> endswith(f, ".ll"), readdir(slices_dir))
     @test length(lls) == length(L.TIER1_FUNCTIONS)
     @test "LZ4_compressBound" in L.TIER1_FUNCTIONS
-    @test kernel_emits_llvmcall(L._TIER1_LZ4_compressBound)
-    @test kernel_emits_llvmcall(L._TIER1_LZ4_versionNumber)
+    @test L.dispatch_tier(:LZ4_compressBound) === :tier1
+    @test L.dispatch_tier(:LZ4_versionNumber) === :tier1
 end
 
 @testset "Block API round-trips" begin

@@ -38,15 +38,6 @@ include(WRAPPER)
 
 const D = Duktape
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # duktape type tags (duk_config.h / duktape.h #defines)
 const DUK_TYPE_NONE, DUK_TYPE_UNDEFINED, DUK_TYPE_NULL = 0, 1, 2
 const DUK_TYPE_BOOLEAN, DUK_TYPE_NUMBER, DUK_TYPE_STRING = 3, 4, 5
@@ -119,8 +110,8 @@ end
     for f in first(sort(lls), 20)
         @test occursin("define", read(joinpath(slices_dir, f), String))
     end
-    @test kernel_emits_llvmcall(D._TIER1_duk_get_top)
-    @test kernel_emits_llvmcall(D._TIER1_duk_push_int)
+    @test D.dispatch_tier(:duk_get_top) === :tier1
+    @test D.dispatch_tier(:duk_push_int) === :tier1
 end
 
 @testset "Heap lifecycle" begin

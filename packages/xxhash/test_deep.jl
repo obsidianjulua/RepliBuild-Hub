@@ -93,23 +93,15 @@ end
     end
 
     # The generated kernel resolves to llvmcall (not the ccall demotion path).
-    # Argument types come from the kernel's own method signature: a mismatched
-    # hand-written one yields an EMPTY code_typed, which reads as "no llvmcall"
-    # and would pass the negative check below while proving nothing.
-    function kernel_emits_llvmcall(kernel)
-        ms = collect(methods(kernel))
-        isempty(ms) && error("no method for $kernel")
-        argtypes = Base.tuple_type_tail(ms[1].sig)
-        ct = code_typed(kernel, argtypes)
-        isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-        return occursin("llvmcall", string(ct))
-    end
-    @test kernel_emits_llvmcall(Xxhash._TIER1_XXH32)
-    @test kernel_emits_llvmcall(Xxhash._TIER1_XXH64)
+    # `dispatch_tier` is emitted by the wrapper and answers from the kernel's
+    # own code_typed, so the argument types come from the kernel's method
+    # signature rather than from a hand-written guess that could yield an EMPTY
+    # code_typed and read as "no llvmcall" while proving nothing.
+    @test Xxhash.dispatch_tier(:XXH32) === :tier1
+    @test Xxhash.dispatch_tier(:XXH64) === :tier1
 
     # ...and a Tier-3 function stays a ccall — the tiers are genuinely mixed.
-    ct3 = code_typed(Xxhash.XXH3_64bits, (Vector{UInt8}, Int))
-    @test !occursin("llvmcall", string(ct3))
+    @test Xxhash.dispatch_tier(:XXH3_64bits) === :tier3
 end
 
 @testset "XXH32 — upstream sanity vectors" begin

@@ -35,15 +35,6 @@ include(WRAPPER)
 
 const G = Cglm
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # ── Marshalling ──────────────────────────────────────────────────────────────
 # cglm's `mat4` is `vec4[4]`, i.e. four COLUMNS — so the wrapper types it as
 # Ptr{NTuple{4,Cfloat}} and a Vector{NTuple{4,Float32}} of length 4 is the exact
@@ -90,10 +81,10 @@ randmat() = frommat(Matrix{Float32}(I, 4, 4) .+ 0.3f0 .* randn(RNG, Float32, 4, 
     @test length(lls) == length(G.TIER1_FUNCTIONS)
     @test length(lls) > 700
 
-    @test kernel_emits_llvmcall(G._TIER1_glmc_mat4_mul)
-    @test kernel_emits_llvmcall(G._TIER1_glmc_vec3_dot)
-    @test kernel_emits_llvmcall(G._TIER1_glmc_mat4_inv)
-    @test kernel_emits_llvmcall(G._TIER1_glmc_quat_mul)
+    @test G.dispatch_tier(:glmc_mat4_mul) === :tier1
+    @test G.dispatch_tier(:glmc_vec3_dot) === :tier1
+    @test G.dispatch_tier(:glmc_mat4_inv) === :tier1
+    @test G.dispatch_tier(:glmc_quat_mul) === :tier1
 
     # Slices must be real IR naming their own entry point.
     for f in first(sort(lls), 25)

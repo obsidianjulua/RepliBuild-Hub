@@ -103,6 +103,12 @@ withref(f, v::T) where {T} = (r = Ref(v); GC.@preserve r f(Base.unsafe_convert(P
 const _PINNED = Dict{String,String}()
 cs(s::AbstractString) = pointer(get!(_PINNED, String(s), String(s)))
 
+# A `char*` return arrives as `Union{String,Nothing}` — the wrapper applies
+# the NULL/copy policy itself now, on Tier 2 as well as on ccall (2026-08-12).
+# The pointer arms stay for values read out of blobs by hand, and for the
+# `<name>_ptr` variants.
+cstr(x::AbstractString) = String(x)
+cstr(::Nothing) = ""
 cstr(x) = (p = reinterpret(Ptr{UInt8}, x); p == C_NULL ? "" : unsafe_string(p))
 
 # ImGuiIO is a 3048-byte blob (106 members) and ImGui_GetIO() hands back a

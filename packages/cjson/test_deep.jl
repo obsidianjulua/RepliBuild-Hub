@@ -34,22 +34,6 @@ include(WRAPPER)
 
 const C = Cjson
 
-"""
-Does the Tier-1 `@generated` kernel actually generate an `llvmcall`?
-
-Argument types come from the kernel's own method signature — a hand-written
-signature that doesn't match yields an EMPTY `code_typed`, which reads as
-"no llvmcall" and would pass a naive check while proving nothing.
-"""
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 # Parse, run `f` on the tree, always delete. Returns f's value.
 function withjson(f, text::AbstractString)
     root = C.cJSON_Parse(text)
@@ -80,8 +64,8 @@ end
     lls = filter(f -> endswith(f, ".ll"), readdir(slices_dir))
     @test length(lls) == length(C.TIER1_FUNCTIONS)
 
-    @test kernel_emits_llvmcall(C._TIER1_cJSON_Parse)
-    @test kernel_emits_llvmcall(C._TIER1_cJSON_CreateObject)
+    @test C.dispatch_tier(:cJSON_Parse) === :tier1
+    @test C.dispatch_tier(:cJSON_CreateObject) === :tier1
 
     # The other half of the mixed-tier pair: a Cstring return is never Tier 1.
     @test !("cJSON_GetErrorPtr" in C.TIER1_FUNCTIONS)

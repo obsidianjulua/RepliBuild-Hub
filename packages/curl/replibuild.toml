@@ -1,0 +1,110 @@
+[project]
+name = "curl"
+version = "8.21.0"
+root = "."
+
+[dependencies.curl]
+type = "git"
+url = "https://github.com/curl/curl.git"
+tag = "curl-8_21_0"
+commit = "68720b4837284335b2d63cb358f8f6ce65f5bc55"
+# Only lib/ is the library. The tree carries 744 .c files and just 193 of them
+# are libcurl: tests/ 371, docs/ 129 (examples), src/ 43 (the curl CLI, 18
+# main()s between them), plus projects/, scripts/ and CMake/.
+#
+# `src/` must be excluded WHOLESALE, not by naming the tool_* files. Matching is
+# substring (`occursin` on the clone-relative path), and a first pass that
+# listed "src/tool_" + three names let src/curlinfo.c, src/config2setopts.c and
+# src/toolx/tool_time.c through. They compile fine on their own, so the build
+# reported success and then the .so failed to dlopen with
+# `undefined symbol: setopt_nv_CURLAUTH` — a CLI-internal reference whose
+# definition WAS excluded. Half-excluding a program is worse than not excluding
+# it. No libcurl path contains "src/" (its subdirs are vtls/vssh/vquic/vauth/
+# curlx), so the coarse pattern is safe.
+exclude = ["tests", "docs", "src/", "projects", "scripts", "CMake"]
+
+[compile]
+# ONE uniform flag set over all 193 sources — verified 193/193, 0 errors.
+#   _GNU_SOURCE  — without it exactly 5 files fail: accept4 (cf-socket.c),
+#                  memrchr (cookie.c, urlapi.c, vtls/hostcheck.c) and
+#                  strerror_r (curlx/strerr.c) are glibc extensions.
+#   HAVE_CONFIG_H — makes lib/curl_setup.h include curl_config.h (see below).
+#   BUILDING_LIBCURL — selects the internal view of the headers.
+flags = ["-O2", "-fPIC", "-D_GNU_SOURCE", "-DHAVE_CONFIG_H", "-DBUILDING_LIBCURL"]
+parallel = true
+
+# The resolver auto-adds <clone>, <clone>/include and <clone>/src. libcurl also
+# needs its own lib/ on the include path (curl_setup.h and friends), and the
+# checked-in config below. Relative to the package dir — build() cd's here.
+include_dirs = [
+    ".replibuild_cache/deps/curl/lib",
+    "config",
+]
+
+[link]
+# Whole-module llvmcall segfaults at library scale, so Tier 1 stays off here as
+# in every other Hub package. curl is I/O-bound anyway — FFI overhead is noise
+# next to a network round-trip.
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["ssl", "crypto", "z", "pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["curl/curl.h", "curl/easy.h", "curl/multi.h"]
+
+# ── printf-family and the option setters ─────────────────────────────────────
+# libcurl is STRICT about the C type of a variadic argument, and it tells you
+# which one: an option's NUMBER encodes its type. `CURLOPT(name, type, n)`
+# expands to `name = type + n` where the bases are
+#   CURLOPTTYPE_LONG           0   → long
+#   CURLOPTTYPE_OBJECTPOINT    10000 → void* / char* / curl_slist*
+#   CURLOPTTYPE_FUNCTIONPOINT  20000 → function pointer
+#   CURLOPTTYPE_OFF_T          30000 → curl_off_t
+#   CURLOPTTYPE_BLOB           40000 → struct curl_blob*
+# so `div(option, 10000)` picks the overload, and FOUR entries cover every
+# option in the library. Passing an int where curl wants a long is the classic
+# libcurl misuse — hence Clong, never Cint.
+#
+# Types are post-promotion (float→double, narrow ints→int); RepliBuild refuses
+# the un-promoted spellings outright.
+[wrap.varargs]
+curl_easy_setopt = [
+    ["Clong"],        # CURLOPTTYPE_LONG    — TIMEOUT, VERBOSE, FOLLOWLOCATION, PORT…
+    ["Cstring"],      # STRINGPOINT         — URL, USERAGENT, POSTFIELDS…
+    ["Ptr{Cvoid}"],   # OBJECT/FUNCTION/BLOB— WRITEFUNCTION, WRITEDATA, slists…
+    ["Clonglong"],    # CURLOPTTYPE_OFF_T   — INFILESIZE_LARGE, RESUME_FROM_LARGE…
+]
+curl_multi_setopt = [
+    ["Clong"],
+    ["Ptr{Cvoid}"],
+]
+curl_share_setopt = [
+    ["Clong"],
+    ["Ptr{Cvoid}"],
+]
+# getinfo always writes THROUGH a pointer the caller supplies — char**, long*,
+# double* or curl_off_t* depending on the CURLINFO_* base. One pointer overload
+# covers all of them; the caller owns the Ref's type.
+curl_easy_getinfo = [
+    ["Ptr{Cvoid}"],
+]
+
+# curl's own printf family (curl_mprintf et al.), exported and occasionally
+# used by embedders. Same promoted-type rules as any printf.
+curl_mprintf  = [["Cint"], ["Cdouble"], ["Cstring"], ["Cstring", "Cint"]]
+curl_mfprintf = [["Cint"], ["Cdouble"], ["Cstring"], ["Cstring", "Cint"]]
+curl_msprintf = [["Cint"], ["Cdouble"], ["Cstring"], ["Cstring", "Cint"]]
+curl_maprintf = [["Cint"], ["Cdouble"], ["Cstring"], ["Cstring", "Cint"]]
+curl_msnprintf = [["Cint"], ["Cdouble"], ["Cstring"], ["Cstring", "Cint"]]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

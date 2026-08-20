@@ -26,13 +26,16 @@ using .Tinyxml2
 const LIB  = Tinyxml2.LIBRARY_PATH
 const META = JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"))
 
-function struct_size(s::String)
-    v = META["struct_definitions"][s]["byte_size"]
-    v isa Integer && return Int(v)
-    startswith(v, "0x") ? parse(Int, v[3:end], base=16) : parse(Int, v)
-end
+# Emitted by the wrapper (STRUCT_SIZES), from the DWARF it was generated from.
+struct_size(s) = Tinyxml2.struct_size(s)
 
 # Cstring return → Julia String ("" on NULL)
+# A `char*` return arrives as `Union{String,Nothing}` — the wrapper applies
+# the NULL/copy policy itself now, on Tier 2 as well as on ccall (2026-08-12).
+# The pointer arms stay for values read out of blobs by hand, and for the
+# `<name>_ptr` variants.
+cstr(x::AbstractString) = String(x)
+cstr(::Nothing) = ""
 cstr(cs) = (p = reinterpret(Ptr{UInt8}, cs); p == C_NULL ? "" : unsafe_string(p))
 
 # XMLDocument on caller-owned storage via the real ctor (processEntities=true,

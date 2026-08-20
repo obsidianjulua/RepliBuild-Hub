@@ -39,15 +39,6 @@ include(WRAPPER)
 
 const B = Box2d3
 
-function kernel_emits_llvmcall(kernel)
-    ms = collect(methods(kernel))
-    isempty(ms) && error("no method for $kernel")
-    argtypes = Base.tuple_type_tail(ms[1].sig)
-    ct = code_typed(kernel, argtypes)
-    isempty(ct) && error("code_typed empty for $kernel with $argtypes")
-    return occursin("llvmcall", string(ct))
-end
-
 vec2(x, y) = B.b2Vec2(Float32(x), Float32(y))
 
 "Create a world with the given gravity, run `f(worldId)`, always destroy."

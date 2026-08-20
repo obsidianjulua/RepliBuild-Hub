@@ -35,5 +35,155 @@ strictness = "warn"
 allow_unknown_structs = true
 allow_function_pointers = true
 
+# ── printf-family text API ───────────────────────────────────────────────────
+# Keyed on the BARE DWARF name (`Text`), not the emitted Julia name
+# (`ImGui_Text`) — see the `func_name` lookup in GeneratorCpp. Each entry lists
+# ONLY the variadic tail; fixed args come from DWARF. One entry emits one
+# method, named by its types: `ImGui_Text_Cstring`, `ImGui_Text_Cdouble_Cdouble`.
+# Without this block every one of these is base-wrapper-only — `ImGui_Text` has
+# a single `(Any)` method and the format arguments have nowhere to go.
+#
+# TYPES ARE POST-PROMOTION, AND THAT IS LOAD-BEARING. C default argument
+# promotion applies to variadic args: float→double, char/short/bool→int. Julia's
+# `@ccall f(fixed...; va::T)` passes exactly T with no promotion, and
+# `_VARARG_ALLOWED_TYPES` accepts "Cfloat"/"Cchar"/"Cshort"/"Bool" without
+# comment. So `["Cfloat"]` here would push 4 bytes into a slot printf reads as
+# 8 — silent garbage, no crash. Every float slot below is Cdouble deliberately;
+# ImVec2/ImVec4 components are floats in C++ and MUST be passed as Cdouble.
+#
+# OMITTED, deliberately:
+#   TextAligned                — imgui_internal.h, upstream marks it
+#                                "FIXME-WIP: API is likely to be reworked"
+#   ImFormatString             — writes into a caller-supplied char* buf; needs
+#                                buffer ergonomics, not a type list
+#   ImFormatStringToTempBuffer — hands back pointers into imgui's per-frame temp
+#                                buffer; lifetime is not expressible here
+#   ImGuiTextBuffer::appendf   — container method, internal
+#   AddLog                     — ExampleAppLog/ExampleAppConsole in
+#                                imgui_demo.cpp; weak symbols, not API
+[wrap.varargs]
+
+# void Text(const char* fmt, ...)
+Text = [
+    ["Cint"],
+    ["Cuint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Csize_t"],
+    ["Cint", "Cint"],
+    ["Cdouble", "Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+    ["Cint", "Cdouble"],
+    ["Cdouble", "Cint"],
+    ["Cint", "Cint", "Cint"],
+    ["Cdouble", "Cdouble", "Cdouble"],
+    ["Cdouble", "Cdouble", "Cdouble", "Cdouble"],
+]
+
+# void TextDisabled(const char* fmt, ...)
+TextDisabled = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cdouble", "Cdouble"],
+]
+
+# void TextWrapped(const char* fmt, ...)
+TextWrapped = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+
+# void TextColored(const ImVec4& col, const char* fmt, ...)
+# Fixed `col` arrives as Ref{ImVec4}; only the tail is listed here.
+TextColored = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cdouble", "Cdouble"],
+]
+
+# void BulletText(const char* fmt, ...)
+BulletText = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+]
+
+# void LabelText(const char* label, const char* fmt, ...)
+# The value side of a label/value row — numeric tails carry the weight.
+LabelText = [
+    ["Cint"],
+    ["Cuint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cint", "Cint"],
+    ["Cdouble", "Cdouble"],
+    ["Cdouble", "Cdouble", "Cdouble"],
+    ["Cdouble", "Cdouble", "Cdouble", "Cdouble"],
+]
+
+# void SetTooltip(const char* fmt, ...)
+SetTooltip = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cdouble", "Cdouble"],
+]
+
+# void SetItemTooltip(const char* fmt, ...)
+SetItemTooltip = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+    ["Cdouble", "Cdouble"],
+]
+
+# bool TreeNode(const char* str_id, const char* fmt, ...)
+# bool TreeNode(const void* ptr_id, const char* fmt, ...)
+# Two C++ overloads share this key; each gets the full set, distinguished by
+# the fixed first arg (Cstring vs Ptr) in the emitted signature.
+TreeNode = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+]
+
+# bool TreeNodeEx(const char* str_id, ImGuiTreeNodeFlags flags, const char* fmt, ...)
+# bool TreeNodeEx(const void* ptr_id, ImGuiTreeNodeFlags flags, const char* fmt, ...)
+# `flags` is fixed (ImGuiTreeNodeFlags → Cint), so the tail matches TreeNode.
+TreeNodeEx = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+]
+
+# void LogText(const char* fmt, ...) — straight to the log, never displayed
+LogText = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+]
+
+# void DebugLog(const char* fmt, ...)
+DebugLog = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cstring", "Cint"],
+]
+
 [cache]
 enabled = true

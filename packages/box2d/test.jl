@@ -26,15 +26,10 @@ using .Box2d
 const LIB  = Box2d.LIBRARY_PATH
 const META = JSON.parsefile(joinpath(@__DIR__, "julia", "compilation_metadata.json"))
 
-function field_off(sname::String, mname::String)
-    sd = META["struct_definitions"]
-    haskey(sd, sname) || error("struct $sname missing from metadata")
-    for m in sd[sname]["members"]
-        m["name"] == mname && return parse(Int, m["offset"])
-    end
-    error("member $sname.$mname missing from metadata")
-end
-struct_size(sname::String) = parse(Int, META["struct_definitions"][sname]["byte_size"])
+# Emitted by the wrapper now (STRUCT_SIZES / STRUCT_OFFSETS), read from the
+# same DWARF the module was generated from — one derivation, not two.
+field_off(sname, mname) = Box2d.member_offset(sname, mname)
+struct_size(sname) = Box2d.struct_size(sname)
 
 @testset "Box2D 2.4.1 (C++)" begin
 
