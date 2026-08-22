@@ -5,51 +5,175 @@ wrapper — the reference example for **driving a wrapped C library whose entire
 entry surface crosses by value**, and the counterpart to `BoxWorld` (which
 covers the C++ object-model side).
 
+## The interface
+
+Three names.
+
 ```julia
 using LlamaChat
 
-chat("write a haiku about pointers")
-chat("now make it about DWARF")           # remembers the turn before
-start!("qwen2.5-coder:1.5b-base")         # switch models
-chatrepl()                                # interactive
+list_models()              # what is on the box
+load("qwen3-coder")        # load it and start talking
+ask("why did that fail?")  # answer in a second window; this REPL stays yours
 ```
 
-Replies render as **markdown** in the terminal — fenced code blocks get syntax
-highlighting, lists and emphasis get formatted — via Julia's `Markdown` stdlib.
-It is on by default whenever output is a tty, off for pipes and files.
+```
+julia> load("qwen3-coder")
+loading qwen3-coder … ok  (35.1s, n_ctx=32768, 6 threads, template=built-in)
+
+qwen3-coder  ·  32768 ctx  ·  /help for commands
+
+>>> write a haiku about pointers
+…
+[9 prompt tok @ 43.2/s · 31 gen tok @ 20.1/s]
+
+>>> /exit
+(unloaded)
+
+julia>
+```
+
+In the loop: `/reset`, `/system <text>`, `/stats`, `/help`, `/exit`. Ctrl-C
+stops a reply without leaving the loop; Ctrl-D leaves like `/exit`.
+
+`/exit` frees the context **and** the weights before returning, so the Julia
+session you come back to holds nothing and the next `load` starts clean —
+including after a turn that died halfway, since the teardown is in a `finally`.
+The cost is a full reload to resume; the benefit is never wondering whether
+18 GB is still resident.
+
+`load()` with no argument opens `default_model()` — `$LLAMACPP_CHAT_MODEL`, else
+`qwen3-coder`. Its keywords are `ChatSession`'s:
 
 ```julia
-chat("show me a julia function")             # streams, then renders formatted
-chat("..."; markdown = false)                # raw text only
-md(r)                                        # render any Response after the fact
+load("qwen2.5-coder:1.5b-base"; temp = 0)            # greedy
+load("qwen3-coder"; system = "You are terse.", n_ctx = 8192)
 ```
+
+Replies render as **markdown** — fenced code blocks get syntax highlighting,
+lists and emphasis get formatted — via Julia's `Markdown` stdlib. There is no
+switch for it: on a terminal it always happens, into a pipe it never does,
+because the redraw is cursor arithmetic and a pipe has no cursor. See
+[Markdown vs. streaming](#markdown-vs-streaming).
 
 Or from a shell:
 
 ```console
-$ julia --project=examples/LlamaChat examples/LlamaChat/chat.jl        # REPL
+$ julia --project=examples/LlamaChat examples/LlamaChat/chat.jl        # chat
 $ julia --project=examples/LlamaChat examples/LlamaChat/chat.jl "hi"   # one-shot
 ```
 
-Or just:
+## `ask` — the answer goes to another window
+
+`load` wants the terminal. `ask` is for when the REPL is the thing you are
+working in and you are not leaving it: the reply renders in a **second terminal
+window**, driven by this same Julia process, and you keep the prompt.
 
 ```julia
-julia> LlamaChat.run_demo()
+julia> RepliBuild.wrap("packages/pugixml/replibuild.toml")
+ERROR: MethodError: no method matching thunk_abi(::MEMORY, ::Val{:byval})
+Stacktrace: [1] emit_thunk ...
+
+julia> ask("why did that fail?")     # returns in ~0.5s; answer lands next door
+julia> # ...and you carry straight on working here
 ```
+
+Three things make it work, and each was a choice:
+
+**It returns immediately.** Generation runs on a spawned thread
+(`$JULIA_NUM_THREADS=auto` gives 12 here), and so does the *model load* — the
+first `ask` returns in about half a second with the window already up saying
+`loading qwen3-coder …`, rather than freezing the REPL for the 36 s it takes to
+map 18 GB. A second `ask` during that simply queues behind it on the session
+lock. Getting this wrong is subtle: loading in `ask` itself was correct, worked
+fine, and blocked the prompt for 36 s on the one call whose entire purpose is
+not to.
+
+**The model sees your terminal, not just your question.** Context comes from
+`kitty @ get-text` — the real scrollback, so the failing call, the error and the
+stacktrace are all in it without you retyping any of them. Only what is *new*
+since the last `ask` is sent; re-sending a 400-line capture every turn would
+spend the whole context window re-reading itself in about three turns.
+
+**Closing the window is the hangup.** It frees the context and the weights, and
+the next `ask` starts clean — the same contract `/exit` has in `load`. The window
+also dies with the Julia process, including when Julia is killed outright: the
+child watches its parent's pid, because a Julia that gets SIGKILLed has no
+handler left to run and an orphaned window sits on screen forever otherwise.
+
+```julia
+ask("why?"; model = "qwen3-coder")     # opens the window and loads
+ask("show the fix")                    # same conversation, same window
+ask("..."; context = false)            # no scrollback, just the prompt
+ask("..."; max_tokens = 300, lines = 100)
+```
+
+`ChatSession` keywords (`system`, `n_ctx`, `temp`, …) apply on the call that
+opens the window, since that is the one that builds the session.
+
+### Setup
+
+The scrollback needs kitty remote control, which is one line in `kitty.conf`:
+
+```
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty-{kitty_pid}
+```
+
+`socket-only` leaves the escape-code channel closed, so only processes that can
+see `$KITTY_LISTEN_ON` can drive kitty. **Windows already open when you add this
+must be restarted** — kitty reads it at window start. Without it `ask` still
+works; it warns once and sends the prompt on its own.
+
+### Everything else
+
+`list_models` and `load` are the whole export list. The machinery underneath is
+unchanged and still supported — it is simply not in your namespace:
+
+```julia
+LlamaChat.ChatSession(model; kwargs...)   # a session you own the lifetime of
+LlamaChat.chat(s, prompt; kwargs...)      # one turn → Response
+LlamaChat.reset!(s) / close!(s)
+LlamaChat.resolve_model(name)             # name → blob path
+LlamaChat.default_model() / ollama_root()
+```
+
+That is the scripting path, and `chat.jl`'s one-shot branch is the worked
+example of it. Gone outright, not merely unexported: `md`, `chatrepl`, `start!`,
+`run_demo`, the module-global session behind bare `chat("...")`, and the
+`markdown` kwarg.
+
+## Models
 
 Models are named the way ollama names them — `"qwen3-coder"`, `"gemma4:e2b"`,
 `"igorls/gemma-4-E4B-it-heretic-GGUF:latest"` — and resolved through the local
 manifest store (`$OLLAMA_MODELS`, default `/var/lib/ollama`). A path to a
-`.gguf` works too. `list_models()` shows what is on the box.
+`.gguf` works too.
 
-The default is **qwen3-coder** (30B-A3B): a MoE, so only ~3B parameters are
+```
+julia> list_models()
+   qwen3.6:35b                 22 GiB
+   gemma4:31b                  19 GiB
+ → qwen3-coder:latest          17 GiB
+   qwen3.8:27b                 16 GiB
+   ornith-1.5:9b              5.2 GiB
+   qwen2.5-coder:1.5b-base    940 MiB
+   nomic-embed-text:latest    262 MiB
+```
+
+`→` marks what bare `load()` will open. The return value is still a
+`Vector{Tuple{String,Int}}` of (name, bytes) for anything that wants to index or
+filter it — only the printing is different.
+
+The default model is **qwen3-coder** (30B-A3B): a MoE, so only ~3B parameters are
 active per token, which makes an 18 GB model *faster* on CPU than a dense 8 GB
 one. Measured on a Ryzen 5 5600 (6 threads, CPU-only): ~43 tok/s prompt,
 ~20 tok/s generation, 35 s one-time load. Override with `$LLAMACPP_CHAT_MODEL`;
-`default_model()` reports what bare `chat("...")` will open.
+`LlamaChat.default_model()` reports what bare `load()` will open, and
+`list_models()` marks it.
 
 Both environment variables are read when they are used, not when the package is
-loaded, so setting one mid-session takes effect on the next `start!`. (They were
+loaded, so setting one mid-session takes effect on the next `load`. (They were
 `const`s initialised from `ENV` at module scope, which Julia evaluates during
 *precompilation* and freezes into the `.ji` — so `$LLAMACPP_CHAT_MODEL` silently
 did nothing for anyone whose first `using LlamaChat` came before they set it.)
@@ -64,7 +188,9 @@ LlamaChat/
 │   ├── libllamacpp.so
 │   ├── compilation_metadata.json
 │   └── thunk_manifest.json
-├── src/LlamaChat.jl     # the ergonomic layer — sessions, templating, KV bookkeeping
+├── src/
+│   ├── LlamaChat.jl     # the ergonomic layer — sessions, templating, KV bookkeeping
+│   └── window.jl        # ask(): sidecar window, ptys, scrollback capture
 ├── chat.jl              # thin launcher for shell use
 └── test/runtests.jl
 ```
@@ -167,9 +293,37 @@ by construction (unterminated fence, half a table), so the renderer is wrapped
 in a fallback to raw text: a formatting problem must never cost a finished
 generation.
 
+There is deliberately no switch for any of this. The one condition that actually
+governs it — is `io` a tty — is not a preference, it is whether `\e[nA` has a
+cursor to move; a `markdown = false` kwarg and a `/md` toggle were just a way to
+ask for worse output on a terminal that could do better. Both are gone.
+
 Note that a model writing literal `•` characters instead of `-` list markers is
 emitting paragraph text, not a list, and renders as one — that is the model's
 choice, not the renderer's.
+
+### Headings are drawn without their underline rule
+
+Julia's terminal backend underlines a header with a run of characters chosen by
+level — `Markdown._header_underlines = collect("≡=–-⋅ ")`. h1 gets `≡`, which
+reads as decoration. h2 gets plain ASCII `=`, and a bold line sitting above
+`==========` is character-for-character what setext markdown *source* looks
+like:
+
+```
+Origins and Design Philosophy          ← rendered h2, working correctly
+==============================
+```
+
+So a correctly rendered `## Heading` looks like a renderer that failed to strip
+the syntax, and models reach for `##` constantly — this is the common case, not
+an edge one. It got reported here as "qwen breaks it somehow."
+
+h1 keeps its rule; h2 and below render as bold text with none, which is what
+they already looked like minus the false syntax. The rewrite happens on the
+parsed tree using public node types (`Header` → `Paragraph(Bold(...))`) rather
+than by poking `_header_underlines`, which is a mutable global shared with
+`?help` and every other markdown render in the session.
 
 ## Incremental KV reuse
 

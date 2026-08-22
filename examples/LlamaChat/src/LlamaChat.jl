@@ -30,19 +30,38 @@ Unlike the embedding path in `packages/llamacpp/inference.jl`, a wrong answer
 here is *legible*: a broken ABI crossing produces garbage text, not a plausible
 float vector.
 
+Three names, which is the whole interface:
+
 ```julia
 using LlamaChat
 
-chat("write a haiku about pointers")
-chat("now make it about DWARF")            # remembers the turn before
-start!("qwen2.5-coder:1.5b-base")          # switch models
-chatrepl()                                 # interactive
+list_models()              # what is on the box
+load("qwen3-coder")        # load it and start talking; /exit frees it
+load()                     # \$LLAMACPP_CHAT_MODEL, else qwen3-coder
+
+ask("why did that fail?")  # answer in a SECOND window; this REPL stays yours
 ```
 
+`load` does not return until you leave the chat loop, and frees the model on the
+way out — so the Julia session you come back to holds nothing, and the next
+`load` is a clean slate.
+
+`ask` is for when the REPL is the thing you are working in and you do not want
+to leave it: the reply renders in a second terminal window driven by this same
+process, and the model is handed your terminal's own scrollback, so it sees the
+error and the stacktrace rather than only what you thought to retype. Closing
+that window is the hangup. See `window.jl`.
+
+Everything else (`ChatSession`, `chat`, `reset!`, `close!`, `resolve_model`,
+`default_model`) still exists and is still supported; it is simply not exported,
+because a chat app has no business putting a dozen names in your namespace.
+Reach it through `LlamaChat.` when scripting — see `chat.jl` for the one-shot
+form.
+
 Replies stream as plain text and each markdown block is reprinted formatted as
-soon as it closes — see `_MDSink` for why streaming and markdown have to be
-reconciled by a redraw at all, and why it is done per block rather than once at
-the end.
+soon as it closes. There is no switch for this: on a terminal it always happens,
+and into a pipe it never does, because the redraw is cursor arithmetic that a
+pipe has no cursor for. See `_MDSink`.
 """
 module LlamaChat
 
@@ -74,8 +93,11 @@ include(joinpath(@__DIR__, "..", "lib", "Llamacpp.jl"))
 import .Llamacpp
 const L = Llamacpp
 
-export chat, chatrepl, start!, reset!, close!, md, ChatSession, Response,
-       list_models, resolve_model, default_model, run_demo
+# `load` opens a model and drops you into the chat loop; `list_models` says what
+# there is to open; `ask` answers in a second window while you keep the REPL.
+# The rest of this file is what those are made of and stays behind the module
+# qualifier — see the module docstring.
+export list_models, load, ask
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model resolution — ollama's blob store, so you can say "qwen3-coder" instead
@@ -102,8 +124,7 @@ ollama_root() = get(ENV, "OLLAMA_MODELS", "/var/lib/ollama")
 """
     default_model() -> String
 
-The model bare `chat("...")` opens (`\$LLAMACPP_CHAT_MODEL`, default
-`qwen3-coder`).
+The model bare `load()` opens (`\$LLAMACPP_CHAT_MODEL`, default `qwen3-coder`).
 
 qwen3-coder is 30B-A3B: MoE, so only ~3B params are active per token. On CPU
 that makes an 18 GB model faster than a dense 8 GB one, and it has a chat
@@ -154,14 +175,56 @@ function resolve_model(name::AbstractString)
 end
 
 """
-    list_models() -> Vector{Tuple{String,Int}}
+A `Vector{Tuple{String,Int}}` of (name, bytes) that prints as a table rather
+than as a screenful of tuples. It is an `AbstractVector`, so indexing,
+iteration, `first`/`last` and broadcasting all work as they did.
+"""
+struct ModelList <: AbstractVector{Tuple{String,Int}}
+    v::Vector{Tuple{String,Int}}
+end
 
-Every ollama model visible in the local blob store, as (name, bytes).
+Base.size(m::ModelList)                  = size(m.v)
+Base.getindex(m::ModelList, i::Int)      = m.v[i]
+Base.IndexStyle(::Type{ModelList})       = IndexLinear()
+
+function _human(n::Integer)
+    n < 1024 && return "$n B"
+    x, i, units = n / 1024, 1, ("KiB", "MiB", "GiB", "TiB")
+    while x >= 1024 && i < length(units)
+        x /= 1024; i += 1
+    end
+    return string(x < 10 ? round(x; digits = 1) : round(Int, x), " ", units[i])
+end
+
+function Base.show(io::IO, ::MIME"text/plain", ms::ModelList)
+    if isempty(ms)
+        printstyled(io, "no models under $(ollama_root())\n"; color = :light_black)
+        return
+    end
+    # Mark the one bare `load()` will open. list_models always tags a model,
+    # default_model() usually does not, so normalise before comparing.
+    dflt = default_model()
+    occursin(':', dflt) || (dflt *= ":latest")
+    w = maximum(length(first(m)) for m in ms)
+    for (name, sz) in ms
+        hit = name == dflt
+        printstyled(io, hit ? " → " : "   "; color = :green)
+        printstyled(io, rpad(name, w); bold = hit)
+        printstyled(io, "  ", lpad(_human(sz), 9), "\n"; color = :light_black)
+    end
+    return nothing
+end
+
+"""
+    list_models() -> ModelList
+
+Every ollama model visible in the local blob store, largest first, as
+(name, bytes). Prints as a table; `→` marks the model bare `load()` opens.
 """
 function list_models()
     out = Tuple{String,Int}[]
     root = joinpath(ollama_root(), "manifests", REGISTRY)
-    isdir(root) || return out
+    isdir(root) || return ModelList(out)
     for (dir, _, files) in walkdir(root), f in files
         rel = relpath(joinpath(dir, f), root)
         parts = splitpath(rel)
@@ -180,7 +243,7 @@ function list_models()
         sz > 0 && push!(out, ("$model:$tag", sz))
     end
     sort!(out; by = last, rev = true)
-    return out
+    return ModelList(out)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,24 +292,79 @@ function _take_utf8!(pending::Vector{UInt8})
     return s
 end
 
-# llama.cpp writes a few hundred lines of loader detail to stderr. This is an
-# fd-level redirect (not just Base.stderr) because the noise comes from C.
-function _quiet(f, verbose::Bool)
-    verbose && return f()
-    devnull_io = open("/dev/null", "w")
-    saved = stderr
+# ── llama.cpp's own logging ──────────────────────────────────────────────────
+#
+# llama.cpp writes a few hundred lines of loader detail, and a couple more when a
+# context is freed, using C `printf` — straight to fd 1/2, where Julia's own
+# `redirect_stdout`/`redirect_stderr` cannot reach it without redirecting the
+# whole process.
+#
+# Process-wide is exactly what we must not do here. A sidecar model loads on a
+# background thread for 36 s while you keep working, and swallowing the REPL's
+# stderr for that long would eat your own errors. Worse in the other direction:
+# `~llama_context: CPU compute buffer size …` from freeing a sidecar model lands
+# on the terminal you are typing in, on top of the `julia>` the REPL has already
+# drawn. Julia does not redraw on foreign writes to its tty, so the prompt sits
+# there looking wedged until you press enter — which is precisely how it got
+# reported, and it was never a hang at all.
+#
+# `llama_log_set` routes every line through a callback instead, so a destination
+# can be chosen per use: discarded by default, the window for the sidecar, fd 2
+# when you asked to see it. The callback is three ccalls and allocates nothing —
+# llama.cpp may call it from a ggml worker, and a thread the Julia runtime never
+# adopted is no place to allocate or take a lock.
+
+const _LOG_FD = Ref{Cint}(Cint(-1))         # -1 discards
+const _LOG_CB = Ref{Ptr{Cvoid}}(C_NULL)     # set in __init__; not precompilable
+
+# `Base.fd(::IOStream)` returns a `RawFD`, which is NOT an `Integer` — so an
+# `fd::Integer` signature compiles, type-checks, and then MethodErrors at
+# runtime on the one call that passes a real stream's descriptor. That has now
+# happened twice in this file (once in `_winsize`, once in `_logto`), both times
+# at a sidecar call site no test reaches. Every fd argument goes through here so
+# there is no third time.
+_fdint(fd::Integer) = Cint(fd)
+_fdint(fd::RawFD)   = Base.bitcast(Cint, fd)
+
+function _llama_log(::Cint, text::Ptr{Cchar}, ::Ptr{Cvoid})
+    fd = _LOG_FD[]
+    fd < 0 && return nothing
+    n = ccall(:strlen, Csize_t, (Ptr{Cchar},), text)
+    n == 0 && return nothing
+    ccall(:write, Cssize_t, (Cint, Ptr{Cchar}, Csize_t), fd, text, n)
+    return nothing
+end
+
+"""
+Send llama.cpp's logging to `fd` for the duration of `f`, then put it back.
+
+`fd = -1` discards. Not a lock: two concurrent loads would race on it, and the
+worst case is a few loader lines going to the other one's window — cheap next to
+holding a lock across a 36 s load.
+"""
+function _logto(f, fd)
+    prev = _LOG_FD[]
+    _LOG_FD[] = _fdint(fd)
     try
-        redirect_stderr(devnull_io)
         return f()
     finally
-        redirect_stderr(saved)
-        close(devnull_io)
+        _LOG_FD[] = prev
     end
+end
+
+# Retained: callers still read as "do this quietly", and `verbose` still means
+# "let it through to stderr". The mechanism underneath is the log callback now
+# rather than a redirect the whole process shares.
+function _quiet(f, verbose::Bool)
+    return _logto(f, verbose ? 2 : -1)
 end
 
 const _backend_up = Ref(false)
 function _ensure_backend(verbose::Bool)
     _backend_up[] && return
+    # Install the log callback BEFORE backend init, or the backend's own banner
+    # is already on your terminal by the time anything can redirect it.
+    _LOG_CB[] == C_NULL || L.llama_log_set(_LOG_CB[], C_NULL)
     _quiet(verbose) do
         L.llama_backend_init()
     end
@@ -265,7 +383,19 @@ end
 # the erase can't reach it, so the raw text is simply left in place.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_istty(io::IO) = io isa Base.TTY
+# "Can I move a cursor around in this?" — the one question that decides whether a
+# reply is rendered or streamed raw.
+#
+# Not `io isa Base.TTY`, which was true only of this process's own stdout. The
+# sidecar window (see window.jl) is a pts we opened by path, so it arrives as an
+# `IOStream` that is every bit a terminal — `isatty` is what actually knows, and
+# the type does not. IOContext has to be unwrapped for the same reason: the
+# sidecar wraps its stream to state a size and colour support, and a wrapper
+# around a terminal is still a terminal.
+_istty(io::IO)        = false
+_istty(io::Base.TTY)  = true
+_istty(io::IOStream)  = ccall(:isatty, Cint, (Cint,), fd(io)) == 1
+_istty(io::IOContext) = _istty(io.io)
 
 # Terminal lines a string occupies at width `w`, counting soft wraps. Wide (CJK,
 # emoji) characters take two columns, which is why this is not `count('\n')`.
@@ -287,13 +417,32 @@ function _wrapped_lines(s::AbstractString, w::Integer)
     return lines + (col > 0 ? 1 : 0)
 end
 
+# Julia's terminal markdown backend underlines a header with a run of characters
+# chosen by level — `_header_underlines = collect("≡=–-⋅ ")` in the Markdown
+# stdlib. h1 gets `≡`, which reads as decoration, but h2 gets plain ASCII `=`,
+# and a bold line over `==========` is character-for-character what setext
+# markdown SOURCE looks like. So a *correctly* rendered `## Heading` looks like a
+# renderer that failed to strip the syntax — which is exactly how it got
+# reported, and models reach for `##` constantly.
+#
+# h1 keeps its rule. h2 and below become bold text with no rule at all, which is
+# what they already looked like minus the false syntax. Done by rewriting the
+# parsed tree with public node types rather than by poking the stdlib's private
+# underline table, which is a mutable global shared with `?help` and every other
+# markdown render in the session.
+_restyle(x) = x
+_restyle(h::Markdown.Header{1}) = h
+_restyle(h::Markdown.Header) = Markdown.Paragraph(Any[Markdown.Bold(h.text)])
+
 # Julia's markdown backend can throw on pathological input (and a reply cut off
 # at max_tokens is pathological by construction — an unterminated fence, a
 # half-written table). Falling back to the raw text is always acceptable;
 # throwing away a finished generation is not.
 function _show_markdown(io::IO, text::AbstractString)
     try
-        show(io, MIME"text/plain"(), md(text))
+        parsed = Markdown.parse(text)
+        map!(_restyle, parsed.content, parsed.content)
+        show(io, MIME"text/plain"(), parsed)
     catch e
         e isa InterruptException && rethrow()
         print(io, text)
@@ -346,7 +495,8 @@ gets syntax-highlighted the moment it closes rather than after the last token.
 Raw text still streams live, character by character. When a block closes,
 exactly the rows it occupies are erased and reprinted formatted.
 
-`render = false` makes this a plain passthrough (not a tty, or markdown off).
+`render = false` makes this a plain passthrough, which is what a non-tty gets:
+`\\e[nA` has nowhere to move a cursor a pipe does not have.
 """
 mutable struct _MDSink
     io::IO
@@ -522,14 +672,9 @@ struct Response
     n_gen::Int             # tokens generated
     t_prompt::Float64      # seconds
     t_gen::Float64
-    stop::Symbol           # :eog | :max_tokens | :ctx_full | :decode_error
+    stop::Symbol           # :eog | :max_tokens | :ctx_full | :decode_error | :interrupt
     streamed::Bool
-    markdown::Bool         # was it rendered as markdown (or should it be)
 end
-
-# Markdown defaults off, so older 7-arg construction keeps working.
-Response(text, np, ng, tp, tg, stop, streamed) =
-    Response(text, np, ng, tp, tg, stop, streamed, false)
 
 Base.String(r::Response)          = r.text
 Base.print(io::IO, r::Response)   = print(io, r.text)
@@ -538,17 +683,6 @@ Base.length(r::Response)          = length(r.text)
 Base.isempty(r::Response)         = isempty(r.text)
 Base.:(*)(a::AbstractString, r::Response) = a * r.text
 Base.:(*)(r::Response, a::AbstractString) = r.text * a
-
-"""
-    md(x) -> Markdown.MD
-
-Parse `x` (a `Response` or a string) as Markdown. The result renders with
-Julia's terminal markdown backend — code blocks, emphasis, lists, tables — so
-`md(r)` at the REPL displays a formatted reply, and `md(r)` is also the escape
-hatch when a turn was streamed raw and you want it formatted after the fact.
-"""
-md(s::AbstractString) = Markdown.parse(s)
-md(r::Response)       = Markdown.parse(r.text)
 
 function _stats_line(r::Response)
     pps = r.t_prompt > 0 ? r.n_prompt / r.t_prompt : 0.0
@@ -560,15 +694,11 @@ end
 
 # When the text already streamed to the terminal, echoing it again as the REPL
 # return value is just noise — show the throughput instead. A response that was
-# NOT streamed still owes the caller its content, formatted if it asked for it.
+# NOT streamed still owes the caller its content, and gets it formatted: this is
+# the display path, and the display path always formats.
 function Base.show(io::IO, ::MIME"text/plain", r::Response)
-    if r.streamed
-        printstyled(io, _stats_line(r); color = :light_black)
-    elseif r.markdown
-        _show_markdown(io, r.text)
-    else
-        print(io, r.text)
-    end
+    r.streamed ? printstyled(io, _stats_line(r); color = :light_black) :
+                 _show_markdown(io, r.text)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -606,9 +736,16 @@ Load a model and open a context. `model` is an ollama name or a path.
   `top_k`/`top_p`/`min_p`  default 40 / 0.95 / 0.05
   `seed`         default random
   `verbose`      let llama.cpp's loader log to stderr (default false)
+  `log`          where the one-line load progress goes (default stderr)
+
+`log` exists because a 35 s load has to say something, and where that something
+belongs depends on who is waiting for it. At the REPL it is stderr. For the
+sidecar window it is the window — a line appearing in a REPL you are typing into,
+asynchronously, several seconds after you moved on, is worse than no line.
 """
 function ChatSession(model::AbstractString = default_model();
                      system::AbstractString = "",
+                     log::IO = stderr,
                      n_ctx::Integer = 32768,
                      n_batch::Integer = 512,
                      n_threads::Integer = max(1, Sys.CPU_THREADS ÷ 2),
@@ -623,7 +760,7 @@ function ChatSession(model::AbstractString = default_model();
     path = resolve_model(model)
     _ensure_backend(verbose)
 
-    verbose || print(stderr, "loading $model … ")
+    verbose || (print(log, "loading $model … "); flush(log))
     t0 = time_ns()
 
     # 72-byte MEMORY-class struct, returned by value then passed by value into
@@ -672,17 +809,23 @@ function ChatSession(model::AbstractString = default_model();
                     Pair{String,String}[], UInt8[], 0, Int(n_ctx), Int(n_batch),
                     verbose, true)
 
-    verbose || println(stderr, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
-                               "n_ctx=$n_ctx, $n_threads threads, " *
-                               "template=$(tmpl === nothing ? "chatml (fallback)" : "built-in"))")
+    verbose || (println(log, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
+                             "n_ctx=$n_ctx, $n_threads threads, " *
+                             "template=$(tmpl === nothing ? "chatml (fallback)" : "built-in"))");
+                flush(log))
     return s
 end
 
+# Freeing a context logs too (`~llama_context: CPU compute buffer size …`), and
+# that line is the one that lands on a REPL prompt seconds after you moved on.
+# Same treatment as the load.
 function close!(s::ChatSession)
     s.isopen || return s
-    s.smpl  != C_NULL && L.llama_sampler_free(s.smpl)
-    s.ctx   != C_NULL && L.llama_free(s.ctx)
-    s.model != C_NULL && L.llama_model_free(s.model)
+    _quiet(s.verbose) do
+        s.smpl  != C_NULL && L.llama_sampler_free(s.smpl)
+        s.ctx   != C_NULL && L.llama_free(s.ctx)
+        s.model != C_NULL && L.llama_model_free(s.model)
+    end
     s.smpl = s.ctx = C_NULL; s.model = C_NULL
     s.isopen = false
     return s
@@ -899,51 +1042,29 @@ end
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
-const _SESSION = Ref{Union{Nothing,ChatSession}}(nothing)
-
 """
-    start!(model = default_model(); kwargs...) -> ChatSession
-
-Open (or replace) the session that bare `chat("...")` talks to. Same keywords
-as [`ChatSession`](@ref).
-"""
-function start!(model::AbstractString = default_model(); kwargs...)
-    cur = _SESSION[]
-    cur !== nothing && cur.isopen && close!(cur)
-    _SESSION[] = ChatSession(model; kwargs...)
-    return _SESSION[]
-end
-
-function session()
-    s = _SESSION[]
-    (s === nothing || !s.isopen) && return start!()
-    return s
-end
-
-"""
-    chat(prompt; kwargs...) -> Response
-    chat(session, prompt; kwargs...) -> Response
+    LlamaChat.chat(session, prompt; kwargs...) -> Response
 
 Send `prompt` as a user turn and generate the reply. The session keeps the
 conversation, so follow-up turns see what came before; `reset!` clears it.
 
   `max_tokens` cap on generated tokens (default 4096)
   `stream`     print tokens as they arrive (default true)
-  `markdown`   render as markdown (default: true on a tty)
   `io`         where to stream (default stdout)
 
 The reply is `r.text`. When streamed, the REPL shows a throughput line instead
-of repeating the text; `md(r)` re-renders it formatted at any time.
+of repeating the text, which is already on screen.
 
-With both `stream` and `markdown` on, tokens appear live as plain text and each
-markdown block is reprinted formatted the moment it closes — so a code fence is
-highlighted as soon as it ends, and reply length does not matter. See `_MDSink`.
+Streamed to a terminal, tokens appear live as plain text and each markdown block
+is reprinted formatted the moment it closes — so a code fence is highlighted as
+soon as it ends, and reply length does not matter. There is no kwarg for this:
+the redraw is cursor arithmetic, so it is available exactly when `io` is a tty
+and meaningless when it is not. See `_MDSink`.
+
+Not exported — `load` is the front door. This is the scripting entry point.
 """
-chat(prompt::AbstractString; kwargs...) = chat(session(), prompt; kwargs...)
-
 function chat(s::ChatSession, prompt::AbstractString;
-              max_tokens::Integer = 4096, stream::Bool = true, io::IO = stdout,
-              markdown::Bool = _istty(io))   # must follow io — defaults see only earlier kwargs
+              max_tokens::Integer = 4096, stream::Bool = true, io::IO = stdout)
     s.isopen || error("session is closed")
 
     push!(s.history, "user" => String(prompt))
@@ -979,7 +1100,7 @@ function chat(s::ChatSession, prompt::AbstractString;
     t1 = time_ns()
     # Blocks are rendered as they close, so the reply formats progressively and
     # its height never matters — see `_MDSink`.
-    sink = _MDSink(io; render = stream && markdown && _istty(io))
+    sink = _MDSink(io; render = stream && _istty(io))
     text, ngen, stop = try
         _generate!(s, Int(max_tokens), stream, sink)
     catch
@@ -1001,23 +1122,43 @@ function chat(s::ChatSession, prompt::AbstractString;
     # of the next turn's delta, which keeps cache and transcript in step.
     append!(s.decoded, codeunits(text))
 
-    return Response(text, length(toks), ngen, t_prompt, t_gen, stop, stream, markdown)
+    return Response(text, length(toks), ngen, t_prompt, t_gen, stop, stream)
 end
 
-reset!() = reset!(session())
-close!() = (s = _SESSION[]; s === nothing ? nothing : close!(s))
+# ─────────────────────────────────────────────────────────────────────────────
+# The chat interface
+# ─────────────────────────────────────────────────────────────────────────────
+
+const _COMMANDS = (
+    ("/reset",          "forget the conversation, keep the model loaded"),
+    ("/system <text>",  "set the system prompt (clears the conversation)"),
+    ("/stats",          "context use, message count, transcript size"),
+    ("/help",           "this list"),
+    ("/exit",           "free the model and return to Julia"),
+)
+
+function _help(io::IO)
+    w = maximum(length(first(c)) for c in _COMMANDS)
+    for (verb, what) in _COMMANDS
+        printstyled(io, "  ", rpad(verb, w); bold = true)
+        printstyled(io, "  ", what, "\n"; color = :light_black)
+    end
+    return nothing
+end
+
+_note(msg) = printstyled("(", msg, ")\n"; color = :light_black)
 
 """
-    chatrepl([session])
-
-Interactive loop. Commands: `/reset`, `/system <text>`, `/model <name>`,
-`/md`, `/stats`, `/exit`.
+Read-eval-print over a live session. Returns when the user leaves; freeing the
+model is the caller's job, so that `load` owns the whole lifetime and a throw
+out of here still frees.
 """
-function chatrepl(s::ChatSession = session())
-    usemd = _istty(stdout)
-    println("$(s.name) — /reset /system <text> /model <name> /md /stats /exit")
+function _repl!(s::ChatSession)
+    printstyled("\n", s.name; bold = true)
+    printstyled("  ·  $(s.n_ctx) ctx  ·  /help for commands\n"; color = :light_black)
+
     while true
-        print("\n"); printstyled("> "; bold = true); flush(stdout)
+        print("\n"); printstyled(">>> "; bold = true, color = :green); flush(stdout)
         # eof() before readline(), not after: on a tty it blocks until a byte is
         # available (which is the wait we want anyway) and on a pipe it is the
         # only honest end signal. Checking it after readline() would swallow the
@@ -1027,70 +1168,93 @@ function chatrepl(s::ChatSession = session())
         isempty(line) && continue
 
         if startswith(line, "/")
-            cmd = split(line, ' '; limit = 2)
+            cmd  = split(line, ' '; limit = 2)
             verb = cmd[1]
             rest = length(cmd) > 1 ? strip(cmd[2]) : ""
-            if verb in ("/exit", "/quit", "/q")
+            if verb in ("/exit", "/quit", "/bye", "/q")
                 break
-            elseif verb == "/reset"
-                reset!(s); println("(history cleared)")
+            elseif verb in ("/reset", "/clear")
+                reset!(s); _note("conversation cleared")
             elseif verb == "/system"
+                isempty(rest) && (_note("usage: /system <text>"); continue)
                 s.system = String(rest); reset!(s)
-                println("(system prompt set, history cleared)")
-            elseif verb == "/model"
-                isempty(rest) && (println("usage: /model <name>"); continue)
-                close!(s)
-                s = start!(String(rest))
-                println("(now: $(s.name))")
-            elseif verb == "/md"
-                usemd = !usemd
-                println("(markdown rendering $(usemd ? "on" : "off"))")
+                _note("system prompt set, conversation cleared")
             elseif verb == "/stats"
-                println("$(s.name)  $(s.n_past)/$(s.n_ctx) tokens  " *
-                        "$(length(s.history)) messages  $(length(s.decoded)) transcript bytes  " *
-                        "markdown=$(usemd)")
+                _note("$(s.n_past)/$(s.n_ctx) tokens · $(length(s.history)) messages · " *
+                      "$(length(s.decoded)) transcript bytes")
+            elseif verb in ("/help", "/?")
+                _help(stdout)
             else
-                println("unknown command: $verb")
+                _note("unknown command: $verb — /help for the list")
             end
             continue
         end
 
         print("\n")
         try
-            r = chat(s, line; markdown = usemd)
+            r = chat(s, line)
             printstyled(_stats_line(r), "\n"; color = :light_black)
         catch e
-            e isa InterruptException && rethrow()
-            printstyled("error: ", sprint(showerror, e), "\n"; color = :red)
+            # Ctrl-C stops the turn, not the loop — `chat` has already rolled the
+            # session back to a consistent state, so there is nothing to leave.
+            # /exit and Ctrl-D are the ways out.
+            if e isa InterruptException
+                println(); _note("interrupted")
+            else
+                printstyled("error: ", sprint(showerror, e), "\n"; color = :red)
+            end
         end
     end
     return s
 end
 
 """
-    run_demo(; model = default_model())
+    load([model]; kwargs...)
 
-Two turns on a fresh session, printed. The second turn is the interesting one:
-it only tokenizes the new tail of the transcript, so the prompt-token count
-covers just that turn rather than the whole conversation.
+Load a model and start talking to it. `model` is an ollama name
+(`"qwen3-coder"`, `"gemma4:e2b"`, `"igorls/gemma-4-E4B-it-heretic-GGUF:latest"`)
+or a path to a `.gguf`; with no argument it opens `default_model()` —
+`\$LLAMACPP_CHAT_MODEL`, else `qwen3-coder`. `list_models()` shows what is here.
+
+In the chat loop: `/reset`, `/system <text>`, `/stats`, `/help`, `/exit`.
+Ctrl-C stops a reply without leaving; Ctrl-D leaves like `/exit`.
+
+`/exit` frees the context and the weights and returns to the Julia prompt with
+nothing resident, so the next `load` starts clean — including on a model that
+failed halfway, since the teardown is in a `finally`. The cost of that is a full
+reload to resume (~35 s for a 30B MoE off warm cache), which is the trade: no
+lingering 18 GB you have to remember to drop.
+
+Keywords are `ChatSession`'s — `system`, `n_ctx` (default 32768), `n_threads`,
+`temp`, `top_k`/`top_p`/`min_p`, `seed`, `verbose`:
+
+```julia
+load()
+load("qwen2.5-coder:1.5b-base"; temp = 0)          # greedy
+load("qwen3-coder"; system = "You are terse.", n_ctx = 8192)
+```
 """
-function run_demo(; model::AbstractString = default_model())
-    s = ChatSession(model; n_ctx = 2048, system = "You are terse.")
+function load(model::AbstractString = default_model(); kwargs...)
+    s = ChatSession(model; kwargs...)
     try
-        println("── turn 1 ", "─"^50)
-        r1 = chat(s, "In one sentence: what is a DWARF DIE?"; max_tokens = 96)
-        printstyled(_stats_line(r1), "\n"; color = :light_black)
-
-        println("\n── turn 2 (same session, incremental prompt) ", "─"^18)
-        r2 = chat(s, "And what reads them?"; max_tokens = 96)
-        printstyled(_stats_line(r2), "\n"; color = :light_black)
-
-        println("\ncache: $(s.n_past)/$(s.n_ctx) tokens · " *
-                "$(length(s.decoded)) transcript bytes · $(length(s.history)) messages")
-        return s
+        _repl!(s)
     finally
         close!(s)
+        _note("unloaded")
     end
+    return nothing
+end
+
+# `ask` — same model, same process, answers in a second terminal window while
+# this REPL stays yours. Kept in its own file because it is terminal plumbing
+# (ptys, ioctls, kitty remote control), not part of the ABI story above.
+include("window.jl")
+
+function __init__()
+    # A @cfunction pointer is this process's, so it cannot be baked into the .ji.
+    _LOG_CB[] = @cfunction(_llama_log, Cvoid, (Cint, Ptr{Cchar}, Ptr{Cvoid}))
+    _atexit_teardown()
+    return nothing
 end
 
 end # module LlamaChat

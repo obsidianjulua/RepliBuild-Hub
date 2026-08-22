@@ -237,11 +237,43 @@ end
     @test plain == "# Title\n\nprose\n"
 end
 
-@testset "markdown parsing and fallback" begin
-    m = md("# Title\n\nsome `code` here")
-    @test m isa Markdown.MD
-    @test occursin("Title", sprint(show, MIME"text/plain"(), m))
+@testset "headings do not render as their own source" begin
+    # Julia's terminal backend picks a header underline by level from
+    # `Markdown._header_underlines = collect("≡=–-⋅ ")`. h1's `≡` reads as
+    # decoration, but h2's is plain ASCII `=` — and a bold line above
+    # `==========` is character-for-character what setext markdown SOURCE looks
+    # like, so a correctly rendered `## Heading` looks like a renderer that
+    # failed to strip the syntax. Models reach for `##` constantly, so this is
+    # the common case rather than an edge one.
+    h1 = sprint(io -> LC._show_markdown(io, "# Heading here"))
+    @test occursin("Heading here", h1)
+    @test occursin("≡", h1)                    # unambiguous, so h1 keeps its rule
 
+    for lvl in 2:6
+        out = sprint(io -> LC._show_markdown(io, "#"^lvl * " Heading here"))
+        @test occursin("Heading here", out)     # the text always survives
+        @test !occursin("==", out)              # ...with no rule that reads as setext
+        @test !occursin("--", out)
+        @test !occursin("––", out)
+        @test !occursin("#", out)               # and no ATX marker left behind
+    end
+
+    # Inline formatting inside a heading still renders rather than being flattened.
+    out = sprint(io -> LC._show_markdown(io, "## A `code` and **bold** heading"))
+    @test occursin("code", out) && occursin("bold", out)
+    @test !occursin("**", out) && !occursin("`", out)
+
+    # A heading whose TEXT contains `=` must not lose it — the rule is what gets
+    # dropped, not the content.
+    @test occursin("a == b", sprint(io -> LC._show_markdown(io, "## a == b")))
+
+    # Headings are still separated from surrounding prose.
+    doc = sprint(io -> LC._show_markdown(io, "## Title\n\nbody text\n"))
+    @test occursin("Title", doc) && occursin("body text", doc)
+    @test findfirst("Title", doc).start < findfirst("body text", doc).start
+end
+
+@testset "markdown parsing and fallback" begin
     # A reply truncated at max_tokens is malformed by construction — an
     # unterminated fence must never cost us the generation.
     out = sprint(io -> LC._show_markdown(io, "text\n\n```julia\nx = 1"))
@@ -259,22 +291,242 @@ end
     @test String(take!(buf)) == "# hi\n\nthere\n"
 end
 
-@testset "Response markdown display" begin
-    base = Response("**bold**", 1, 1, 0.1, 0.1, :eog, false)
-    @test base.markdown == false                     # 7-arg form still works
-    @test sprint(show, MIME"text/plain"(), base) == "**bold**"
-
-    rendered = Response("**bold**", 1, 1, 0.1, 0.1, :eog, false, true)
-    shown = sprint(show, MIME"text/plain"(), rendered)
-    @test shown != "**bold**"                        # went through the renderer
+@testset "Response display formats unconditionally" begin
+    # There is no `markdown` field any anymore, and no kwarg feeding it. A reply
+    # that did not stream still owes the caller its content, and the display path
+    # is a display path: it formats.
+    r = LC.Response("**bold**", 1, 1, 0.1, 0.1, :eog, false)
+    shown = sprint(show, MIME"text/plain"(), r)
     @test occursin("bold", shown)
+    @test !occursin("**", shown)                     # went through the renderer
 
-    # Streamed responses still show throughput, markdown or not — the text is
-    # already on screen.
-    streamed = Response("**bold**", 1, 1, 0.1, 0.1, :eog, true, true)
+    # A streamed reply shows throughput instead — its text is already on screen,
+    # so printing it again as the REPL's return value is noise.
+    streamed = LC.Response("**bold**", 1, 1, 0.1, 0.1, :eog, true)
     @test occursin("tok", sprint(show, MIME"text/plain"(), streamed))
 
-    @test md(rendered) isa Markdown.MD
+    # String interop is unaffected by the field going away.
+    @test String(r) == "**bold**"
+    @test ("got: " * r) == "got: **bold**"
+    @test sprint(print, r) == "**bold**"              # print stays raw
+end
+
+@testset "tty detection follows isatty, not the concrete type" begin
+    # The sidecar window is a pts we opened by path, so it is an IOStream that is
+    # every bit a terminal. `io isa Base.TTY` said no and the reply streamed raw
+    # into a window perfectly able to render it, so the question is delegated to
+    # `isatty` — and IOContext is unwrapped, because the sidecar wraps its stream
+    # to state a size and colour support and a wrapper around a terminal is one.
+    @test !LC._istty(IOBuffer())
+    @test !LC._istty(devnull)
+    @test !LC._istty(IOContext(IOBuffer(), :color => true))
+
+    # A real character device that is not a terminal must still be false.
+    open("/dev/null", "w") do f
+        @test !LC._istty(f)
+        @test !LC._istty(IOContext(f, :color => true))
+    end
+
+    # ...and a real pty must be true through every wrapper. openpty(3) gives one
+    # without needing a terminal to run the tests in.
+    # Unqualified: openpty lived in libutil until glibc 2.34 folded it into libc,
+    # and Arch is well past that — `("openpty", "libutil")` fails to dlopen here.
+    mfd, sfd = Ref{Cint}(0), Ref{Cint}(0)
+    rc = ccall(:openpty, Cint,
+               (Ptr{Cint}, Ptr{Cint}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+               mfd, sfd, C_NULL, C_NULL, C_NULL)
+    if rc == 0
+        slave = fdio(sfd[], true)
+        try
+            @test LC._istty(slave)
+            @test LC._istty(IOContext(slave, :color => true))
+            @test LC._istty(IOContext(IOContext(slave, :color => true),
+                                      :displaysize => (40, 100)))
+            # And the geometry ioctl reads back what was set on it.
+            ws = Ref((UInt16(24), UInt16(100), UInt16(0), UInt16(0)))
+            ccall(:ioctl, Cint, (Cint, Culong, Ptr{Cvoid}), sfd[], 0x5414, ws)  # TIOCSWINSZ
+            @test LC._winsize(sfd[]) == (24, 100)
+        finally
+            close(slave)
+            ccall(:close, Cint, (Cint,), mfd[])
+        end
+    else
+        @warn "openpty unavailable — skipping the pty half of tty detection"
+    end
+    @test LC._winsize(RawFD(-1)) === nothing        # not a terminal at all
+    @test LC._winsize(-1) === nothing               # ...by either spelling
+end
+
+@testset "fd helpers accept what Base.fd actually returns" begin
+    # `Base.fd(::IOStream)` returns a `RawFD`, which is NOT an `Integer`. An
+    # `fd::Integer` signature therefore compiles, type-checks, and MethodErrors
+    # at runtime — and every such call site in this package is inside the
+    # sidecar, which no test can reach without a window and a model. It shipped
+    # that way twice (`_winsize`, then `_logto`). Pinning the type is what makes
+    # the third time impossible.
+    open("/dev/null", "w") do f
+        @test fd(f) isa RawFD                       # the assumption that was wrong
+        @test LC._fdint(fd(f)) isa Cint
+        @test LC._fdint(3) === Cint(3)
+        @test LC._fdint(RawFD(3)) === Cint(3)       # both spellings, same answer
+
+        # The exact call the sidecar makes on its window. Before `_fdint` this
+        # raised MethodError the moment a model finished loading.
+        LC._logto(fd(f)) do
+            @test LC._LOG_FD[] == LC._fdint(fd(f))
+        end
+        @test LC._LOG_FD[] == -1                    # restored
+
+        @test LC._winsize(fd(f)) === nothing        # /dev/null is not a terminal
+        @test !LC._istty(f)
+    end
+end
+
+@testset "sidecar render path against a real pty" begin
+    # `_window_io` is the whole reason the tty predicate changed, and it is the
+    # one part of the sidecar a model-less test can drive end to end: open a pty,
+    # wrap the slave exactly as the sidecar does, and check that a reply renders
+    # rather than streaming raw into a window well able to display it.
+    mfd, sfd = Ref{Cint}(0), Ref{Cint}(0)
+    rc = ccall(:openpty, Cint,
+               (Ptr{Cint}, Ptr{Cint}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+               mfd, sfd, C_NULL, C_NULL, C_NULL)
+    if rc != 0
+        @warn "openpty unavailable — skipping the sidecar render path"
+    else
+        ws = Ref((UInt16(40), UInt16(90), UInt16(0), UInt16(0)))
+        ccall(:ioctl, Cint, (Cint, Culong, Ptr{Cvoid}), sfd[], 0x5414, ws)   # TIOCSWINSZ
+        slave = fdio(sfd[], true)
+        try
+            # Exactly what _window_io builds: colour stated, size read live.
+            io = IOContext(IOContext(slave, :color => true),
+                           :displaysize => LC._winsize(sfd[]))
+            @test LC._istty(io)                       # ...so `chat` will render
+            @test displaysize(io) == (40, 90)         # ...and wrap to the window
+            @test get(io, :color, false)              # ...in colour
+
+            # Drive the renderer and read the bytes back off the master.
+            sink = LC._MDSink(io; render = LC._istty(io))
+            @test sink.render
+            LC._emit!(sink, "## Heading\n\n```julia\nf(x) = 1\n```\n\n")
+            LC._finish!(sink)
+            flush(slave)
+
+            buf = Vector{UInt8}(undef, 65536)
+            n = ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), mfd[], buf, 65536)
+            out = n > 0 ? String(buf[1:n]) : ""
+            @test occursin("\e[", out)                # redraw + colour actually emitted
+            @test occursin("\e[1m", out)              # ...bold, which a non-tty would skip
+
+            # The raw markdown IS in the byte stream — it streamed live before
+            # being erased. What matters is the screen it leaves behind, which
+            # is what the simulator above reconstructs.
+            final = screen(out; w = 90, h = 40)
+            @test occursin("Heading", final)
+            @test occursin("f(x) = 1", final)
+            @test !occursin("## Heading", final)      # source replaced, not appended
+            @test !occursin("```", final)
+        finally
+            close(slave)
+            ccall(:close, Cint, (Cint,), mfd[])
+        end
+    end
+end
+
+@testset "REPL context is sent as a delta, not re-sent whole" begin
+    # Re-sending the scrollback every turn spends the context window on the same
+    # lines over and over: three turns of a 400-line capture overruns 32k on its
+    # own. Both captures are windows onto one growing stream, so the new content
+    # is whatever follows their overlap.
+    prev = ["a", "b", "c", "d", "e", "f"]
+
+    @test LC._context_delta(String[], prev) == prev          # first call: all new
+    @test LC._context_delta(prev, prev) == String[]          # nothing happened
+    @test LC._context_delta(prev, [prev; "g"; "h"]) == ["g", "h"]
+
+    # The case a fixed-size tail anchor gets wrong: the scrollback hit its limit
+    # and dropped lines off the TOP, so the overlap is no longer prev's full
+    # length. Only genuinely-new lines may come back.
+    @test LC._context_delta(prev, ["c", "d", "e", "f", "g"]) == ["g"]
+    @test LC._context_delta(prev, ["f", "g", "h"]) == ["g", "h"]
+    # ...including when the overlap is down to its last line.
+    @test LC._context_delta(prev, ["f"]) == String[]
+
+    # No overlap at all (cleared, or a different window): treat it all as new
+    # rather than silently dropping the context being asked about.
+    @test LC._context_delta(prev, ["x", "y"]) == ["x", "y"]
+    @test LC._context_delta(prev, String[]) == String[]
+
+    # The `ask(...)` call is on screen by the time we capture — echoing the
+    # question back as context is tokens spent on nothing.
+    @test LC._trim_context(["work", "julia> ask(\"why?\")"]) == ["work"]
+    @test LC._trim_context(["work", "ask(\"why?\")", "", "   "]) == ["work"]
+    @test LC._trim_context(["work", "LlamaChat.ask(\"why?\")"]) == ["work"]
+    @test LC._trim_context(["a task(x) call"]) == ["a task(x) call"]   # not an echo
+    @test LC._trim_context(String[]) == String[]
+
+    # Composition keeps the prompt last, so the question is the most recent
+    # thing the model reads.
+    body = LC._compose("why?", ["ERROR: MethodError", "Stacktrace: [1] emit"])
+    @test occursin("ERROR: MethodError", body)
+    @test occursin("Stacktrace: [1] emit", body)
+    @test endswith(strip(body), "why?")
+    @test LC._compose("why?", String[]) == "why?"        # no context, no wrapper
+end
+
+@testset "the sidecar window dies with its Julia process" begin
+    # The child used to `exec sleep infinity`, so a Julia that went away without
+    # unwinding — SIGKILL, a crash, closing the REPL — left a kitty window up
+    # forever holding a terminal nothing would ever write to again. Found by
+    # doing exactly that. `wait(proc)` is how we notice the window closing; this
+    # is the other direction, and it is the one with no in-process handler left
+    # to run, so it has to be the child's job.
+    dir     = mktempdir()
+    ttyfile = joinpath(dir, "tty")
+    try
+        parent = run(`sleep 2`; wait = false)
+        child  = run(pipeline(`sh -c $(LC._WINDOW_SH) sh $ttyfile $(getpid(parent))`;
+                              stdout = devnull, stderr = devnull); wait = false)
+
+        # The handshake file appears immediately even with no tty to report —
+        # _spawn_window blocks on this file, so it must never simply not arrive.
+        for _ in 1:100
+            isfile(ttyfile) && break
+            sleep(0.05)
+        end
+        @test isfile(ttyfile)
+        @test process_running(child)          # stays up while the parent does
+
+        wait(parent)
+        t0 = time()
+        while process_running(child) && time() - t0 < 20
+            sleep(0.2)
+        end
+        @test !process_running(child)         # ...and follows it down promptly
+        @test time() - t0 < 20
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+@testset "exported surface is exactly list_models, load and ask" begin
+    # The point of this package's front door: two names. Everything else is
+    # reachable through the module qualifier and nothing else lands in the
+    # caller's namespace.
+    @test Set(names(LlamaChat)) == Set([:LlamaChat, :list_models, :load, :ask])
+
+    # ...and the things that stopped being exported still exist, because scripts
+    # (chat.jl among them) go through them.
+    for n in (:chat, :ChatSession, :Response, :reset!, :close!,
+              :resolve_model, :default_model, :ollama_root)
+        @test isdefined(LlamaChat, n)
+    end
+    # These are gone outright, not merely unexported.
+    for n in (:md, :chatrepl, :start!, :run_demo)
+        @test !isdefined(LlamaChat, n)
+    end
+    # No markdown toggle survives on the chat entry point.
+    @test !(:markdown in Base.kwarg_decl(only(methods(LlamaChat.chat))))
 end
 
 @testset "model resolution" begin
@@ -282,6 +534,39 @@ end
     @test all(sz -> sz > 0, last.(LC.list_models()))
     @test LC.resolve_model(@__FILE__) == @__FILE__      # a path passes through
     @test_throws ErrorException LC.resolve_model("definitely-not-a-model:v0")
+end
+
+@testset "list_models prints a table, still behaves as a vector" begin
+    ms = LC.list_models()
+    # It has to stay indexable/iterable/broadcastable — the pretty printing is a
+    # display concern and must not cost the data.
+    @test ms isa AbstractVector{Tuple{String,Int}}
+    @test length(ms) == length(collect(ms))
+    @test first(ms) == ms[1]
+    @test issorted(last.(ms); rev = true)               # largest first
+    @test filter(m -> true, ms) == collect(ms)          # filter falls back cleanly
+
+    out = sprint(show, MIME"text/plain"(), ms)
+    @test occursin(first(first(ms)), out)               # every name is listed
+    @test count('\n', out) == length(ms)                # one row each
+    @test occursin(r"\d+(\.\d)? (B|KiB|MiB|GiB|TiB)", out)   # sizes are human
+    @test !occursin("(\"", out)                         # not a tuple dump
+
+    # The row bare `load()` would open is marked.
+    dflt = LC.default_model()
+    occursin(':', dflt) || (dflt *= ":latest")
+    dflt in first.(ms) && @test occursin("→", out)
+
+    # An empty store says so rather than printing nothing at all.
+    withenv("OLLAMA_MODELS" => "/nonexistent-store") do
+        empty_out = sprint(show, MIME"text/plain"(), LC.list_models())
+        @test occursin("no models", empty_out)
+    end
+
+    @test LC._human(512) == "512 B"
+    @test LC._human(1024) == "1.0 KiB"
+    @test LC._human(1536) == "1.5 KiB"
+    @test LC._human(17 * 1024^3) == "17 GiB"            # ≥10 drops the decimal
 end
 
 @testset "env overrides are read when used, not baked at precompile" begin
@@ -349,7 +634,7 @@ if MODEL === nothing
     @warn "no generative model in the ollama store — skipping live inference tests"
 else
     @info "live tests using $MODEL"
-    s = ChatSession(MODEL; n_ctx = 1024, temp = 0.0)   # greedy → deterministic
+    s = LC.ChatSession(MODEL; n_ctx = 1024, temp = 0.0)   # greedy → deterministic
 
     @testset "session opens" begin
         @test s.isopen
@@ -389,8 +674,8 @@ else
     end
 
     @testset "turn 1 generates and advances the cache" begin
-        r = chat(s, "Say hello."; max_tokens = 16, stream = false)
-        @test r isa Response
+        r = LC.chat(s, "Say hello."; max_tokens = 16, stream = false)
+        @test r isa LC.Response
         @test r.n_prompt > 0
         @test r.n_gen > 0
         @test s.n_past >= r.n_prompt + r.n_gen
@@ -404,7 +689,7 @@ else
     @testset "turn 2 reuses the cache instead of re-decoding" begin
         n_past_before = s.n_past
         decoded_before = copy(s.decoded)
-        r = chat(s, "And again."; max_tokens = 16, stream = false)
+        r = LC.chat(s, "And again."; max_tokens = 16, stream = false)
 
         @test s.n_past > n_past_before
         # The transcript only ever extends — the earlier bytes are untouched.
@@ -424,41 +709,91 @@ else
     end
 
     @testset "Response interop" begin
-        r = chat(s, "Reply with the word ok."; max_tokens = 8, stream = false)
+        r = LC.chat(s, "Reply with the word ok."; max_tokens = 8, stream = false)
         @test r.text isa String
         @test String(r) == r.text
         @test ("got: " * r) == "got: " * r.text
-        @test sprint(show, MIME"text/plain"(), r) == r.text      # not streamed → shows text
-        r2 = Response(r.text, r.n_prompt, r.n_gen, r.t_prompt, r.t_gen, r.stop, true)
+        @test sprint(print, r) == r.text                         # print stays raw...
+        @test !isempty(sprint(show, MIME"text/plain"(), r))      # ...display renders
+        r2 = LC.Response(r.text, r.n_prompt, r.n_gen, r.t_prompt, r.t_gen, r.stop, true)
         @test occursin("tok", sprint(show, MIME"text/plain"(), r2))  # streamed → shows stats
     end
 
     @testset "reset! clears conversation and cache" begin
-        reset!(s)
+        LC.reset!(s)
         @test isempty(s.history)
         @test isempty(s.decoded)
         @test s.n_past == 0
-        r = chat(s, "Say hi."; max_tokens = 8, stream = false)   # usable afterwards
+        r = LC.chat(s, "Say hi."; max_tokens = 8, stream = false)   # usable afterwards
         @test r.n_gen > 0
     end
 
     @testset "context budget is enforced, not overrun" begin
-        small = ChatSession(MODEL; n_ctx = 64, temp = 0.0)
+        small = LC.ChatSession(MODEL; n_ctx = 64, temp = 0.0)
         try
             long = repeat("the quick brown fox jumps over the lazy dog. ", 40)
-            @test_throws ErrorException chat(small, long; max_tokens = 4, stream = false)
+            @test_throws ErrorException LC.chat(small, long; max_tokens = 4, stream = false)
             @test isempty(small.history)      # the failed turn was rolled back
         finally
-            close!(small)
+            LC.close!(small)
         end
     end
 
+    @testset "llama.cpp logging never reaches the caller's terminal" begin
+        # llama.cpp logs with C printf straight to fd 1/2, which Julia's
+        # redirect_stdout cannot reach and which no Julia-level capture will
+        # show. Freeing a context prints `~llama_context: CPU compute buffer
+        # size …`; in the sidecar that landed on the REPL prompt seconds after
+        # the user had moved on, and a prompt Julia will not redraw reads
+        # exactly like a hang. So this has to be asserted at fd level or not at
+        # all — hence the dup2 rather than a redirect_stdout.
+        # Both fds have to be pointed at the file BEFORE f runs — redirecting
+        # them one at a time around separate calls captures neither reliably.
+        capture(f) = mktemp() do path, io
+            s1 = ccall(:dup, Cint, (Cint,), 1)
+            s2 = ccall(:dup, Cint, (Cint,), 2)
+            ccall(:dup2, Cint, (Cint, Cint), fd(io), 1)
+            ccall(:dup2, Cint, (Cint, Cint), fd(io), 2)
+            try
+                f()
+            finally
+                ccall(:dup2, Cint, (Cint, Cint), s1, 1); ccall(:close, Cint, (Cint,), s1)
+                ccall(:dup2, Cint, (Cint, Cint), s2, 2); ccall(:close, Cint, (Cint,), s2)
+            end
+            flush(io)
+            return read(path, String)
+        end
+
+        quiet = capture() do
+            q = LC.ChatSession(MODEL; n_ctx = 128, log = devnull)
+            LC.close!(q)                       # the line that caused the report
+        end
+        @test isempty(quiet)
+
+        # ...but `verbose` still means verbose: the same run must produce the
+        # loader detail, or this "fix" is just a mute button.
+        loud = capture() do
+            v = LC.ChatSession(MODEL; n_ctx = 128, verbose = true)
+            LC.close!(v)
+        end
+        @test !isempty(loud)
+        @test occursin("llama", lowercase(loud))
+
+        # And the routing knob itself: -1 discards, a real fd receives.
+        @test LC._LOG_FD[] == -1                       # restored after _logto
+        LC._logto(2) do
+            @test LC._LOG_FD[] == 2
+        end
+        @test LC._LOG_FD[] == -1                       # ...even though we left via a @test
+        @test LC._LOG_CB[] != C_NULL                   # callback installed in __init__
+    end
+
     @testset "teardown is idempotent" begin
-        close!(s)
+        LC.close!(s)
         @test !s.isopen
-        close!(s)
+        LC.close!(s)
         @test !s.isopen
-        @test_throws ErrorException chat(s, "anything")
+        @test_throws ErrorException LC.chat(s, "anything")
     end
 end
 
