@@ -87,11 +87,15 @@ end
     @test !occursin("code_typed", src)
     @test !occursin(":deferred", src)
 
-    # Every wrapped name is Tier 3, in the emitted table AND in reality.
-    @test all(t -> t === :tier3, values(C.DISPATCH_TIER))
-    @test C.dispatch_tier(:cJSON_Parse) === :tier3
-    @test C.dispatch_tier(:cJSON_CreateObject) === :tier3
-    @test C.dispatch_tier(:cJSON_GetErrorPtr) === :tier3
+    # The dispatch table is gated too. With slicing off, C has no Tier-2 path at
+    # all, so every function is necessarily Tier 3 — `DISPATCH_TIER` was 100 rows
+    # of `=> :tier3` and `dispatch_tier` a lookup that could return only `:tier3`
+    # or `:unknown`. One fact repeated once per function. The generator now emits
+    # a sentence instead, keyed on the table being UNIFORM rather than on the
+    # language (C++ keeps its table, where a tier2/tier3 mix is real).
+    @test !isdefined(C, :DISPATCH_TIER)
+    @test !isdefined(C, :dispatch_tier)
+    @test occursin("Every function in this module dispatches through Tier 3", src)
 
     # Static promotion is a BUILD-stage pass on a DIFFERENT knob
     # (`[link] promote_statics`), so it still runs with slicing off and
