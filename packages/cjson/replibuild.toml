@@ -31,11 +31,15 @@ language = "c"
 shim_headers = ["cJSON.h"]
 
 # Per-function bitcode slicing (declarations-only slices bound to the .so).
-# Acceptance is gated by the Slicer + dlsym pre-flight; anything refused or
-# hazardous demotes to Tier 3 ccall, and the @generated call sites demote in
-# output mode. Off by default upstream; on here so the Hub exercises it.
+# WAS `true` — cjson was the Hub's Tier-1 exerciser (84 kernels, 84 slices).
+# Turned OFF 2026-08-22: Tier 1 is quarantined as an experimental side project
+# and is being unbolted from shipped packages. With this false the generator
+# emits plain ccall for every function and clears the stale `slices/` dir; the
+# @generated kernels disappear entirely rather than demoting at call time.
+# Nothing else changes — `enable_lto` was already false, so this package was
+# never on the whole-module Tier-1 path.
 [wrap.tier1]
-enable = true
+enable = false
 
 # cJSON_Version() is a function, not macro — no macros needed
 # cJSON_ArrayForEach is a for-loop macro, cannot be shimmed

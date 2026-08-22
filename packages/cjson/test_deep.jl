@@ -55,33 +55,66 @@ strval(ptr) = unsafe_string(item(ptr).valuestring)
     @test C.cJSON_Version() == "1.7.18"
 end
 
-@testset "Tier-1 slicing is live" begin
-    @test !isempty(C.TIER1_FUNCTIONS)
-    @test "cJSON_Parse" in C.TIER1_FUNCTIONS
+@testset "Tier 1 is OFF — pure ccall" begin
+    # WAS "Tier-1 slicing is live". cjson was the Hub's Tier-1 exerciser — 84
+    # @generated kernels over 84 shipped slices — until 2026-08-22, when Tier 1
+    # was unbolted from this package (`[wrap.tier1] enable = false`).
+    #
+    # INVERTED rather than deleted: this is the same guard pointed the other
+    # way, and it fails loudly if slicing is ever switched back on here by
+    # accident. A deleted testset would just go quiet.
+    # The Tier-1 SURFACE is gated out entirely, not merely emptied. Before the
+    # gate (2026-08-22) a tier1-off wrapper still defined an empty
+    # `TIER1_FUNCTIONS`, an empty `TIER1_DECLARES`, an empty `_TIER1_KERNEL` and
+    # an unreachable `_slice_symbols_resolve` — ~50 lines of llvmcall machinery
+    # in a wrapper with no llvmcall. These names must now be ABSENT.
+    for n in (:TIER1_FUNCTIONS, :TIER1_DECLARES, :_TIER1_KERNEL, :_slice_symbols_resolve)
+        @test !isdefined(C, n)
+    end
 
-    slices_dir = joinpath(PKG_DIR, "julia", "slices")
-    @test isdir(slices_dir)
-    lls = filter(f -> endswith(f, ".ll"), readdir(slices_dir))
-    @test length(lls) == length(C.TIER1_FUNCTIONS)
+    # A tier1-off wrap CLEARS the stale slices dir rather than shipping orphans.
+    @test !isdir(joinpath(PKG_DIR, "julia", "slices"))
 
-    @test C.dispatch_tier(:cJSON_Parse) === :tier1
-    @test C.dispatch_tier(:cJSON_CreateObject) === :tier1
+    # The kernels are gone from the source entirely — they do not merely demote
+    # at call time, which is the weaker property `dispatch_tier` alone proves.
+    src = read(WRAPPER, String)
+    @test !occursin("@generated function _TIER1_", src)
+    @test !occursin("const _SLICE_", src)
+    @test !occursin("llvmcall", src)
+    # …and the runtime probe goes with them: with nothing to demote,
+    # `dispatch_tier` is a plain table lookup, so no `code_typed` and no
+    # `:deferred` output-mode refusal.
+    @test !occursin("code_typed", src)
+    @test !occursin(":deferred", src)
 
-    # The other half of the mixed-tier pair: a Cstring return is never Tier 1.
-    @test !("cJSON_GetErrorPtr" in C.TIER1_FUNCTIONS)
-    @test !("cJSON_Print" in C.TIER1_FUNCTIONS)
+    # Every wrapped name is Tier 3, in the emitted table AND in reality.
+    @test all(t -> t === :tier3, values(C.DISPATCH_TIER))
+    @test C.dispatch_tier(:cJSON_Parse) === :tier3
+    @test C.dispatch_tier(:cJSON_CreateObject) === :tier3
+    @test C.dispatch_tier(:cJSON_GetErrorPtr) === :tier3
 
-    # global_error must be a single promoted symbol, not a per-slice copy.
+    # Static promotion is a BUILD-stage pass on a DIFFERENT knob
+    # (`[link] promote_statics`), so it still runs with slicing off and
+    # global_error is still a single promoted symbol. Pinned deliberately:
+    # "slicing off" and "promotion off" are separate, and only one moved here.
     promoted = joinpath(PKG_DIR, "build", "promoted_symbols.json")
     @test isfile(promoted)
     @test occursin("global_error", read(promoted, String))
 end
 
-@testset "THE CANARY — Tier-1 parse, Tier-3 error read" begin
-    # cJSON_Parse (Tier 1, llvmcall on a slice) writes the failure position into
-    # `static global_error`; cJSON_GetErrorPtr (Tier 3, ccall into the .so) reads
-    # it. Under whole-module embedding these were two different objects and every
-    # one of these assertions came back NULL/empty.
+@testset "THE CANARY — parse writes global_error, error read sees it" begin
+    # HISTORY, and why this testset exists at all: cJSON_Parse writes the failure
+    # position into `static global_error`, and cJSON_GetErrorPtr reads it. Under
+    # whole-module Tier-1 embedding those were two DIFFERENT objects — the
+    # llvmcall'd parse wrote the embedded module's copy while the ccall'd reader
+    # saw the .so's — and every assertion below came back NULL/empty. That is the
+    # cJSON divergence class this package is named for in the devlog.
+    #
+    # Since 2026-08-22 both sides are Tier 3, so the split cannot occur by
+    # construction and these assertions are no longer load-bearing for tier
+    # coherence. KEPT because they still verify real behaviour (a failed parse
+    # leaves a readable error position), and because they are the regression net
+    # if slicing is ever switched back on here.
     # NOTE: cJSON_Parse is deliberately lenient about trailing content
     # (require_null_terminated = 0), so every entry here has to be malformed
     # within the value itself, not merely followed by junk.
