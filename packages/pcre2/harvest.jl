@@ -16,10 +16,11 @@
 # Run after any version bump, then diff config/: a changed SIZEOF_* or a
 # vanished SUPPORT_* is real news, not noise.
 #
-#   julia --project=/home/john/Desktop/Projects/RepliBuildTooling.jl \
+#   julia --project=@v#.#.# \
 #         packages/pcre2/harvest.jl
 
-using RepliBuildTooling
+using RepliBuild
+using RepliBuild.SysConfigGen   # moved in-house 2026-08-26 (was RepliBuildTooling)
 
 const TAG     = "pcre2-10.45"
 const COMMIT  = "2dce7761b1831fd3f82a9c2bd5476259d945da4d"
@@ -53,12 +54,12 @@ try
     uniform(probe) || error("pcre2 harvest: chosen target is no longer uniform — " *
                             "the manifest's single flag set cannot reproduce it")
 
-    written = harvest_config(probe, joinpath(PKG_DIR, "config"))
+    written = capture_config(probe, joinpath(PKG_DIR, "config"))
     println("harvested:")
     foreach(w -> println("  ", w), written)
 
     println("\n── proposal (for reference; replibuild.toml is hand-maintained) ──")
-    println(propose_toml(probe; language="c", shim_headers=["pcre2.h"]))
+    println(toml_fragment(probe; language="c", shim_headers=["pcre2.h"]))
 finally
     rm(checkout; recursive=true, force=true)
 end

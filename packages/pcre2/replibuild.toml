@@ -13,7 +13,7 @@ commit = "2dce7761b1831fd3f82a9c2bd5476259d945da4d"
 # clone's HEAD against it.
 #
 # 43 .c files in the tree, 29 of them are libpcre2-8. The exclusions below came
-# out of `RepliBuildTooling.propose_toml` — the set difference between every
+# out of `RepliBuild.SysConfigGen.toml_fragment` — the set difference between every
 # .c in the tree and the TUs cmake's own compile_commands.json attributes to
 # the pcre2-8-shared target — then were checked by hand. They fall in four
 # groups, and only the first is obvious:
@@ -59,7 +59,7 @@ exclude = [
 flags = ["-O2", "-fPIC", "-DHAVE_CONFIG_H", "-DPCRE2_CODE_UNIT_WIDTH=8", "-Dpcre2_8_shared_EXPORTS", "-DNDEBUG"]
 parallel = true
 
-# `config/` holds cmake's configure output, checked in — see config/HARVEST.md
+# `config/` holds cmake's configure output, checked in — see config/SYSCONFIG.md
 # and harvest.jl. Three files that do not exist in a bare checkout:
 #   config.h            122 feature probes
 #   pcre2.h             the PUBLIC header, configure_file'd from src/pcre2.h.in

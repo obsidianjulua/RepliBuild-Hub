@@ -6,7 +6,7 @@
 #
 # pcre2 is the Hub's first package unblocked by harvested cmake configure
 # output: config.h, the public pcre2.h and pcre2_chartables.c do not exist in a
-# bare checkout (see harvest.jl and config/HARVEST.md). So the assertions below
+# bare checkout (see harvest.jl and config/SYSCONFIG.md). So the assertions below
 # are doing double duty — they check the wrapper, and they check that a library
 # built against a config header RepliBuild did not itself generate is a real,
 # correct libpcre2 rather than a self-consistently wrong one. A build with a
@@ -33,7 +33,7 @@ const TOML_PATH = joinpath(PKG_DIR, "replibuild.toml")
     @test isfile(joinpath(cfg, "config.h"))
     @test isfile(joinpath(cfg, "pcre2.h"))
     @test isfile(joinpath(cfg, "pcre2_chartables.c"))
-    @test isfile(joinpath(cfg, "HARVEST.md"))
+    @test isfile(joinpath(cfg, "SYSCONFIG.md"))
 
     # The feature probes the build depends on. SUPPORT_UNICODE in particular is
     # asserted behaviourally further down.

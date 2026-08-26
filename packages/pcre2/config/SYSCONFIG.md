@@ -5,7 +5,7 @@ produced by cmake's configure step (`configure_file` over a template), and
 RepliBuild compiles all-sources-minus-excludes under one flag set without
 ever running a configure. So they have to already exist.
 
-Captured by `RepliBuildTooling.cmake_probe` + `harvest_config`.
+Captured by `RepliBuild.SysConfigGen.cmake_probe` + `capture_config`.
 
 ## Files
 
@@ -16,7 +16,7 @@ Captured by `RepliBuildTooling.cmake_probe` + `harvest_config`.
 ## Regenerating (required on any version bump)
 
 ```julia
-using RepliBuildTooling
+using RepliBuild, RepliBuild.SysConfigGen
 p = cmake_probe("<checkout>";
                 name="pcre2",
                 args=["-DPCRE2_BUILD_TESTS=OFF",
@@ -25,7 +25,7 @@ p = cmake_probe("<checkout>";
                       "-DPCRE2_BUILD_PCRE2_16=OFF",
                       "-DPCRE2_BUILD_PCRE2_32=OFF",
                       "-DPCRE2_SUPPORT_JIT=OFF"])
-harvest_config(p, "config")
+capture_config(p, "config")
 ```
 
 Full cmake argument set used:
