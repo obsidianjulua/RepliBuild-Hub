@@ -19,11 +19,35 @@ const MODEL = test_model()
 
 @testset "LlamaChat (chat app on RepliBuild wrapper)" begin
 
-@testset "JIT engine registered for the vendored library" begin
-    engines = RepliBuild.JITManager.GLOBAL_JIT.engines
-    @test length(engines) == 1
-    @test engines[1].init_error === nothing
-    @test occursin("libllamacpp", engines[1].binary_path)
+@testset "Tier 2 runs off AOT thunks, with no JIT engine" begin
+    # The vendored wrapper is built with `aot_thunks = true`, so its Tier-2
+    # thunks were compiled into libllamacpp_thunks.so at build time and loading
+    # it is a dlopen. This testset used to assert the opposite — one registered
+    # JIT engine — because that was the only way Tier 2 had ever worked. Both
+    # spellings dispatch through the same thunks; the difference is that this
+    # one does not construct a 43k-line MLIR module in every process that says
+    # `using LlamaChat` (24.8s → 5.4s for the wrapper alone).
+    @test isempty(RepliBuild.JITManager.GLOBAL_JIT.engines)
+
+    # The thunks library must be the SIBLING copy, not the one in the package
+    # tree this wrapper was generated from. It is linked `-Wl,-rpath,$ORIGIN`
+    # ahead of its build directory precisely so a vendored set stays
+    # self-contained; without that the loader satisfies the thunks library's
+    # own `NEEDED libllamacpp.so` from the build tree, and the process ends up
+    # with TWO copies of a 41 MB library — each with its own static state, both
+    # torn down at exit. That is not a hypothetical: it aborted with
+    # `double free or corruption (!prev)` on the way out, after every test had
+    # already passed.
+    @test isfile(joinpath(@__DIR__, "..", "lib", "libllamacpp_thunks.so"))
+    @test occursin("lib", LC.L.THUNKS_LIBRARY_PATH)
+    @test isfile(LC.L.THUNKS_LIBRARY_PATH)
+    @test LC.L.THUNKS_HANDLE[] != C_NULL
+
+    # One mapping of the library, from lib/ — the assertion the abort would fail.
+    maps = read("/proc/self/maps", String)
+    loaded = unique([m.match for m in eachmatch(r"/[^ \n]*libllamacpp\.so"m, maps)])
+    @test length(loaded) == 1
+    @test occursin(joinpath("LlamaChat", "lib"), only(loaded))
 end
 
 # ── Pure layers — no model required ──────────────────────────────────────────
@@ -794,6 +818,202 @@ else
         LC.close!(s)
         @test !s.isopen
         @test_throws ErrorException LC.chat(s, "anything")
+    end
+end
+
+# ── Reasoning-model terse mode ───────────────────────────────────────────────
+#
+# `think = false` SHORTENS reasoning and hides it; it does not disable it.
+# Three mechanisms were measured on qwen3:4b (temp=0, two prompts, total gen):
+#   baseline 662 tok / 11.8 s · `<think></think>` prefill 606 / 11.0 ·
+#   system directive 201 / 3.9 · directive+prefill 252 / 4.9
+# Qwen3's `/no_think` and `enable_thinking` both live in the Jinja template that
+# `llama_chat_apply_template` does not run — `enable_thinking` does not appear
+# in this model's template at all, whose generation prompt is unconditionally
+# `<|im_start|>assistant\n<think>\n`.
+@testset "terse mode (think = false)" begin
+    @testset "_strip_think folds only a leading block" begin
+        @test LC._strip_think("<think>\nreasoning\n</think>\n\nHello!") == "Hello!"
+        @test LC._strip_think("<think></think>answer") == "answer"
+        # Leading whitespace before the block is still a leading block.
+        @test LC._strip_think("\n  <think>r</think>\n\nA") == "A"
+        # A plain reply is returned untouched.
+        @test LC._strip_think("Plain answer.") == "Plain answer."
+        # A closing tag with no opener is content — e.g. explaining the tag.
+        @test LC._strip_think("Use </think> in XML.") == "Use </think> in XML."
+        # A block that does not OPEN the reply is content too.
+        @test LC._strip_think("Hi <think>x</think> there") == "Hi <think>x</think> there"
+        @test LC._strip_think("") == ""
+    end
+
+    if MODEL !== nothing
+        @testset "the directive lands in the system prompt" begin
+            # Session-level, not per-turn: it changes the system prompt, and
+            # changing that mid-conversation re-renders every earlier turn.
+            s = LC.ChatSession(MODEL; n_ctx = 64, think = false)
+            @test occursin(LC._TERSE_DIRECTIVE, s.system)
+            @test !s.think
+            LC.close!(s)
+
+            # A user system prompt is kept, with the directive appended.
+            s = LC.ChatSession(MODEL; n_ctx = 64, think = false, system = "You are Ada.")
+            @test occursin("You are Ada.", s.system)
+            @test occursin(LC._TERSE_DIRECTIVE, s.system)
+            LC.close!(s)
+
+            # Default leaves the system prompt exactly as given.
+            s = LC.ChatSession(MODEL; n_ctx = 64, system = "You are Ada.")
+            @test s.system == "You are Ada."
+            @test s.think
+            LC.close!(s)
+        end
+    end
+end
+
+# ── GPU placement planning (plan.jl) ─────────────────────────────────────────
+#
+# This code exists to stop a process abort: llama.cpp does not fit-to-available,
+# and an over-commit on the Vulkan backend calls abort() from inside ggml with
+# no Julia exception to catch. So it must decide correctly from a header rather
+# than by trying and recovering — and that means it has to be tested against
+# headers, not against a live card.
+#
+# Fixtures are synthesized GGUF v3 files written to a tempdir: a header alone is
+# a few hundred bytes, so the suite can cover shapes no local blob has (MoE,
+# derived head_dim, a clip projector) without downloading anything.
+@testset "GPU placement planning" begin
+    # Minimal GGUF v3 writer: magic, version, tensor_count, kv_count, then pairs.
+    # Only the scalar/string types the planner reads.
+    function write_gguf(path; arch::String, kv::Dict{String,Any}, pad::Int = 0)
+        open(path, "w") do io
+            write(io, b"GGUF"); write(io, UInt32(3))
+            write(io, UInt64(0))                       # tensor_count
+            all = merge(Dict{String,Any}("general.architecture" => arch), kv)
+            write(io, UInt64(length(all)))
+            for (k, v) in all
+                write(io, UInt64(sizeof(k))); write(io, codeunits(k))
+                if v isa String
+                    write(io, UInt32(8)); write(io, UInt64(sizeof(v))); write(io, codeunits(v))
+                else
+                    write(io, UInt32(4)); write(io, UInt32(v))   # uint32
+                end
+            end
+            pad > 0 && write(io, zeros(UInt8, pad))    # stand in for tensor data
+        end
+        return path
+    end
+
+    mktempdir() do dir
+        # qwen3:4b's real shape, at a size that lets budgets be exercised.
+        q4 = write_gguf(joinpath(dir, "q4.gguf"); arch = "qwen3", pad = 2 * 1024^3,
+              kv = Dict{String,Any}("qwen3.block_count" => 36,
+                                    "qwen3.attention.head_count" => 32,
+                                    "qwen3.attention.head_count_kv" => 8,
+                                    "qwen3.attention.key_length" => 128,
+                                    "qwen3.attention.value_length" => 128,
+                                    "qwen3.embedding_length" => 2560))
+
+        @testset "header + shape" begin
+            s = LC.model_shape(q4)
+            @test s.arch == "qwen3"
+            @test (s.n_layer, s.n_head_kv, s.k_len, s.v_len) == (36, 8, 128, 128)
+            @test !s.is_moe
+            # THE reason key_length is read explicitly: the derivation
+            # embedding_length ÷ head_count gives 2560÷32 = 80, not 128.
+            @test s.n_embd ÷ s.n_head == 80
+            @test s.k_len == 128
+        end
+
+        @testset "KV is the expensive half" begin
+            s = LC.model_shape(q4)
+            # 36 layers × 8 kv-heads × (128+128) × 2 bytes = 147456 B/token.
+            @test LC.kv_bytes(s, 1) == 147_456
+            @test LC.kv_bytes(s, 32768) == 147_456 * 32768
+            @test LC.kv_bytes(s, 32768) > 4 * 1024^3      # > 4 GiB, i.e. > the weights
+            @test LC.kv_bytes(s, 1024; bits = 8) == LC.kv_bytes(s, 1024) ÷ 2
+        end
+
+        @testset "budget decides, and n_ctx is the dial" begin
+            withenv("LLAMACHAT_VRAM_GB" => "5") do
+                @test LC.plan_offload(q4; n_ctx = 2048).ngl  == 99
+                @test LC.plan_offload(q4; n_ctx = 2048).why  === :fits
+                big = LC.plan_offload(q4; n_ctx = 32768)
+                @test big.ngl == 0
+                @test big.why === :too_big
+                # A refusal must say what WOULD work, not just "no".
+                @test 0 < big.max_ctx_on_gpu < 32768
+                @test LC.plan_offload(q4; n_ctx = big.max_ctx_on_gpu).ngl == 99
+            end
+            # Raising the budget moves the boundary.
+            withenv("LLAMACHAT_VRAM_GB" => "16") do
+                @test LC.plan_offload(q4; n_ctx = 32768).ngl == 99
+            end
+        end
+
+        @testset "explicit over-budget is refused, not warned" begin
+            withenv("LLAMACHAT_VRAM_GB" => "5") do
+                p = LC.plan_offload(q4; n_ctx = 32768, requested = 99)
+                @test p.why === :requested
+                @test p.ngl == 99                      # honoured in the plan…
+                err = try LC.check_request(p, q4, 32768); nothing catch e; e end
+                @test err isa ErrorException           # …and vetoed by the check
+                msg = sprint(showerror, err)
+                @test occursin("does not fit the VRAM budget", msg)
+                @test occursin("LLAMACHAT_VRAM_GB", msg)   # names the override
+                @test occursin(string(p.max_ctx_on_gpu), msg)
+                # CPU is always allowed, whatever the budget.
+                @test LC.check_request(LC.plan_offload(q4; n_ctx = 32768, requested = 0),
+                                       q4, 32768) === nothing
+            end
+        end
+
+        @testset "a CPU fallback is never silent" begin
+            withenv("LLAMACHAT_VRAM_GB" => "5") do
+                @test LC.plan_note(LC.plan_offload(q4; n_ctx = 2048), 2048) === nothing
+                note = LC.plan_note(LC.plan_offload(q4; n_ctx = 32768), 32768)
+                @test note !== nothing && occursin("CPU", note)
+            end
+        end
+
+        @testset "MoE is detected and advised on" begin
+            moe = write_gguf(joinpath(dir, "moe.gguf"); arch = "qwen3moe", pad = 4 * 1024^3,
+                  kv = Dict{String,Any}("qwen3moe.block_count" => 48,
+                                        "qwen3moe.attention.head_count" => 32,
+                                        "qwen3moe.attention.head_count_kv" => 4,
+                                        "qwen3moe.attention.key_length" => 128,
+                                        "qwen3moe.attention.value_length" => 128,
+                                        "qwen3moe.embedding_length" => 2048,
+                                        "qwen3moe.expert_count" => 128))
+            s = LC.model_shape(moe)
+            @test s.is_moe && s.n_expert == 128
+            withenv("LLAMACHAT_VRAM_GB" => "5") do
+                @test occursin("MoE", LC.plan_note(LC.plan_offload(moe; n_ctx = 8192), 8192))
+            end
+        end
+
+        @testset "non-LLM blobs fail legibly" begin
+            # ollama's blob store mixes vision projectors in with text models;
+            # "no clip.block_count" reads like a corrupt file.
+            clip = write_gguf(joinpath(dir, "clip.gguf"); arch = "clip",
+                              kv = Dict{String,Any}("clip.has_text_encoder" => 0))
+            err = try LC.model_shape(clip); nothing catch e; e end
+            @test err isa ErrorException
+            @test occursin("not a language model", sprint(showerror, err))
+
+            notgguf = joinpath(dir, "nope.bin"); write(notgguf, b"NOTAGGUF")
+            @test_throws ErrorException LC.model_shape(notgguf)
+        end
+
+        @testset "\$LLAMACHAT_NGL" begin
+            withenv("LLAMACHAT_NGL" => nothing) do; @test LC._env_ngl() === :auto; end
+            withenv("LLAMACHAT_NGL" => "auto") do; @test LC._env_ngl() === :auto; end
+            withenv("LLAMACHAT_NGL" => "0")    do; @test LC._env_ngl() == 0;      end
+            withenv("LLAMACHAT_NGL" => "99")   do; @test LC._env_ngl() == 99;     end
+            # Unparseable falls back to auto rather than erroring at load time.
+            withenv("LLAMACHAT_NGL" => "yes please") do
+                @test (@test_logs (:warn,) match_mode=:any LC._env_ngl()) === :auto
+            end
+        end
     end
 end
 

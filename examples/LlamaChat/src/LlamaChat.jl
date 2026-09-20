@@ -75,8 +75,20 @@ import Markdown
 #
 # `import`, deliberately NOT `using`. A wrapper generated from C++ DWARF
 # harvests a name from every symbol that reached the debug info — libstdc++
-# included — and this one defines 6,527. Importing the module and reaching
-# through `L.` keeps that out of this namespace entirely.
+# included — and this one defines **37,750** (18,073 of them exported).
+# Importing the module and reaching through `L.` keeps that out of this
+# namespace entirely.
+#
+# That number TRIPLED when the Vulkan backend went in (12,526 / 5,615 before),
+# and the reason is worth knowing: `-fvisibility=hidden` bounds the SYMBOL
+# TABLE, not DWARF. It kept ggml-vulkan's ~1,958-per-TU shader byte arrays and
+# the `vk::*Error` classes out of the exported surface — `nm -D` shows zero of
+# either — but `ggml-vulkan.cpp` includes `<vulkan/vulkan_core.h>` and
+# `<vulkan/vulkan.hpp>` under `-fstandalone-debug`, so every Vulkan enum
+# constant and ~70 `shared_ptr_vk_*` / `Flags_vk_*` helper types still reach
+# the debug info and get wrapped. Struct count actually went DOWN (690 → 546);
+# the growth is constants. Harmless behind `import`, and the reason this file
+# has never used `using`.
 #
 # It used to be a correctness matter as well, and that is worth recording
 # because it cost a debugging session here: llamacpp defines `error` (from
@@ -98,6 +110,33 @@ const L = Llamacpp
 # The rest of this file is what those are made of and stays behind the module
 # qualifier — see the module docstring.
 export list_models, load, ask
+
+# GPU placement: GGUF shape reading + the VRAM budget planner. Kept separate
+# because it is arithmetic about memory, not part of the ABI story this example
+# exists to tell.
+include("plan.jl")
+
+"""
+    _env_ngl() -> Int | :auto
+
+`\$LLAMACHAT_NGL` — unset or `"auto"` hands the decision to `plan_offload`; an
+integer forces that many layers and is then bounds-checked against the budget.
+
+Read at CALL time, never at module scope. A `const` initialised from `ENV` is
+evaluated during precompilation and frozen into the `.ji`, which is exactly how
+`\$LLAMACPP_CHAT_MODEL` silently did nothing for anyone whose first
+`using LlamaChat` came before they exported it — same trap, same file.
+"""
+function _env_ngl()
+    v = get(ENV, "LLAMACHAT_NGL", "auto")
+    (isempty(v) || lowercase(v) == "auto") && return :auto
+    n = tryparse(Int, v)
+    if n === nothing
+        @warn "LLAMACHAT_NGL=$(repr(v)) is neither an integer nor \"auto\" — using auto"
+        return :auto
+    end
+    return n
+end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model resolution — ollama's blob store, so you can say "qwen3-coder" instead
@@ -720,6 +759,7 @@ mutable struct ChatSession
     n_ctx::Int
     n_batch::Int
     verbose::Bool
+    think::Bool                            # false ⇒ prefill a closed <think> block
     isopen::Bool
 end
 
@@ -731,10 +771,27 @@ Load a model and open a context. `model` is an ollama name or a path.
   `system`       system prompt (default none)
   `n_ctx`        context window (default 32768; model trains to 262144)
   `n_threads`    default = physical cores (SMT threads / 2)
-  `n_gpu_layers` default 0 — this build is CPU-only (no ggml GPU backends)
+  `n_gpu_layers` default `:auto` (from `\$LLAMACHAT_NGL`) — `plan_offload`
+                 reads the model's GGUF shape and places it inside the VRAM
+                 budget, so a model that fits runs on the GPU and one that does
+                 not runs on CPU instead of aborting the process. Pass an
+                 integer to force it; over-budget values are REFUSED, not
+                 warned, because llama.cpp over-commit on Vulkan is a
+                 `GGML_ASSERT` abort that kills the REPL.
+                 Budgets: `\$LLAMACHAT_VRAM_GB` (default 5),
+                 `\$LLAMACHAT_RAM_GB` (default 35).
+                 `GGML_DISABLE_VULKAN=1` unregisters the backend entirely
   `temp`         default 0.7; `temp <= 0` selects greedy sampling
   `top_k`/`top_p`/`min_p`  default 40 / 0.95 / 0.05
   `seed`         default random
+  `think`        default true. `false` appends a terse directive to the system
+                 prompt and folds the `<think>…</think>` block out of the reply.
+                 Measured on qwen3:4b: 662 → 201 generated tokens, 11.8s → 3.9s.
+                 It SHORTENS reasoning, it does not disable it — nothing in this
+                 build can. Qwen3's `/no_think` switch and `enable_thinking` both
+                 live in the Jinja template this build does not run; see
+                 `_TERSE_DIRECTIVE` for the measurements. Session-level, because
+                 it changes the system prompt
   `verbose`      let llama.cpp's loader log to stderr (default false)
   `log`          where the one-line load progress goes (default stderr)
 
@@ -749,23 +806,42 @@ function ChatSession(model::AbstractString = default_model();
                      n_ctx::Integer = 32768,
                      n_batch::Integer = 512,
                      n_threads::Integer = max(1, Sys.CPU_THREADS ÷ 2),
-                     n_gpu_layers::Integer = 0,
+                     n_gpu_layers = _env_ngl(),
                      temp::Real = 0.7,
                      top_k::Integer = 40,
                      top_p::Real = 0.95,
                      min_p::Real = 0.05,
                      seed::Integer = rand(UInt32),
+                     think::Bool = true,
                      verbose::Bool = false)
 
     path = resolve_model(model)
     _ensure_backend(verbose)
+
+    # Placement is decided from the model's GGUF shape and the VRAM budget
+    # BEFORE the load, because llama.cpp does not fit-to-available: an
+    # over-commit on the Vulkan backend is a GGML_ASSERT abort that takes this
+    # process down, with no exception to catch. See plan.jl.
+    #
+    # `n_gpu_layers === :auto` (the default, from $LLAMACHAT_NGL) lets the
+    # planner choose; an explicit integer is honoured but checked.
+    plan = plan_offload(path; n_ctx = n_ctx,
+                        requested = n_gpu_layers === :auto ? nothing : Int(n_gpu_layers))
+    check_request(plan, path, n_ctx)
+    ngl = plan.ngl
+    if verbose
+        println(log, describe_plan(plan, path, n_ctx))
+    else
+        note = plan_note(plan, n_ctx)
+        note === nothing || println(log, note)
+    end
 
     verbose || (print(log, "loading $model … "); flush(log))
     t0 = time_ns()
 
     # 72-byte MEMORY-class struct, returned by value then passed by value into
     # a Tier-2 JIT thunk.
-    mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = Int32(n_gpu_layers))
+    mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = Int32(ngl))
     m = _quiet(verbose) do
         L.llama_model_load_from_file(path, mp)
     end
@@ -805,9 +881,17 @@ function ChatSession(model::AbstractString = default_model();
     # becomes C_NULL below, which llama_chat_apply_template reads as "chatml".
     tmpl = L.llama_model_chat_template(m, C_NULL)
 
-    s = ChatSession(String(model), path, m, ctx, vocab, chain, tmpl, String(system),
+    # `think = false` is a SYSTEM-prompt change, so it belongs to the session,
+    # not to a turn: altering the system prompt mid-conversation re-renders every
+    # earlier turn and invalidates the KV cache (which is why `/system` clears
+    # the history). A per-call override would have to either silently drop the
+    # directive or silently rebuild the cache; neither is worth the convenience.
+    sys_eff = think ? String(system) :
+              isempty(system) ? _TERSE_DIRECTIVE : rstrip(String(system)) * "\n\n" * _TERSE_DIRECTIVE
+
+    s = ChatSession(String(model), path, m, ctx, vocab, chain, tmpl, sys_eff,
                     Pair{String,String}[], UInt8[], 0, Int(n_ctx), Int(n_batch),
-                    verbose, true)
+                    verbose, think, true)
 
     verbose || (println(log, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
                              "n_ctx=$n_ctx, $n_threads threads, " *
@@ -861,6 +945,56 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt formatting — llama_chat_apply_template over an array of C structs
 # ─────────────────────────────────────────────────────────────────────────────
+
+"""
+Appended to the system prompt when `think = false`.
+
+THREE MECHANISMS WERE TRIED; ONLY THIS ONE WORKS. Measured on qwen3:4b, two
+prompts, `temp = 0`, total generated tokens:
+
+    baseline                662 tok / 11.8 s
+    <think></think> prefill 606 tok / 11.0 s
+    this directive          201 tok /  3.9 s     ← 3.3×
+    directive + prefill     252 tok /  4.9 s
+
+* Qwen3's documented `/no_think` switch does nothing here. It is implemented in
+  the model's Jinja template, which strips the token; `llama_chat_apply_template`
+  is a matcher over known templates, not a Jinja engine, so the literal text
+  reaches the model and it reasons *about* it ("Hmm, that's a bit confusing").
+* `enable_thinking = false` has nothing to set — that key does not appear in
+  this model's template at all. Read it out of the GGUF and the generation
+  prompt is unconditionally `'<|im_start|>assistant\\n<think>\\n'`. qwen3:4b is
+  the *Thinking* variant; the hybrid switch was a Qwen3-2504 feature, and later
+  releases split Instruct and Thinking into separate models.
+* Prefilling a closed `<think></think>` only removes the TAGS. The model keeps
+  reasoning in prose — that behaviour is in the weights, not the template — so
+  the deliberation now lands in the visible answer, which is strictly worse. It
+  also destroys the marker `_strip_think` needs to fold the block away.
+
+So this does not disable reasoning; nothing available here can. It shortens it,
+and the block stays tagged so it can be hidden.
+"""
+const _TERSE_DIRECTIVE = "Answer immediately and concisely. Do not deliberate, \
+reason step by step, or explain your thinking. Give only the final answer."
+
+"""
+    _strip_think(text) -> String
+
+Drop a leading `<think>…</think>` block for DISPLAY. Callers must keep the raw
+text for `history` and `s.decoded`: those two are the byte image of the KV cache,
+and storing a stripped version breaks `_format`'s prefix check on the next turn —
+every subsequent message would silently rebuild the whole cache.
+"""
+function _strip_think(text::AbstractString)
+    i = findfirst("</think>", text)
+    i === nothing && return String(text)
+    # Only fold when the block actually opens the reply; a bare closing tag in
+    # the middle of a normal answer is content, not reasoning.
+    j = findfirst("<think>", text)
+    (j === nothing || first(j) > first(i)) && return String(text)
+    isempty(strip(text[1:first(j)-1])) || return String(text)
+    return String(lstrip(text[last(i)+1:end]))
+end
 
 function _messages(s::ChatSession)
     msgs = Pair{String,String}[]
@@ -1122,7 +1256,11 @@ function chat(s::ChatSession, prompt::AbstractString;
     # of the next turn's delta, which keeps cache and transcript in step.
     append!(s.decoded, codeunits(text))
 
-    return Response(text, length(toks), ngen, t_prompt, t_gen, stop, stream)
+    # RAW above, folded here. `history` and `decoded` must keep the reasoning
+    # block because they are the byte image of the KV cache; only what the caller
+    # sees is trimmed.
+    visible = s.think ? text : _strip_think(text)
+    return Response(visible, length(toks), ngen, t_prompt, t_gen, stop, stream)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1132,6 +1270,8 @@ end
 const _COMMANDS = (
     ("/reset",          "forget the conversation, keep the model loaded"),
     ("/system <text>",  "set the system prompt (clears the conversation)"),
+    ("/nothink",        "shorten and hide reasoning (clears the conversation)"),
+    ("/think",          "restore full reasoning (clears the conversation)"),
     ("/stats",          "context use, message count, transcript size"),
     ("/help",           "this list"),
     ("/exit",           "free the model and return to Julia"),
@@ -1179,6 +1319,24 @@ function _repl!(s::ChatSession)
                 isempty(rest) && (_note("usage: /system <text>"); continue)
                 s.system = String(rest); reset!(s)
                 _note("system prompt set, conversation cleared")
+            elseif verb in ("/think", "/nothink")
+                want = verb == "/think"
+                if want == s.think
+                    _note("already $(want ? "thinking" : "terse")")
+                else
+                    # Same cost as /system, and for the same reason: the
+                    # directive lives IN the system prompt, so changing it
+                    # re-renders every earlier turn. Clearing is honest; silently
+                    # rebuilding the whole KV cache on the next message is not.
+                    s.system = want ?
+                        strip(replace(s.system, _TERSE_DIRECTIVE => "")) |> String :
+                        (isempty(s.system) ? _TERSE_DIRECTIVE :
+                         rstrip(s.system) * "\n\n" * _TERSE_DIRECTIVE)
+                    s.think = want
+                    reset!(s)
+                    _note(want ? "thinking on, conversation cleared" :
+                                 "terse mode on (reasoning shortened and hidden), conversation cleared")
+                end
             elseif verb == "/stats"
                 _note("$(s.n_past)/$(s.n_ctx) tokens · $(length(s.history)) messages · " *
                       "$(length(s.decoded)) transcript bytes")

@@ -178,6 +178,134 @@ loaded, so setting one mid-session takes effect on the next `load`. (They were
 *precompilation* and freezes into the `.ji` — so `$LLAMACPP_CHAT_MODEL` silently
 did nothing for anyone whose first `using LlamaChat` came before they set it.)
 
+## Running on the GPU
+
+The vendored wrapper carries ggml's **Vulkan** backend, so `lib/libllamacpp.so`
+can offload to the Arc A750 through Mesa's ANV driver. Nothing about that
+crosses the RepliBuild boundary — the kernels are ggml's, already compiled into
+the `.so` as SPIR-V, and the thunks stay host-side. One parameter turns it on:
+
+```julia
+s = ChatSession("qwen3:4b"; n_ctx = 8192)    # nothing to pass — auto picks the GPU
+```
+
+**`n_gpu_layers` defaults to `:auto`**, which reads the model's GGUF header and
+places it inside a VRAM budget. Nothing to remember per model, and a model that
+does not fit runs on CPU instead of killing your REPL.
+
+That last part is the reason this exists. llama.cpp does **not** fit-to-available
+— ask for more layers than the card holds and it attempts the allocation and
+calls `abort()` from inside ggml-vulkan. There is no Julia exception to catch:
+the REPL, the loaded model and your session go with it. So the decision is made
+from numbers before the load.
+
+An explicit `n_gpu_layers = N` is honoured but bounds-checked, and an
+over-budget value is **refused as a normal Julia error** rather than warned
+about — a warning followed one second later by process death is not a warning.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LLAMACHAT_NGL` | `auto` | `auto`, or an integer to force |
+| `LLAMACHAT_VRAM_GB` | `5` | VRAM the planner may spend |
+| `LLAMACHAT_RAM_GB` | `35` | CPU-side ceiling |
+
+The 5 GiB default sits below the card's 7.94 GiB on purpose: the Vulkan heap
+reports ~7.14 GiB of budget, the compositor holds some, and overshooting aborts
+rather than swaps. Raise it if you want longer context on the GPU —
+`LLAMACHAT_VRAM_GB=6.5` is enough to put qwen3:4b at `n_ctx=16384` entirely on
+the card.
+
+### Context is the expensive half
+
+The thing that makes a size-of-file check useless: **qwen3:4b is 2.33 GiB of
+weights and 144 KiB/token of KV cache.** At the default `n_ctx = 32768` that is
+**4.5 GiB of cache — nearly twice the model.**
+
+```
+ctx=2048…8192   →  ngl=99   whole model on GPU
+ctx=16384       →  ngl=35   partial (35 of 36 layers)
+ctx=32768       →  ngl=0    CPU — "n_ctx ≤ 15832 would fit it on the GPU"
+```
+
+So `n_ctx` is the dial that decides GPU vs CPU for a model this size, not the
+quantization. The KV figure comes from `block_count`, `head_count_kv` and
+`attention.key_length`/`value_length` in the GGUF header — read explicitly,
+because deriving head_dim as `embedding_length ÷ head_count` gives 80 where
+qwen3's truth is 128, a 1.6× under-count of every KV byte.
+
+Falling back to CPU always prints a line. A silent fallback is
+indistinguishable from a broken GPU build — the Vulkan backend still
+initializes, the card still gets opened, two DRI fds still appear, and the
+weights go to RAM anyway.
+
+What actually fits, measured on this box (7.14 GiB free of 7.94):
+
+| Model | Blob | Full offload |
+|---|---|---|
+| qwen3:4b | 2.5 GB | yes — 37/37 layers, 2375.91 MiB on `Vulkan0`, 1.96 GiB VRAM delta |
+| qwen2.5-coder:1.5b-base | 940 MiB | yes, comfortably |
+| qwen3-coder 30B-A3B | 18 GB | **no** — leave `n_gpu_layers = 0` |
+
+Measured through `chat()` on qwen3:4b, same prompt, `temp = 0`:
+
+| | Generation | VRAM |
+|---|---|---|
+| GPU (`n_ctx=8192`, auto) | **55.3 tok/s** | 2.95 GiB |
+| CPU (`n_gpu_layers = 0`) | 10.0 tok/s | 0 |
+
+**5.5×.** Note that qwen3 is a *reasoning* model — it opens with a `<think>`
+block, so a low `max_tokens` returns an empty-looking answer because generation
+never escaped the thinking. Budget a few hundred tokens before concluding
+anything is broken.
+
+### Terse mode
+
+`think = false` shortens the reasoning and folds the block out of the reply:
+
+```julia
+s = ChatSession("qwen3:4b"; think = false)   # or /nothink in the REPL
+```
+
+Measured on qwen3:4b, `temp = 0`, two prompts: **662 → 201 generated tokens,
+11.8 s → 3.9 s**, and "Say hello." answers `Hello!` instead of 280 tokens of
+deliberation.
+
+It **shortens** reasoning; it cannot disable it, and nothing in this build can:
+
+- Qwen3's documented `/no_think` switch does nothing here. It is implemented in
+  the model's Jinja template, which strips the token — `llama_chat_apply_template`
+  is a matcher over known templates, not a Jinja engine, so the literal text
+  reaches the model and it reasons *about* it.
+- `enable_thinking = false` has nothing to set: that key does not appear in this
+  model's template at all. Its generation prompt is unconditionally
+  `<|im_start|>assistant\n<think>\n`. qwen3:4b is the *Thinking* variant — the
+  hybrid switch was a Qwen3-2504 feature, and later releases split Instruct and
+  Thinking into separate models.
+- Prefilling an empty `<think></think>` only removes the *tags* (606 tok vs 662).
+  The model keeps reasoning in prose, which then lands in the visible answer —
+  strictly worse, and it destroys the marker needed to fold the block.
+
+So the flag is a system-prompt directive plus display folding. It is
+session-level because it changes the system prompt, and changing that
+mid-conversation re-renders every earlier turn — `/think` and `/nothink` clear
+the conversation for the same reason `/system` does.
+
+`history` and the KV cache always keep the raw reasoning; only what the caller
+sees is trimmed. Storing the folded text would break `_format`'s byte-exact
+prefix check and silently rebuild the whole cache every turn.
+
+One API-ordering trap if you query the device directly:
+`ggml_backend_vk_get_device_memory` asserts on
+`device < vk_instance.device_indices.size()`, and that vector is populated when
+the instance initializes. Calling it before `ggml_backend_vk_get_device_count()`
+aborts the process — a `GGML_ASSERT` failure, not a Julia exception, so it takes
+the REPL with it.
+
+`GGML_DISABLE_VULKAN=1` unregisters the backend entirely, which is the switch to
+reach for when comparing against CPU or when the driver misbehaves —
+`ggml-backend-reg.cpp` reads it at registration time, so one build serves both
+paths and there is no separate CPU library.
+
 ## Layout
 
 ```
@@ -350,9 +478,27 @@ RepliBuild.build("packages/llamacpp/replibuild.toml")   # → libllamacpp.so + c
 RepliBuild.wrap("packages/llamacpp/replibuild.toml")    # → Llamacpp.jl
 ```
 
-then copy the four artifacts into `lib/`. A cold rebuild is a 200 MB clone,
-195 TUs and a 252 MB DWARF dump — roughly 19 minutes — so it is deliberately not
-a routine step.
+then copy the **five** artifacts into `lib/`: `Llamacpp.jl`, `libllamacpp.so`,
+`libllamacpp_thunks.so`, `compilation_metadata.json`, `thunk_manifest.json`.
+
+Two things about that sequence are not optional since the Vulkan backend went
+in, and both cost a wasted rebuild if skipped:
+
+1. **The shaders must be harvested first.** ggml-vulkan ships 136 GLSL `.comp`
+   files and a generator built as a CMake ExternalProject, which RepliBuild's
+   resolver cannot run. `packages/llamacpp/harvest_vulkan_shaders.sh` stands in
+   for it, emitting 136 `.cpp` of embedded SPIR-V plus a header into
+   `packages/llamacpp/vulkan/` (206 MB, gitignored, regenerable). It reads the
+   dependency clone, which `build()` creates — so on a cold package run
+   `build()` once, then the script, then build for real.
+2. **`build()` then `wrap()` twice.** `aot_thunks = true` compiles Tier-2 thunks
+   from the *previous* wrap's manifest, so the first pass after any change to
+   the exported surface fails in `_assert_aot_thunks_present`. That refusal is
+   expected, not a bug; run the pair again and it binds.
+
+A cold rebuild is a 200 MB clone and 332 TUs — `ggml-vulkan.cpp` alone is 19k
+lines pulling in `vulkan.hpp` and takes ~107 s, and DWARF extraction ~199 s — so
+it is deliberately not a routine step.
 
 ## Setup
 
