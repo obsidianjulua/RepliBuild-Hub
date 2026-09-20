@@ -1,0 +1,108 @@
+[project]
+name = "glfw"
+version = "3.5.1"
+root = "."
+
+[dependencies.glfw]
+type = "git"
+url = "https://github.com/glfw/glfw.git"
+tag = "3.5.1"
+commit = "d9d6f0f1f967807ffade6598ea9a631ebaf37a56"
+# X11-only. GLFW's Wayland backend runs wayland-scanner over XML at *build*
+# time (add_custom_command in src/CMakeLists.txt); those headers are not in
+# git and RepliBuild's resolver cannot run a generator. The null backend
+# stays — it is part of the always-compiled core, not an alternate platform.
+# win32_/wgl_/wl_/macos are the other platform TUs; deps/ is getopt + tinycthread
+# for examples/tests. Matching is file== / prefix / suffix / substring of the
+# clone-relative path.
+exclude = [
+    "deps",
+    "tests",
+    "examples",
+    "docs",
+    "win32_",
+    "wgl_context.c",
+    "wl_",
+    "macos_time.c",
+]
+
+[compile]
+# _GLFW_X11 is the single platform gate (compiling every platform at once
+# will not link). _DEFAULT_SOURCE is what upstream injects on Linux so
+# -std=c99 does not hide POSIX 2008. Do NOT add -fvisibility=hidden: GLFWAPI
+# is a visibility attribute only under _GLFW_BUILD_DLL, and without that
+# the flag hides the entire public API.
+flags = ["-O2", "-fPIC", "-std=c99", "-D_GLFW_X11", "-D_DEFAULT_SOURCE"]
+# Resolver auto-adds <clone>, <clone>/include, <clone>/src. Naming include
+# first still matters: this box has /usr/include/GLFW/glfw3.h from the
+# distro package, and an explicit -I outranks the system path.
+include_dirs = [
+    ".replibuild_cache/deps/glfw/include",
+]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+# X11/GLX/GL are dlopened at runtime (posix_module.c); the .so only needs
+# the POSIX bits. Matches `pkg-config --libs --static glfw3` minus -lglfw.
+link_libraries = ["m", "pthread", "dl", "rt"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["GLFW/glfw3.h"]
+# Internals (`_glfwPlatform*`, `_glfwInputError`, the null-backend twins)
+# are in the .so because we did not pass -fvisibility=hidden. They are not
+# the public API; drop them at wrap time (no recompile). Anchored glob.
+exclude_symbols = ["_glfw*"]
+
+# Value macros the public header defines and the test actually uses.
+# Key/button token soup (GLFW_KEY_A, …) is omitted on purpose — hundreds of
+# integers, none of them functions; add a name here when a caller needs it.
+[wrap.macros.GLFW_VERSION_MAJOR]
+ret = "int"
+[wrap.macros.GLFW_VERSION_MINOR]
+ret = "int"
+[wrap.macros.GLFW_VERSION_REVISION]
+ret = "int"
+[wrap.macros.GLFW_TRUE]
+ret = "int"
+[wrap.macros.GLFW_FALSE]
+ret = "int"
+[wrap.macros.GLFW_RELEASE]
+ret = "int"
+[wrap.macros.GLFW_PRESS]
+ret = "int"
+[wrap.macros.GLFW_VISIBLE]
+ret = "int"
+[wrap.macros.GLFW_CLIENT_API]
+ret = "int"
+[wrap.macros.GLFW_OPENGL_API]
+ret = "int"
+[wrap.macros.GLFW_CONTEXT_VERSION_MAJOR]
+ret = "int"
+[wrap.macros.GLFW_CONTEXT_VERSION_MINOR]
+ret = "int"
+[wrap.macros.GLFW_OPENGL_PROFILE]
+ret = "int"
+[wrap.macros.GLFW_OPENGL_CORE_PROFILE]
+ret = "int"
+[wrap.macros.GLFW_PLATFORM]
+ret = "int"
+[wrap.macros.GLFW_PLATFORM_X11]
+ret = "int"
+[wrap.macros.GLFW_PLATFORM_WAYLAND]
+ret = "int"
+[wrap.macros.GLFW_NO_ERROR]
+ret = "int"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
