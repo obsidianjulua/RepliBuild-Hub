@@ -50,7 +50,10 @@ L.ggml_log_set(_SILENCE, C_NULL)
 L.llama_backend_init()
 
 # ── Model + context (identical to inference.jl, minus embeddings) ────────────
-mp    = L.setproperties(L.llama_model_default_params(); n_gpu_layers = 0)
+# n_gpu_layers=99 offloads every layer to the Vulkan backend; NGL=0 or
+# GGML_DISABLE_VULKAN=1 falls back to CPU. See inference.jl for the full note.
+const NGL = parse(Int, get(ENV, "NGL", "99"))
+mp    = L.setproperties(L.llama_model_default_params(); n_gpu_layers = NGL)
 model = L.llama_model_load_from_file(MODEL, mp)
 model == C_NULL && Base.error("model load failed: $MODEL")
 vocab = L.llama_model_get_vocab(model)

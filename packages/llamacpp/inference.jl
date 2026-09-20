@@ -36,7 +36,16 @@ L.llama_backend_init()
 
 # ── 2. Model ─────────────────────────────────────────────────────────────────
 # llama_model_params is 72 bytes, MEMORY-class, RETURNED by value.
-mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = 0)   # CPU only
+#
+# n_gpu_layers is the WHOLE GPU story from Julia's side. The Vulkan kernels are
+# ggml's, compiled into the .so; nothing crosses the device boundary through a
+# RepliBuild thunk. This field just tells llama.cpp how many layers to offload,
+# and 99 means "all of them" (it clamps to the model's layer count).
+#
+# Set it to 0, or run with GGML_DISABLE_VULKAN=1, to get the CPU path back —
+# ggml-backend-reg.cpp checks that variable before registering the backend.
+const NGL = parse(Int, get(ENV, "NGL", "99"))
+mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = NGL)
 # ...and passed BY VALUE into the loader.
 model = L.llama_model_load_from_file(MODEL, mp)
 model == C_NULL && error("model load failed: $MODEL")

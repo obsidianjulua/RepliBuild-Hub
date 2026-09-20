@@ -3,7 +3,7 @@ name = "llamacpp"
 version = "b10286"
 root = "."
 
-# llama.cpp = libllama (src/) + ggml (ggml/src/), CPU backend only.
+# llama.cpp = libllama (src/) + ggml (ggml/src/), CPU + Vulkan backends.
 #
 # Admission-gate notes (why this is a source-build candidate and not an ingest):
 #   * No configure script and no code generator on the path we build. The only
@@ -35,9 +35,17 @@ exclude = [
     "vendor/",
 
     # ── Non-CPU ggml backends (each needs its own SDK + per-target flags) ──
+    #
+    # ggml-vulkan/ is NOT excluded — it is the GPU backend this package builds.
+    # It survives the "one uniform flag set" rule: ggml-vulkan.cpp compiles
+    # under exactly the flags below plus -DGGML_USE_VULKAN (verified, 107s for
+    # that one TU — it is 19k lines and pulls in vulkan.hpp).
+    #
+    # Its shaders do NOT come from this clone. They are generated into
+    # packages/llamacpp/vulkan/ by harvest_vulkan_shaders.sh and enter the build
+    # as [dependencies.vkshaders]; see that script's header for why.
     "ggml-cuda/",
     "ggml-metal/",
-    "ggml-vulkan/",
     "ggml-sycl/",
     "ggml-opencl/",
     "ggml-blas/",
@@ -67,12 +75,36 @@ exclude = [
     "amx/",             # needs -mamx-int8/-mamx-tile
     "cpu-feats.cpp",    # runtime feature scoring; only built for GGML_BACKEND_DL variants
 
+    # ── Host tools, not library code ──
+    # vulkan-shaders-gen.cpp has a main(). It is the shader GENERATOR, built and
+    # run by harvest_vulkan_shaders.sh at harvest time; linking it into the .so
+    # drags a second entry point in. The .comp/.glsl files beside it are not
+    # C/C++ extensions, so the resolver's walk already skips those.
+    "vulkan-shaders-gen.cpp",
+
     # NOTE: ggml-backend-dl.cpp must NOT be excluded. The name suggests it is
     # gated on GGML_BACKEND_DL, but ggml-backend-reg.cpp calls dl_load_library
     # / dl_get_sym / dl_error UNCONDITIONALLY (no GGML_BACKEND_DL guard appears
     # in that file at all). Dropping it links a .so with three undefined
     # symbols, which only surfaces when something links against it.
 ]
+
+# ggml-vulkan's shaders, harvested by harvest_vulkan_shaders.sh — 136 .cpp files
+# holding SPIR-V as byte arrays, plus the header declaring them.
+#
+# A local dep rather than a source dir because that is the only mechanism the
+# resolver has for compiling sources from OUTSIDE the dependency clone: the
+# "local" branch walks the path for .cpp and adds every hit to extra_sources,
+# and pushes the path onto extra_includes so ggml-vulkan.cpp finds
+# ggml-vulkan-shaders.hpp.
+#
+# That branch applies NO exclude filtering and treats any .a/.so it finds as a
+# link library, so this directory must hold nothing but the generated sources.
+# The script rm -rf's it on each run for exactly that reason. It is gitignored
+# (206 MB, regenerable) — see HUB.md.
+[dependencies.vkshaders]
+type = "local"
+path = "vulkan"
 
 [compile]
 # -march=x86-64-v3: the SIMD level ggml's x86 path wants (AVX2 + FMA + F16C +
@@ -88,16 +120,57 @@ exclude = [
 # ggml_version()/ggml_commit() and CMake injects them as string defines
 # (ggml/CMakeLists.txt:409). Nothing declares them in a header, so without
 # these two ggml.c is the ONE TU in the tree that fails to compile.
+#
+# -DGGML_USE_VULKAN: the mirror of -DGGML_USE_CPU. ggml-backend-reg.cpp gates
+# its static register_backend(ggml_backend_vk_reg()) call on it; without the
+# define the Vulkan TUs compile and link but the registry never learns about the
+# GPU, so n_gpu_layers > 0 silently does nothing. That file also honours
+# GGML_DISABLE_VULKAN at RUNTIME, so this one build still gives a CPU-only path
+# via the environment — no separate CPU package is needed.
+#
+# -fvisibility=hidden + the three *_SHARED defines: ONE mechanism, and the
+# defines are not optional. GGML_API / GGML_BACKEND_API / LLAMA_API expand to
+# __attribute__((visibility("default"))) ONLY inside `#ifdef GGML_SHARED` /
+# `GGML_BACKEND_SHARED` / `LLAMA_SHARED` (ggml.h:176, ggml-backend.h:6,
+# llama.h:15). Undefined, all three are a bare `extern`, and -fvisibility=hidden
+# then hides the ENTIRE public API — llama_decode, llama_backend_init, ggml_init,
+# the lot. The .so still links and the wrapper still generates; it is just empty
+# of everything that matters. Checking that a function carries a GGML_API
+# annotation proves nothing on its own — check that the macro is ACTIVE.
+#
+# The matching *_BUILD defines are upstream's dllexport/dllimport discriminator
+# and are inert on the ELF and mingw paths, but they are what upstream pairs
+# these with (ggml/src/CMakeLists.txt:287,515; src/CMakeLists.txt:61), and
+# RepliBuild builds every TU into one .so, so both halves apply here.
+#
+# The point of hiding: the wrapper generator reads `nm -g --defined-only` and
+# has no symbol filter, so without this it sees two floods:
+#   * ~1,958 matmul_*_data / matmul_*_len byte-array globals PER shader TU,
+#     across 136 TUs;
+#   * the whole vk::*Error C++ class family out of vulkan.hpp — vtables and
+#     non-virtual thunks for DeviceLostError, ExtensionNotPresentError and
+#     friends. That is the same name-collision hazard class as wrapping a C++
+#     library that exports `error`.
 flags = [
     "-O2", "-fPIC", "-std=c++17",
     "-march=x86-64-v3",
     "-fstandalone-debug",
+    "-fvisibility=hidden",
+    "-DGGML_SHARED", "-DGGML_BUILD",
+    "-DGGML_BACKEND_SHARED", "-DGGML_BACKEND_BUILD",
+    "-DLLAMA_SHARED", "-DLLAMA_BUILD",
     "-DNDEBUG",
     "-DGGML_USE_CPU",
+    "-DGGML_USE_VULKAN",
     "-D_GNU_SOURCE",
     '-DGGML_VERSION="0.18.1"',
     '-DGGML_COMMIT="b10286"',
 ]
+
+# Compile the Tier-2 thunks at BUILD time into libllamacpp_thunks.so. Loading
+# the wrapper is then a dlopen; otherwise every process rebuilds a 43k-line MLIR
+# module and JITs it, which is the single most expensive thing it does.
+aot_thunks = true
 parallel = true
 
 # The resolver auto-adds <clone>, <clone>/include and <clone>/src only. ggml
@@ -114,7 +187,10 @@ include_dirs = [
 # anyway. Tier 2/3 for this one.
 enable_lto = false
 optimization_level = "2"
-link_libraries = ["m", "pthread", "dl"]
+# vulkan = libvulkan.so, the ICD loader (vulkan-icd-loader). ggml-vulkan.cpp
+# links the loader, not a driver; Mesa's ANV is picked up at runtime through the
+# ICD manifest.
+link_libraries = ["m", "pthread", "dl", "vulkan"]
 
 [binary]
 type = "shared"
