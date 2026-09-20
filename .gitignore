@@ -8,6 +8,19 @@ julia/
 # Per-project incremental IR cache (mtime-keyed) + dependency graph
 .replibuild_cache/
 
+# llamacpp's harvested ggml-vulkan shader sources — 136 generated .cpp holding
+# SPIR-V as byte arrays, plus their header. 206 MB, and regenerable from the
+# pinned upstream tag by packages/llamacpp/harvest_vulkan_shaders.sh, so it is
+# build input rather than tracked content — same class as build/ above. The
+# generator itself is an upstream CMake ExternalProject the resolver cannot run;
+# that script stands in for it.
+packages/llamacpp/vulkan/
+
+# imgui writes imgui.ini next to the process cwd on exit — window positions,
+# sizes and collapsed state from whoever last ran a demo. Runtime residue of a
+# test run, not configuration.
+imgui.ini
+
 # JIT inspection artifacts — the MLIR module text the debugger uses as its source
 # file, and the emitted object under REPLIBUILD_JIT_OBJDUMP. Written by the JIT on
 # engine init and removed by RepliBuild.clean(), i.e. build output. The *.o here is
