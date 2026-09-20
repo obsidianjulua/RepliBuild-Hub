@@ -898,7 +898,15 @@ end
                     write(io, UInt32(4)); write(io, UInt32(v))   # uint32
                 end
             end
-            pad > 0 && write(io, zeros(UInt8, pad))    # stand in for tensor data
+            # Stand in for the tensor data. `plan_offload` only ever asks
+            # `filesize`, so the bytes need not exist — truncate sets the size
+            # without writing (and sparsely, on any filesystem that supports it).
+            #
+            # This used to be `write(io, zeros(UInt8, pad))`, which allocated up
+            # to 4 GiB at once and put 6 GiB through a tempdir on EVERY run of
+            # this suite. Fine on a 62 GB box with NVMe; not fine on CI, on a
+            # tmpfs sized to half of RAM, or on a Windows temp directory.
+            pad > 0 && truncate(io, position(io) + pad)
         end
         return path
     end
