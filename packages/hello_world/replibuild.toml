@@ -1,54 +1,22 @@
-[llvm]
-toolchain = "auto"
-
-[compile]
-flags = ["-std=c++17", "-fPIC"]
-source_files = ["src/hello_world.cpp"]
-parallel = true
-include_dirs = [".", "src"]
-
-[wrap]
-enabled = true
-language = "cpp"
-use_clang_jl = true
-style = "clang"
-
-[cache]
-enabled = true
-directory = ".replibuild_cache"
-
 [project]
-name = "project"
+name = "hello_world"
 root = "."
-uuid = "58f8d42a-47f5-4a4e-8bb5-9cd4e0dd393f"
 
-[discovery]
-parse_ast = true
-enabled = true
-ignore_patterns = ["build", ".git", ".cache"]
-walk_dependencies = true
-max_depth = 10
-
-[types]
-allow_unknown_enums = false
-allow_unknown_structs = true
-allow_function_pointers = true
-strictness = "warn"
-
-[paths]
-source = "src"
-build = "build"
-cache = ".replibuild_cache"
-include = "include"
-output = "julia"
-
-[link]
-optimization_level = "0"
-enable_lto = false
-
-[workflow]
-stages = ["discover", "compile", "link", "binary", "wrap"]
-
-[binary]
-type = "shared"
-strip_symbols = false
+# Graph mode: CMakeLists.txt here declares two shared libraries, and the
+# presence of [graph] makes RepliBuild take the build graph from CMake's File
+# API (configure only) and compile/link each library with its own toolchain.
+#
+#   hello   owns hw::Vec2, hw::Mood, hw::Greeter (+ the Tier-2 exerciser fns)
+#   world   links hello; embeds/returns/derives from/points at hello's types
+#
+# Selecting world brings hello along. wrap() writes julia/HelloWorld.jl, the
+# graph module, with submodules Hello and World; since RepliBuild #80 a type
+# both libraries use is defined once, by Hello, and World imports it — so
+# HelloWorld.World.Vec2 === HelloWorld.Hello.Vec2.
+#
+# [compile] / [types] / per-library [wrap] keys do not apply in graph mode:
+# flags come from CMake, and each library is wrapped with defaults.
+[graph]
+source = "."
+targets = ["world"]
+build_type = "Release"
