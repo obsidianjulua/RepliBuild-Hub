@@ -27,7 +27,7 @@ root = "."
 #                      mux but not by webp, their common dependency: each keeps
 #                      its own Julia type, and wrap reports it.
 #
-# Needs RepliBuild.jl with branch fix/graph-target-objects (2026-11-11):
+# Needs RepliBuild.jl with #85 (merged 2026-11-11, ae611f0):
 # $<TARGET_OBJECTS> sources, VERSIONed sonames on the link line, and the two
 # file-local `MemBuffer` structs each stopped the graph before that.
 [dependencies.libwebp]
