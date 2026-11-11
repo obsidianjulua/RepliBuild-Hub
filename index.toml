@@ -195,3 +195,15 @@ description = "libvterm — VT220/xterm terminal emulator as a pure state machin
 version = "0.3.3"
 language = "c"
 tags = ["terminal", "vt100", "xterm", "emulator", "pty"]
+
+[expat]
+description = "Expat — stream-oriented (SAX-style) XML parser in C"
+version = "2.7.5"
+language = "c"
+tags = ["xml", "parser", "sax", "streaming"]
+
+[msdfgen]
+description = "msdfgen core — multi-channel signed distance field generator for crisp scalable glyphs and vector shapes"
+version = "1.13.0"
+language = "cpp"
+tags = ["sdf", "fonts", "graphics", "vector", "cpp"]
