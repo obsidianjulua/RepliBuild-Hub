@@ -1,0 +1,61 @@
+[project]
+name = "stl"
+version = "host"
+root = "."
+
+# Host STL, not a git library. There is nothing to clone: the templates
+# named below are instantiated against THIS machine's libstdc++ / libc++
+# and the wrap is cached locally. A different host (libc++ vs libstdc++,
+# a different GCC) is a different binary — that is the point of a
+# per-system Hub package, not a defect.
+#
+# Not a universal Hub product. Do not fetch this TOML onto a machine and
+# expect the same .so. Local `register` + `use` only.
+#
+# Admission-gate notes:
+#   * No configure. The instantiation TU is generated from [types] templates.
+#   * One flag set: C++17, PIC. src/stl.cpp is a canary export only.
+#   * Surface is whatever STLWrappers already knows (vector / string / map /
+#     unordered_map) of primitive element types. Nested containers and
+#     user-defined T are a known hole (clipper2 Path64 → stl_methods = {}).
+
+[compile]
+# One TU instantiates vector/string/map/unordered_map against this machine's
+# STL. -fstandalone-debug would emit complete debug info for all of that
+# libstdc++ into the linked module (the onednn source-location failure).
+# -Xclang -fno-use-ctor-homing is the lighter switch: inline default
+# constructors still get a class definition, without dumping every type.
+flags = ["-O2", "-fPIC", "-std=c++17", "-Xclang", "-fno-use-ctor-homing"]
+parallel = true
+source_files = ["src/stl.cpp"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+
+[wrap.tier1]
+enable = false
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+# Spellings as in `template class X;`. std::string expands to
+# basic_string<char> for the explicit-instantiation line.
+templates = [
+    "std::vector<int>",
+    "std::vector<double>",
+    "std::string",
+    "std::map<int, int>",
+    "std::unordered_map<int, int>",
+]
+template_headers = ["<vector>", "<string>", "<map>", "<unordered_map>"]
+
+[cache]
+enabled = true

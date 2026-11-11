@@ -1,0 +1,45 @@
+[project]
+name = "expat"
+version = "2.7.5"
+root = "."
+
+[dependencies.expat]
+type = "git"
+url = "https://github.com/libexpat/libexpat.git"
+tag = "R_2_7_5"
+commit = "f31adfd584b7f6c50bbf4d22eb928538ffc9145a"
+# From SysConfigGen.toml_fragment (harvest.jl): the `expat` target compiles
+# exactly xmlparse.c, xmlrole.c, xmltok.c. xmltok_impl.c / xmltok_ns.c are
+# #included by xmltok.c and must not compile standalone.
+exclude = ["fuzz/", "gennmtab/", "lib/xmltok_impl.c", "lib/xmltok_ns.c", "xmlwf/", "testdata/"]
+
+[compile]
+# Harvested defines (config/SYSCONFIG.md). expat_config.h comes from config/,
+# which must precede everything so a distro /usr/include/expat_config.h cannot win.
+flags = ["-O2", "-fPIC", "-std=c99", "-DXML_ENABLE_VISIBILITY=1", "-Dexpat_EXPORTS", "-DNDEBUG"]
+# Upstream compiles with -fvisibility=hidden (CMakeLists FLAG_VISIBILITY) and
+# XMLIMPORT is live under XML_ENABLE_VISIBILITY=1. VisibilityProbe verdict
+# "annotated": 71 kept, 19 dropped — all internals (Xml*Encoding*, XmlProlog*,
+# testingAccounting*, unsignedCharToPrintable, _INTERNAL_trim_*).
+visibility = "hidden"
+include_dirs = ["config", ".replibuild_cache/deps/expat/expat/lib"]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["expat.h"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

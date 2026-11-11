@@ -86,10 +86,13 @@ end
     @test length(lls) == length(Xxhash.TIER1_FUNCTIONS)
 
     # Every slice file must be non-trivial IR naming its own entry symbol.
+    # Since RepliBuild 4.2 a slice file is `<symbol>-<hash>.ll` (the hash keeps
+    # case-folded names apart on Windows); the symbol is the part before the
+    # last `-`, which a C identifier never contains.
     for f in lls
         ir = read(joinpath(slices_dir, f), String)
         @test occursin("define", ir)
-        @test occursin(splitext(f)[1], ir)
+        @test occursin(rsplit(splitext(f)[1], '-'; limit=2)[1], ir)
     end
 
     # The generated kernel resolves to llvmcall (not the ccall demotion path).

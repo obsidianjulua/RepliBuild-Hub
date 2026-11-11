@@ -163,6 +163,10 @@ ret = "const char*"
 # gzprintf(gzFile file, const char *format, ...)
 # Each entry lists ONLY the variadic arg types (fixed args come from DWARF)
 [wrap.varargs]
+# Re-checked by hand against zlib.h at this commit (v1.3.1):
+#   int gzprintf(gzFile file, const char *format, ...)   zlib.h:1471
+proven_at = "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+
 gzprintf = [
     ["Cint"],
     ["Cdouble"],

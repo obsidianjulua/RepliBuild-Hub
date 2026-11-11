@@ -8,7 +8,9 @@ root = "."
 pugixml = { type = "git", url = "https://github.com/zeux/pugixml.git", tag = "v1.15", commit = "ee86beb30e4973f5feffe3ce63bfa4fbadf72f38" }
 
 [compile]
-flags = ["-std=c++17", "-fPIC"]
+# One translation unit, so -fstandalone-debug is the cheap complete-type
+# flag. xml_node / xml_attribute are header aggregates returned by value.
+flags = ["-std=c++17", "-fPIC", "-fstandalone-debug"]
 parallel = true
 
 [link]

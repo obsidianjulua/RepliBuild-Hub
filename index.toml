@@ -90,7 +90,7 @@ tags = ["serialization", "messagepack", "binary"]
 
 [sqlite]
 description = "Self-contained SQL database engine"
-version = "3.53.3"
+version = "3.53.4"
 language = "c"
 tags = ["database", "sql", "embedded"]
 
@@ -117,3 +117,81 @@ description = "Perl-compatible regular expressions (8-bit) — compile/match, ca
 version = "10.45"
 language = "c"
 tags = ["regex", "text", "parsing", "unicode"]
+
+[zstd]
+description = "Zstandard — fast lossless compression (simple, streaming, dictionary and error APIs)"
+version = "1.5.7"
+language = "c"
+tags = ["compression", "zstd", "performance"]
+
+[clipper2]
+description = "Clipper2 — polygon clipping, offsetting and triangulation (C++17, Clipper64/ClipperOffset)"
+version = "2.0.1"
+language = "cpp"
+tags = ["geometry", "polygons", "clipping", "offsetting", "cpp"]
+
+[curl]
+description = "libcurl — URL transfers (HTTP/S, FTP, and the rest of the protocol set) with a C API"
+version = "8.21.0"
+language = "c"
+tags = ["http", "network", "url", "tls"]
+
+[imgui]
+description = "Dear ImGui — bloat-free immediate-mode GUI for C++ (core widgets plus GLFW platform and OpenGL3 renderer backends)"
+version = "1.92.9b"
+language = "cpp"
+tags = ["gui", "immediate-mode", "widgets", "cpp", "glfw", "opengl"]
+
+[glfw]
+description = "GLFW 3.5.1 — window, input and OpenGL/Vulkan context (source-built, X11-only; not the stripped distro .so)"
+version = "3.5.1"
+language = "c"
+tags = ["windowing", "input", "opengl", "x11", "c"]
+
+[lmdb]
+description = "Lightning Memory-Mapped Database — embedded key/value store with ACID transactions (B+tree, mmap)"
+version = "0.9.36"
+language = "c"
+tags = ["database", "kv", "embedded", "mmap"]
+
+[utf8proc]
+description = "Clean C library for UTF-8 Unicode: normalisation, case-folding, graphemes, categories (Unicode 17)"
+version = "2.11.3"
+language = "c"
+tags = ["unicode", "utf8", "normalization", "text"]
+
+[md4c]
+description = "Markdown for C — CommonMark parser with a SAX-like callback API and an HTML renderer"
+version = "0.5.3"
+language = "c"
+tags = ["markdown", "parser", "html", "commonmark"]
+
+[argon2]
+description = "Argon2 password hashing (PHC winner) — portable C reference (argon2i / argon2d / argon2id)"
+version = "20190702"
+language = "c"
+tags = ["crypto", "password-hashing", "kdf"]
+
+[sundials]
+description = "SUNDIALS CVODE — LLNL's adaptive BDF/Adams ODE integrator, serial vectors, dense/band + Krylov linear solvers"
+version = "7.9.0"
+language = "c"
+tags = ["ode", "numerics", "solver", "integrator", "scientific-computing"]
+
+[onednn]
+description = "oneDNN 3.11.3 — Intel deep-learning primitives, CPU + Intel GPU (OpenCL / Arc A750 XEHPG)"
+version = "3.11.3"
+language = "cpp"
+tags = ["ml", "dnn", "gpu", "opencl", "intel", "cpp"]
+
+[boostmath]
+description = "Boost.Math (header-only, standalone) — special functions, statistical distributions, Gauss-Kronrod quadrature, minimisation and root bracketing; surface instantiated by a shim TU"
+version = "1.92.0"
+language = "cpp"
+tags = ["math", "special-functions", "statistics", "quadrature", "boost", "cpp", "header-only"]
+
+[libvterm]
+description = "libvterm — VT220/xterm terminal emulator as a pure state machine (bytes in, cell grid out); neovim's :terminal core"
+version = "0.3.3"
+language = "c"
+tags = ["terminal", "vt100", "xterm", "emulator", "pty"]

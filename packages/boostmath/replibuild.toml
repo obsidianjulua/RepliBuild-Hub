@@ -1,0 +1,75 @@
+[project]
+name = "boostmath"
+version = "1.92.0"
+root = "."
+
+# Boost.Math, header-only, built standalone (BOOST_MATH_STANDALONE): no
+# Boost.Config / the rest of the Boost module web, so one git dep.
+#
+# Header-only means there is no library to wrap until something instantiates
+# it. src/boostmath_shim.cpp is that something: explicit instantiation
+# definitions of the chosen surface, so the .so carries Boost's own mangled
+# template symbols and DWARF. The surface is whatever the shim names; widen it
+# there, not here.
+#
+# Admission-gate notes:
+#   * No configure, no generator. Headers live in git under include/.
+#   * One flag set: C++17 + BOOST_MATH_STANDALONE.
+#   * The only compiled sources in the tree are tests/examples (skipped by the
+#     walker) and the excludes below. None of them is the header-only library.
+[dependencies.boostmath]
+type = "git"
+url = "https://github.com/boostorg/math.git"
+tag = "boost-1.92.0"
+commit = "f12be767c04d9499aaa6f88b22d5f1b464c1c27a"
+exclude = [
+    "src/",              # src/tr1: Boost's separate C99/TR1 extern "C" library (boost_tgamma …), not the template API
+    "tools/",            # coefficient generators, each with its own main()
+    "reporting/",        # accuracy/performance report drivers, main()s
+    "config/",           # b2 feature probes, main()s
+    "include_private/",  # test-only helpers
+    "build/",
+]
+
+[compile]
+# -fno-use-ctor-homing: the distribution classes
+# are header-only value types. Their constructors are inline, so under ctor
+# homing their DWARF is a declaration only. Cheaper than -fstandalone-debug,
+# which would emit all of libstdc++.
+flags = ["-O2", "-fPIC", "-std=c++17", "-DBOOST_MATH_STANDALONE",
+         "-Xclang", "-fno-use-ctor-homing"]
+# The shim marks its explicit instantiations RB_API (visibility "default").
+# Hidden keeps the internals they drag in out of .dynsym, so the API is the shim.
+visibility = "hidden"
+aot_thunks = true
+parallel = true
+source_files = ["src/boostmath_shim.cpp"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# gauss_kronrod<double,15> is instantiated RB_API so integrate<RealFn> can be
+# exported, which also exports its private recursive helpers. Their parameters
+# are lambda closures and an internal recursive_info, so Julia has no use for them.
+exclude_symbols = [
+    "*recursive_adaptive_integrate*",
+    "*integrate_non_adaptive_m1_1*",
+]
+# Drop the ~70 Boost-internal records (series functors, lambda closures,
+# lanczos tags) that DWARF carries but no wrapped signature reaches. The five
+# distributions are reached through pdf/cdf's `const T<…>&`, no keep-list.
+surface_types_only = true
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

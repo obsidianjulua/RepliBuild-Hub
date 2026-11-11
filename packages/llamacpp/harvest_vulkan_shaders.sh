@@ -80,6 +80,9 @@ probe bfloat16              GGML_VULKAN_BFLOAT16_GLSLC_SUPPORT
 probe float_e2m1            GGML_VULKAN_FLOAT_E2M1_GLSLC_SUPPORT
 probe float_e4m3            GGML_VULKAN_FLOAT_E4M3_GLSLC_SUPPORT
 
+echo "  replibuild.toml [compile] flags must carry exactly the ON defines:"
+for d in "${DEFS[@]}"; do echo "    \"$d\","; done
+
 # ── 2. Build the generator ───────────────────────────────────────────────────
 # Upstream builds this through an ExternalProject; the actual target is one
 # translation unit against pthreads, so CMake buys nothing here.

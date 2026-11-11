@@ -8,14 +8,35 @@ const LC = LlamaChat
 # Pick the smallest *generative* model in the local ollama store — embedding
 # models have no generation head, so they are excluded. Override with
 # $LLAMACHAT_TEST_MODEL.
+# Only LlamaChat's own store is considered (models_dir(), see import_ollama):
+# the tests must not depend on ollama's /var/lib/ollama, which may be gone.
 function test_model()
     haskey(ENV, "LLAMACHAT_TEST_MODEL") && return ENV["LLAMACHAT_TEST_MODEL"]
-    cands = filter(m -> !occursin("embed", lowercase(first(m))), LC.list_models())
+    cands = filter(m -> !occursin("embed", lowercase(first(m))),
+                   LC.list_models(; roots = [LC.models_dir()]))
     isempty(cands) && return nothing
     return first(cands[end])          # list_models sorts by size, descending
 end
 
 const MODEL = test_model()
+
+# An IO that runs `f` on its first write. `chat` writes a token's text only after
+# that token is decoded, so `f` runs at an exact, known point in a generation.
+mutable struct OnFirstWrite <: IO
+    f::Function
+    fired::Bool
+    buf::IOBuffer
+end
+OnFirstWrite(f) = OnFirstWrite(f, false, IOBuffer())
+_fire!(io::OnFirstWrite) = io.fired || (io.fired = true; io.f())
+Base.unsafe_write(io::OnFirstWrite, p::Ptr{UInt8}, n::UInt) = (_fire!(io); unsafe_write(io.buf, p, n))
+Base.write(io::OnFirstWrite, x::UInt8) = (_fire!(io); write(io.buf, x))
+Base.flush(::OnFirstWrite) = nothing
+
+# The GUI module is included on first use, never by `using LlamaChat`. Load it
+# here, at top level, so the testsets below run in a world that can see it.
+const GUI_DIR = joinpath(pkgdir(LlamaChat), "lib", "gui")
+const GM = all(f -> isfile(joinpath(GUI_DIR, f)), LC._GUI_FILES) ? LC._gui_module() : nothing
 
 @testset "LlamaChat (chat app on RepliBuild wrapper)" begin
 
@@ -44,7 +65,9 @@ const MODEL = test_model()
     @test LC.L.THUNKS_HANDLE[] != C_NULL
 
     # One mapping of the library, from lib/ — the assertion the abort would fail.
-    maps = read("/proc/self/maps", String)
+    # eachline, not read(path, String): procfs reports size 0, and a sized read
+    # came back without this mapping once the process got big (on the sysimage).
+    maps = join(eachline("/proc/self/maps"), "\n")
     loaded = unique([m.match for m in eachmatch(r"/[^ \n]*libllamacpp\.so"m, maps)])
     @test length(loaded) == 1
     @test occursin(joinpath("LlamaChat", "lib"), only(loaded))
@@ -541,7 +564,7 @@ end
 
     # ...and the things that stopped being exported still exist, because scripts
     # (chat.jl among them) go through them.
-    for n in (:chat, :ChatSession, :Response, :reset!, :close!,
+    for n in (:chat, :ChatSession, :Response, :reset!, :close!, :cancel!, :gui, :pull,
               :resolve_model, :default_model, :ollama_root)
         @test isdefined(LlamaChat, n)
     end
@@ -582,7 +605,7 @@ end
     dflt in first.(ms) && @test occursin("→", out)
 
     # An empty store says so rather than printing nothing at all.
-    withenv("OLLAMA_MODELS" => "/nonexistent-store") do
+    withenv("OLLAMA_MODELS" => "/nonexistent-store", "LLAMACHAT_MODELS" => "/nonexistent-own") do
         empty_out = sprint(show, MIME"text/plain"(), LC.list_models())
         @test occursin("no models", empty_out)
     end
@@ -607,9 +630,9 @@ end
         @test LC.default_model() == "qwen3-coder"        # documented default
     end
 
-    withenv("OLLAMA_MODELS" => "/nonexistent-store") do
+    withenv("OLLAMA_MODELS" => "/nonexistent-store", "LLAMACHAT_MODELS" => "/nonexistent-own") do
         @test LC.ollama_root() == "/nonexistent-store"
-        # ...and it is actually consulted, not just readable: no manifests there.
+        # ...and both are actually consulted, not just readable: no manifests there.
         @test isempty(LC.list_models())
     end
     withenv("OLLAMA_MODELS" => nothing) do
@@ -617,6 +640,75 @@ end
     end
     # Restored afterwards — the live testsets below resolve real models.
     @test !isempty(LC.list_models())
+end
+
+@testset "pull, offline: names, stores, request events, the status line" begin
+    @test LC._split_name("qwen3") == ("library", "qwen3", "latest")
+    @test LC._split_name("qwen3:0.6b") == ("library", "qwen3", "0.6b")
+    @test LC._split_name("someone/model:q4") == ("someone", "model", "q4")
+    # LlamaChat's own store first, then ollama's (read only). pull writes to the
+    # own store only — never to $OLLAMA_MODELS, which on this machine points at
+    # /var/lib/ollama, owned by the ollama user.
+    own = joinpath(homedir(), ".local", "share", "llamachat", "models")
+    withenv("OLLAMA_MODELS" => nothing, "LLAMACHAT_MODELS" => nothing, "XDG_DATA_HOME" => nothing) do
+        @test LC.models_dir() == own
+        @test LC.model_roots() == [own, "/var/lib/ollama", joinpath(homedir(), ".ollama", "models")]
+        @test LC.pull_root() == own
+    end
+    withenv("OLLAMA_MODELS" => "/var/lib/ollama", "LLAMACHAT_MODELS" => "/mine") do
+        @test LC.model_roots() == ["/mine", "/var/lib/ollama"]
+        @test LC.pull_root() == "/mine"                     # not the service's store
+    end
+    f = tempname(); write(f, "hello")
+    try
+        # Downloads notifies a request's `interrupt` event itself when the
+        # request finishes. Shared between requests, the first to finish aborts
+        # the rest — the bug `_request` exists to avoid. If this stops being
+        # true, Downloads changed and _request's docstring is out of date.
+        ev = Base.Event()
+        LC.Downloads.request("file://$f"; output = IOBuffer(), interrupt = ev)
+        @test ev.set
+        p = LC.PullProgress("x")
+        for _ in 1:3                       # every request gets its own event
+            io = IOBuffer()
+            LC._request("file://$f", p; output = io)
+            @test String(take!(io)) == "hello"
+        end
+        @test !p.aborted[] && isempty(p.live)
+        LC.cancel!(p)
+        @test LC.cancelled(p) && p.aborted[]
+    finally
+        rm(f; force = true)
+    end
+    # import_ollama, against a fake ollama store: blobs and manifest copied,
+    # names reported, a rerun copies nothing, the source untouched.
+    mktempdir() do d
+        src, dst = joinpath(d, "ollama"), joinpath(d, "mine")
+        blob(store, dg) = joinpath(store, "blobs", replace(dg, ':' => '-'))
+        wdig, cdig = "sha256:" * "a"^64, "sha256:" * "c"^64
+        mkpath(joinpath(src, "blobs"))
+        write(blob(src, wdig), rand(UInt8, 4096)); write(blob(src, cdig), "{}")
+        mp = joinpath(src, "manifests", "registry.ollama.ai", "library", "tiny", "1b")
+        mkpath(dirname(mp))
+        write(mp, LC.JSON.json(Dict("config" => Dict("digest" => cdig, "size" => 2),
+            "layers" => [Dict("mediaType" => "application/vnd.ollama.image.model", "digest" => wdig, "size" => 4096)])))
+        @test LC.import_ollama(; from = [src], to = dst, io = devnull) == ["tiny:1b"]
+        @test read(blob(dst, wdig)) == read(blob(src, wdig))
+        @test isfile(blob(dst, cdig)) && isfile(joinpath(dst, "manifests", "registry.ollama.ai", "library", "tiny", "1b"))
+        @test !any(f -> occursin("partial", f), readdir(joinpath(dst, "blobs")))
+        out = sprint(io -> LC.import_ollama(; from = [src], to = dst, io = io))
+        @test occursin("already here", out)               # a rerun copies nothing
+        withenv("LLAMACHAT_MODELS" => dst, "OLLAMA_MODELS" => joinpath(d, "none")) do
+            @test LC.resolve_model("tiny:1b") == blob(dst, wdig)   # resolves from the own store
+        end
+        @test isfile(blob(src, wdig))                     # the source is left alone
+    end
+
+    q = LC.PullProgress("m")
+    LC._phase!(q, :downloading); q.total[] = 100 * 2^20; q.done[] = 25 * 2^20
+    s = LC.pull_status(q)
+    @test occursin("25 MiB / 100 MiB", s) && occursin("25%", s)
+    LC._phase!(q, :verifying); @test occursin("verifying", LC.pull_status(q))
 end
 
 @testset "the wrapper withholds Base-shadowing names from export" begin
@@ -655,19 +747,34 @@ end
 # ── Live model ───────────────────────────────────────────────────────────────
 
 if MODEL === nothing
-    @warn "no generative model in the ollama store — skipping live inference tests"
+    @warn "no generative model in LlamaChat's store ($(LC.models_dir())) — skipping live " *
+          "inference tests; LlamaChat.pull(\"qwen3:4b\") or LlamaChat.import_ollama() adds one"
 else
     @info "live tests using $MODEL"
     s = LC.ChatSession(MODEL; n_ctx = 1024, temp = 0.0)   # greedy → deterministic
 
     @testset "session opens" begin
+        # The weights come from LlamaChat's own store, not ollama's.
+        @test startswith(LC.resolve_model(MODEL), LC.models_dir())
         @test s.isopen
         @test s.model != C_NULL
         @test s.ctx   != C_NULL
         @test s.vocab != C_NULL
         @test s.n_ctx == 1024
         @test Int(LC.L.llama_n_ctx(s.ctx)) == 1024     # what the library actually built
+        @test s.n_layer > 0 && 0 <= s.gpu_layers <= s.n_layer
         @test s.template === nothing || s.template isa String
+    end
+
+    @testset "placement reads as the planner placed it" begin
+        n, g = s.n_layer, s.gpu_layers
+        try
+            s.gpu_layers = n;      @test LC.placement(s) == "all $n layers on GPU"
+            s.gpu_layers = n - 5;  @test LC.placement(s) == "$(n - 5)/$n layers on GPU"
+            s.gpu_layers = 0;      @test LC.placement(s) == "CPU only"
+        finally
+            s.gpu_layers = g
+        end
     end
 
     @testset "tokenize/detokenize round-trip" begin
@@ -750,6 +857,35 @@ else
         @test s.n_past == 0
         r = LC.chat(s, "Say hi."; max_tokens = 8, stream = false)   # usable afterwards
         @test r.n_gen > 0
+    end
+
+    @testset "cancel! stops at a token boundary and keeps the cache in step" begin
+        # The GUI's Stop button: an Atomic another thread sets, checked once per
+        # token, leaving by the same exit as Ctrl-C. Fired from the sink so the
+        # stop point is exact rather than a race.
+        io = OnFirstWrite(() -> LC.cancel!(s))
+        r = LC.chat(s, "Count from 1 to 50, one number per line."; max_tokens = 200, io = io)
+        @test r.stop === :interrupt
+        @test 1 <= r.n_gen < 10                  # the token after the first piece never ran
+        @test !s.cancel[]                        # consumed: it cannot cut off the next turn
+        raw = last(last(s.history))
+        streamed = String(take!(io.buf))         # `chat` ends a stream at column 0
+        @test streamed == raw || streamed == raw * "\n"
+        @test endswith(String(copy(s.decoded)), raw)
+        formatted = LC._format(s, LC._messages(s), false)
+        @test formatted[1:length(s.decoded)] == s.decoded
+        # The next turn runs to completion on the same cache.
+        r2 = LC.chat(s, "Say hi."; max_tokens = 8, stream = false)
+        @test r2.stop in (:eog, :max_tokens)
+        @test r2.n_gen > 0
+        # A request with nothing running applies to the next generation, which
+        # then stops before its first token — and still leaves the session usable.
+        LC.cancel!(s)
+        r3 = LC.chat(s, "Say hi."; max_tokens = 8, stream = false)
+        @test r3.stop === :interrupt && r3.n_gen == 0
+        @test !s.cancel[]
+        formatted = LC._format(s, LC._messages(s), false)
+        @test formatted[1:length(s.decoded)] == s.decoded
     end
 
     @testset "context budget is enforced, not overrun" begin
@@ -883,7 +1019,8 @@ end
 # derived head_dim, a clip projector) without downloading anything.
 @testset "GPU placement planning" begin
     # Minimal GGUF v3 writer: magic, version, tensor_count, kv_count, then pairs.
-    # Only the scalar/string types the planner reads.
+    # Only the types the planner reads: uint32, string, and a uint32 array (a
+    # hybrid model's per-layer `head_count_kv`).
     function write_gguf(path; arch::String, kv::Dict{String,Any}, pad::Int = 0)
         open(path, "w") do io
             write(io, b"GGUF"); write(io, UInt32(3))
@@ -894,6 +1031,9 @@ end
                 write(io, UInt64(sizeof(k))); write(io, codeunits(k))
                 if v isa String
                     write(io, UInt32(8)); write(io, UInt64(sizeof(v))); write(io, codeunits(v))
+                elseif v isa AbstractVector
+                    write(io, UInt32(9)); write(io, UInt32(4)); write(io, UInt64(length(v)))
+                    for x in v; write(io, UInt32(x)); end
                 else
                     write(io, UInt32(4)); write(io, UInt32(v))   # uint32
                 end
@@ -941,6 +1081,57 @@ end
             @test LC.kv_bytes(s, 1024; bits = 8) == LC.kv_bytes(s, 1024) ÷ 2
         end
 
+        # A hybrid (qwen35/qwen35moe) keeps KV only on its full-attention layers;
+        # the rest carry a fixed recurrent state. Counting every layer made
+        # qwen3.6:35b's cache 640 KiB/token where llama.cpp allocates 20.
+        @testset "a hybrid's KV is on its full-attention layers only" begin
+            # qwen3.6:35b's shape: an array, 0 on each linear-attention layer.
+            q36 = write_gguf(joinpath(dir, "q36.gguf"); arch = "qwen35moe", pad = 1024,
+                  kv = Dict{String,Any}("qwen35moe.block_count" => 40,
+                                        "qwen35moe.attention.head_count" => 16,
+                                        "qwen35moe.attention.head_count_kv" => [il % 4 == 3 ? 2 : 0 for il in 0:39],
+                                        "qwen35moe.attention.key_length" => 256,
+                                        "qwen35moe.attention.value_length" => 256,
+                                        "qwen35moe.full_attention_interval" => 4,
+                                        "qwen35moe.expert_count" => 256,
+                                        "qwen35moe.ssm.conv_kernel" => 4, "qwen35moe.ssm.inner_size" => 4096,
+                                        "qwen35moe.ssm.state_size" => 128, "qwen35moe.ssm.group_count" => 16))
+            s = LC.model_shape(q36)
+            @test (s.n_kv_layers, s.n_head_kv) == (10, 2)
+            @test LC.kv_bytes(s, 1) == 10 * 2 * 512 * 2              # 20 KiB, not 640
+            # 30 recurrent layers × (3 × (4096 + 2·16·128) + 128·4096) f32.
+            @test s.rs_bytes == 30 * (3 * 8192 + 524288) * 4
+            @test LC.plan_offload(q36; n_ctx = 1024).vram_needed ==
+                  s.file_bytes + LC.kv_bytes(s, 1024) + s.rs_bytes + LC._COMPUTE_RESERVE
+            # qwen3.8:27b's: a scalar and an interval. Layer il is full attention
+            # when (il + 1) % 4 == 0, llama.cpp's rule: 16 of 65.
+            q38 = write_gguf(joinpath(dir, "q38.gguf"); arch = "qwen35", pad = 1024,
+                  kv = Dict{String,Any}("qwen35.block_count" => 65,
+                                        "qwen35.attention.head_count" => 24,
+                                        "qwen35.attention.head_count_kv" => 4,
+                                        "qwen35.attention.key_length" => 256,
+                                        "qwen35.attention.value_length" => 256,
+                                        "qwen35.full_attention_interval" => 4))
+            s38 = LC.model_shape(q38)
+            @test s38.n_kv_layers == 16
+            @test LC.kv_bytes(s38, 1) == 16 * 4 * 512 * 2           # 64 KiB, not 260
+            @test findall(>(0), s38.kv_heads) == 4:4:64
+            # A plain transformer is unchanged: every layer, no recurrent state.
+            @test LC.model_shape(q4).n_kv_layers == 36
+            @test LC.model_shape(q4).rs_bytes == 0
+        end
+
+        @testset "the budget: override, else live VRAM, else the B60's" begin
+            withenv("LLAMACHAT_VRAM_GB" => "3") do
+                @test LC._vram_budget() == 3 * LC._GiB
+            end
+            withenv("LLAMACHAT_VRAM_GB" => nothing) do
+                live = LC._live_vram_free()
+                @test LC._vram_budget() == (live === nothing ? LC._B60_BUDGET_GIB * LC._GiB :
+                                                              max(live - LC._VRAM_MARGIN, 0.0))
+            end
+        end
+
         @testset "budget decides, and n_ctx is the dial" begin
             withenv("LLAMACHAT_VRAM_GB" => "5") do
                 @test LC.plan_offload(q4; n_ctx = 2048).ngl  == 99
@@ -955,6 +1146,28 @@ end
             # Raising the budget moves the boundary.
             withenv("LLAMACHAT_VRAM_GB" => "16") do
                 @test LC.plan_offload(q4; n_ctx = 32768).ngl == 99
+            end
+        end
+
+        # `load("qwen3:4b")` with no flags: the default window shrinks until the
+        # whole model is on the card, rather than the plan going partial at 32k.
+        @testset "an unchosen n_ctx is fitted to the GPU" begin
+            withenv("LLAMACHAT_VRAM_GB" => "6.5") do
+                @test LC.plan_offload(q4; n_ctx = 32768).why !== :fits   # the case at hand
+                c = LC.auto_ctx(q4)
+                @test LC._CTX_FLOOR <= c < LC._CTX_CEILING
+                @test c % 1024 == 0
+                @test LC.plan_offload(q4; n_ctx = c).why === :fits           # whole model on GPU
+                @test LC.plan_offload(q4; n_ctx = c + 1024).why !== :fits    # and the largest such
+            end
+            # Already fits at the ceiling: nothing to trade.
+            withenv("LLAMACHAT_VRAM_GB" => "16") do
+                @test LC.auto_ctx(q4) == LC._CTX_CEILING
+            end
+            # Only a sliver of window would fit: keep the full one, the plan decides.
+            withenv("LLAMACHAT_VRAM_GB" => "3.5") do
+                @test LC.plan_offload(q4; n_ctx = LC._CTX_FLOOR).why !== :fits
+                @test LC.auto_ctx(q4) == LC._CTX_CEILING
             end
         end
 
@@ -1023,6 +1236,536 @@ end
             end
         end
     end
+end
+
+# ── GUI: imgui + GLFW + llama.cpp in one process ─────────────────────────────
+#
+# Drives the real app (`LlamaChat.GUI.App`) in a hidden window: keystrokes and
+# clicks go in through ImGuiIO, one edge per frame, as GLFW's callbacks would
+# deliver them; the reply generates on a worker while this thread renders.
+@testset "GUI" begin
+if GM === nothing
+    @warn "lib/gui/ is not vendored — skipping GUI tests (run vendor_gui.sh)"
+else
+    G = GM.G
+
+    @testset "code blocks are coloured like an editor" begin
+        # The colour of the run that is `tok`, else of the first run holding it
+        # (runs merge neighbours of one colour).
+        function colour(runs, tok)
+            for l in runs, (s, c) in l
+                strip(s) == tok && return c
+            end
+            return first(c for l in runs for (s, c) in l if occursin(tok, s))
+        end
+        j = GM.highlight_code("julia", "f(x) = 1 # hi\nprintln(2)")
+        @test colour(j, "f") == GM.HL_FUNC                 # a definition (Julia's own parser)
+        @test colour(j, "println") == GM.HL_FUNC           # a call
+        @test colour(j, "1") == GM.HL_NUMBER
+        @test colour(j, "# hi") == GM.HL_COMMENT
+        c = GM.highlight_code("cpp", "int main() { return 42; } // c")
+        @test colour(c, "int") == GM.HL_TYPE && colour(c, "main") == GM.HL_FUNC
+        @test colour(c, "return") == GM.HL_KEYWORD && colour(c, "42") == GM.HL_NUMBER
+        @test colour(c, "// c") == GM.HL_COMMENT
+        p = GM.highlight_code("python", "def f():\n    return \"s\"")
+        @test colour(p, "def") == GM.HL_KEYWORD && colour(p, "f") == GM.HL_FUNC
+        @test colour(p, "\"s\"") == GM.HL_STRING
+        b = GM.highlight_code("bash", "echo \$HOME # x")
+        @test colour(b, "\$HOME") == GM.HL_SYMBOL && colour(b, "# x") == GM.HL_COMMENT
+        t = GM.highlight_code("toml", "[a]\nk = 1")
+        @test colour(t, "[a]") == GM.HL_KEYWORD && colour(t, "k") == GM.HL_MACRO && colour(t, "1") == GM.HL_NUMBER
+        @test all(c == 0 for l in GM.highlight_code("text", "x = 1 # no") for (_, c) in l)
+        # Highlighting never changes the text (tabs become four spaces).
+        src = "a\tb = \"q\"\n\nend"
+        @test [join(first.(l)) for l in GM.highlight_code("julia", src)] == ["a    b = \"q\"", "", "end"]
+    end
+
+    @testset "loaded on demand, not exported" begin
+        @test LC._GUI[] === GM
+        @test GM.default_terminal().exec[2:end] == ["--banner=no"]   # no shell, so no alias: the flag is on the command
+        @test !(:gui in names(LlamaChat))
+    end
+
+    @testset "split_think" begin
+        @test GM.split_think("plain answer") == (nothing, "plain answer", false)
+        @test GM.split_think("<think>\nhm\n</think>\n\nAnswer.") == ("hm", "Answer.", false)
+        @test GM.split_think("\n<think>still going") == ("still going", "", true)
+        @test GM.split_think("<thi") == (nothing, "", false)       # tag arriving in pieces
+        @test GM.split_think("<think></think>Hi") == ("", "Hi", false)
+        # Only a block that OPENS the reply is reasoning.
+        @test GM.split_think("A <think>x</think>") == (nothing, "A <think>x</think>", false)
+        @test GM.split_think("<think>é ✓</think>ü") == ("é ✓", "ü", false)
+    end
+
+    @testset "markdown → render tree" begin
+        p = only(GM.parse_md("plain **bold** *it* `code` [link](http://x)\n"))
+        @test p isa GM.Para
+        runs = [(join(s.pieces), s.style) for s in p.spans]
+        @test ("plain ", 0x00) in runs
+        @test ("bold", GM.S_BOLD) in runs
+        @test ("it", GM.S_ITALIC) in runs
+        @test ("code", GM.S_CODE) in runs
+        @test ("link", GM.S_LINK) in runs
+        h = only(GM.parse_md("## Title\n"))
+        @test h isa GM.Heading && h.level == 2
+        l = only(GM.parse_md("- a\n- b\n  - c\n"))
+        @test l isa GM.ListBlk && l.start < 0 && length(l.items) == 2
+        @test l.items[2][end] isa GM.ListBlk                    # nested
+        @test only(GM.parse_md("3. x\n4. y\n")).start == 3
+        c = only(GM.parse_md("```julia\nf(x) = 1\n```\n"))
+        @test c isa GM.CodeBlock && (c.lang, c.code) == ("julia", "f(x) = 1")
+        t = only(GM.parse_md("| **A** | B |\n|---|---|\n| 1 | 2 |\n"))
+        @test t isa GM.TableBlk && t.header == ["A", "B"] && length(t.rows) == 1
+        @test only(GM.parse_md("---\n")) isa GM.Rule
+        @test only(GM.parse_md("> q\n")) isa GM.Quote
+        # 16-bit ImWchar: emoji cannot be drawn, so they are dropped, not shown as U+FFFD.
+        @test GM.display_text("📊 Summary 1️⃣ ✓") == " Summary 1 ✓"
+        # A streaming reply re-parses only the segment that changed.
+        a = GM.segments("para one\n\npara two", GM.Seg[])
+        b = GM.segments("para one\n\npara two grows", a)
+        @test length(b) == 2 && b[1] === a[1] && b[2] !== a[2]
+    end
+
+    if isempty(get(ENV, "DISPLAY", ""))
+        @warn "no DISPLAY — skipping the GUI window tests"
+    elseif Threads.nthreads() < 2
+        @warn "GUI window tests need julia -t 2 or more — skipping"
+    else
+        W, H = 900, 640
+        app = GM.App(; width = W, height = H, visible = false, vsync = false)
+        key(k, down) = G.ImGuiIO_AddKeyEvent(app.io, k, down)
+        type!(s) = G.ImGuiIO_AddInputCharactersUTF8(app.io, s)
+        frames!(n = 1) = for _ in 1:n; GM.step!(app); end
+        # One key edge per frame: imgui trickles queued input, but a chord's
+        # down and up in one frame is not how a keyboard delivers it.
+        function chord!(keys...)
+            for k in keys;          key(k, true);  frames!(); end
+            for k in reverse(keys); key(k, false); frames!(); end
+        end
+        function click!(which)
+            x0, y0, x1, y1 = app.rects[which]
+            G.ImGuiIO_AddMousePosEvent(app.io, (x0 + x1) / 2, (y0 + y1) / 2); frames!()
+            G.ImGuiIO_AddMouseButtonEvent(app.io, 0, true);  frames!()
+            G.ImGuiIO_AddMouseButtonEvent(app.io, 0, false); frames!()
+        end
+        # Enter (or a click) takes focus off the box; it comes back a frame or
+        # two later. Keys pressed in between land nowhere, as they would for a
+        # real keyboard, so wait for it rather than race it.
+        refocused!() = until!(() -> app.active; timeout = 5)
+        function until!(pred; timeout = 300)
+            t0 = time()
+            while !pred()
+                time() - t0 > timeout && error("GUI test timed out after $(timeout)s")
+                frames!()
+            end
+        end
+        # The thread a running worker is on, sampled while it runs.
+        tids = Int[]
+        sample_worker!() = (t = app.task; t !== nothing && istaskstarted(t) && !istaskdone(t) &&
+                            push!(tids, Threads.threadid(t)); nothing)
+        rgb(px, i) = (px[i], px[i+1], px[i+2])
+        to8(c) = round.(UInt8, 255 .* (c.x, c.y, c.z))
+        try
+            @testset "window and layout" begin
+                frames!(2)                       # frame 1 only settles the font atlas
+                @test G.ImGui_GetFontSize() == 18f0
+                @test app.fbw[] == W && app.fbh[] == H
+                # The prompt box spans the window and sits at its bottom edge.
+                x0, y0, x1, y1 = app.rects[:prompt]
+                st = unsafe_load(Ptr{G.ImGuiStyle}(G.ImGui_GetStyle()))
+                @test x1 - x0 ≈ W - 2 * st.WindowPadding.x atol = 1
+                @test y1 ≈ H - st.WindowPadding.y atol = 1
+                @test app.rects[:stop][4] < y0
+            end
+
+            @testset "typing: UTF-8 in, Ctrl+Enter is a newline, no model refuses Enter" begin
+                type!("héllo ✓ 100%"); frames!(2)
+                @test GM.prompt_text(app) == "héllo ✓ 100%"
+                chord!(G.ImGuiMod_Ctrl, G.ImGuiKey_Enter)
+                type!("x"); frames!()
+                @test GM.prompt_text(app) == "héllo ✓ 100%\nx"
+                chord!(G.ImGuiKey_Enter)         # nothing to send to: the text stays
+                frames!(2)
+                @test GM.prompt_text(app) == "héllo ✓ 100%\nx"
+                @test isempty(app.turns)
+                refocused!()                     # Enter let go of the box; it took it back
+                chord!(G.ImGuiMod_Ctrl, G.ImGuiKey_A)
+                chord!(G.ImGuiKey_Backspace)
+                @test GM.prompt_text(app) == ""
+            end
+
+            @testset "a reply is drawn as markdown" begin
+                t = GM.Turn(:assistant, 10_000, "# Big\n\nsmall **text**\n\n```\ncode\n```\n")
+                push!(app.turns, t)
+                frames!(3)                       # code blocks size themselves a frame late
+                @test length(t.segs) == 3
+                @test all(s -> s.h > 0, t.segs)  # each segment drew and measured itself
+                @test t.segs[1].h > t.segs[2].h  # the heading is set larger than body text
+                md, _, _ = GM.capture!(app)
+                app.markdown = false; frames!(2)
+                raw, _, _ = GM.capture!(app)
+                app.markdown = true
+                @test md != raw
+                empty!(app.turns); frames!()
+            end
+
+            # ── the embedded terminal: a pty, libvterm, drawn by imgui ──
+            function open_terminal!(cmd)
+                app.term === nothing || (GM.close!(app.term); app.term = nothing)
+                app.term_open = false
+                app.term_cmd = cmd
+                GM.toggle_terminal!(app)
+                frames!(2)
+                return app.term
+            end
+            screen(t) = GM.term_text(t; lines = 1000)
+
+            @testset "terminal: a child on a pty, drawn through libvterm" begin
+                t = open_terminal!(`sh -c 'printf "ready \033[1;31mred\033[0m\n"; stty size; exec cat'`)
+                @test app.term_open && t.proc !== nothing
+                until!(() -> occursin("ready red", screen(t)); timeout = 30)
+                # The child measured its terminal: the size the panel gave libvterm and the pty.
+                until!(() -> occursin("$(t.rows) $(t.cols)", screen(t)); timeout = 30)
+                @test t.rows >= 2 && t.cols >= 10
+                @test startswith(screen(t), "ready red\n$(t.rows) $(t.cols)")
+                # SGR 31 came through as red: a run whose red channel dominates.
+                red = filter(r -> strip(r.text) == "red", t.lines[1])
+                @test length(red) == 1 && (red[1].fg & 0xff) > 0xa0 && ((red[1].fg >> 8) & 0xff) < 0x80
+                @test app.term_focused                  # opening it gave it the keyboard
+                # Keys go through libvterm's encoder to the pty: the tty echoes,
+                # then cat prints the line back.
+                type!("abc é"); frames!()
+                chord!(G.ImGuiKey_Enter)
+                until!(() -> occursin("abc é\nabc é", screen(t)); timeout = 30)
+                @test !occursin("abc", GM.prompt_text(app))   # the chat box did not get the keys
+                # Ctrl+C: the pty turns it into SIGINT; cat dies, the pty hangs up.
+                chord!(G.ImGuiMod_Ctrl, G.ImGuiKey_C)
+                until!(() -> t.exited; timeout = 30)
+                @test t.fd == -1
+                click!(:term_restart)
+                until!(() -> occursin("ready red", screen(t)) && !t.exited; timeout = 30)
+                @test !t.exited && t.fd >= 0
+            end
+
+            @testset "terminal: scrollback, the wheel, typing returns to live" begin
+                t = open_terminal!(`sh -c 'seq 1 300; exec cat'`)
+                until!(() -> occursin("300", screen(t)); timeout = 30)
+                @test length(t.scrollback) >= 300 - t.rows
+                @test t.scrollback[1] == "1"            # sb_pushline4 handed over every line
+                x0, y0, x1, y1 = app.rects[:term]
+                G.ImGuiIO_AddMousePosEvent(app.io, (x0 + x1) / 2, (y0 + y1) / 2); frames!()
+                G.ImGuiIO_AddMouseWheelEvent(app.io, 0f0, 2f0); frames!()
+                @test t.view == 6
+                type!("q"); frames!()
+                @test t.view == 0
+                tail = split(GM.term_text(t; lines = 5), '\n')
+                @test length(tail) <= 5
+            end
+
+            @testset "terminal: hiding keeps it running; the splitter moves" begin
+                t = app.term
+                click!(:terminal)                       # Hide terminal
+                @test !app.term_open && app.term === t && t.fd >= 0
+                before = t.bytes_in
+                GM.send_bytes!(t, "still here\r")
+                until!(() -> t.bytes_in > before; timeout = 30)   # read while hidden
+                @test app.rects[:transcript][3] > W - 40          # chat has the full width again
+                click!(:terminal)                       # show it again
+                @test app.term_open
+                frames!(2)
+                s0 = app.split
+                x0, y0, x1, y1 = app.rects[:split]
+                G.ImGuiIO_AddMousePosEvent(app.io, (x0 + x1) / 2, (y0 + y1) / 2); frames!()
+                G.ImGuiIO_AddMouseButtonEvent(app.io, 0, true); frames!()
+                G.ImGuiIO_AddMousePosEvent(app.io, (x0 + x1) / 2 - 90, (y0 + y1) / 2); frames!()
+                G.ImGuiIO_AddMouseButtonEvent(app.io, 0, false); frames!()
+                @test app.split < s0
+                app.split = 0.5f0
+                click!(:terminal)                       # hide for the tests below
+            end
+
+            @testset "Pull: a failed download says so and leaves the window usable" begin
+                withenv("OLLAMA_MODELS" => mktempdir(), "LLAMACHAT_MODELS" => mktempdir()) do
+                    click!(:pull_toggle)
+                    @test app.pull_open
+                    frames!()
+                    click!(:pull_name)
+                    type!("no-such-model-llamachat:none"); frames!()
+                    click!(:pull_go)
+                    @test app.pull !== nothing
+                    until!(() -> app.pull === nothing; timeout = 60)
+                    @test app.turns[end].role === :error
+                    @test startswith(app.turns[end].text, "download failed")
+                    @test app.pull_open                    # the row stays open to try again
+                    if get(ENV, "LLAMACHAT_TEST_PULL", "") == "1"
+                        # Opt-in: a real 44 MiB download, through the UI.
+                        click!(:pull_name); type!("all-minilm"); frames!()
+                        click!(:pull_go)
+                        until!(() -> app.pull === nothing; timeout = 600)
+                        @test app.turns[end].role === :ready
+                        @test any(m -> first(m) == "all-minilm:latest", app.models)
+                    end
+                    app.pull_open && click!(:pull_toggle)   # a successful pull closes it itself
+                    @test !app.pull_open
+                    empty!(app.turns)
+                end
+                app.models = GM.list_chat_models()         # back to the real stores
+                refocused!()                               # closing the row gave the prompt back
+                @test app.active
+            end
+
+            if MODEL === nothing
+                @warn "no generative model — skipping the GUI chat tests"
+            else
+                app.max_tokens = 160            # long enough to be seen arriving
+                @testset "the model loads on a worker; its progress lands in the transcript" begin
+                    GM.load!(app, MODEL; n_ctx = 2048, think = false, temp = 0.0)
+                    @test app.state === :loading
+                    empty!(tids)
+                    until!(() -> (sample_worker!(); app.state !== :loading))
+                    @test app.state === :idle
+                    @test !isempty(tids) && all(!=(Threads.threadid()), tids)
+                    @test app.n_ctx == 2048
+                    # "loading … ok" read as still loading; the window says ready.
+                    @test app.turns[end].role === :ready
+                    @test startswith(app.turns[end].text, "$MODEL is ready")
+                    @test occursin(LC.placement(app.session), app.turns[end].text)   # where it runs
+                    @test !any(t -> occursin("loading", t.text), app.turns)
+                    @test GM.indicator(app)[2] == "ready"
+                    @test app.title == "LlamaChat · $MODEL · ready"
+                    @test startswith(GM.prompt_hint(app), "Message $MODEL")
+                    @test any(m -> GM.same_model(first(m), MODEL), app.models)   # the picker lists it
+                end
+
+                @testset "Enter sends; the box comes back empty and focused" begin
+                    type!("Say hello in five words."); frames!()
+                    empty!(tids)
+                    chord!(G.ImGuiKey_Enter)
+                    @test app.state === :generating
+                    @test app.turns[end-1].role === :user
+                    @test app.turns[end-1].text == "Say hello in five words."
+                    @test GM.prompt_text(app) == ""
+                    refocused!()
+                    @test app.active
+                    # imgui keeps its own copy of an active field. If clearing our
+                    # buffer had not reached it, typing would append to the old text.
+                    type!("z"); frames!(2)
+                    @test GM.prompt_text(app) == "z"
+                    chord!(G.ImGuiKey_Backspace)
+                    @test GM.prompt_text(app) == ""
+                end
+
+                @testset "the reply streams on a worker while this thread renders" begin
+                    lens = Int[]; stamps = Float64[]
+                    until!() do
+                        sample_worker!()
+                        push!(lens, ncodeunits(app.turns[end].text)); push!(stamps, time())
+                        app.state !== :generating
+                    end
+                    t = app.turns[end]
+                    @test !isempty(tids) && all(!=(Threads.threadid()), tids)
+                    @test length(unique(lens)) > 3           # arrived in pieces, drawn as it came
+                    @test app.state === :idle
+                    @test app.last isa LC.Response && app.last.n_gen > 0
+                    @test app.last.stop in (:eog, :max_tokens)
+                    @test startswith(t.stats, "[") && occursin("gen tok", t.stats)
+                    @test occursin("tok/s", GM.status_text(app))
+                    @test app.ctx_used == app.session.n_past > 0
+                    # qwen3 reasons even with think = false; it is folded, not inline.
+                    @test !occursin("<think>", t.answer) && !occursin("</think>", t.answer)
+                    startswith(lstrip(t.text), "<think>") && @test !isempty(t.label)
+                    gaps = diff(stamps) .* 1000
+                    @info "GUI stream" frames = length(stamps) n_gen = app.last.n_gen tok_s = round(app.last.n_gen / app.last.t_gen; digits = 1) gap_ms_median = round(sort(gaps)[cld(length(gaps), 2)]; digits = 1) gap_ms_max = round(maximum(gaps); digits = 1)
+                end
+
+                @testset "Attach sends the terminal with the message" begin
+                    t = open_terminal!(`sh -c 'echo "the answer is 4217"; exec cat'`)
+                    until!(() -> occursin("4217", screen(t)); timeout = 30)
+                    click!(:attach)
+                    @test app.attach[]
+                    @test occursin("terminal attached", GM.prompt_hint(app))
+                    app.max_tokens = 24
+                    refocused!()
+                    type!("What number does my terminal show?"); frames!()
+                    chord!(G.ImGuiKey_Enter)
+                    @test app.state === :generating
+                    u = app.turns[end-1]
+                    @test u.role === :user && u.text == "What number does my terminal show?"
+                    @test occursin("the answer is 4217", u.attached)
+                    @test !app.attach[]                 # one message at a time
+                    until!(() -> app.state === :idle)   # the session is the worker's until then
+                    sent = last(app.session.history[end-1])  # the user message the model got
+                    @test occursin("the answer is 4217", sent) && endswith(sent, u.text)
+                    click!(:terminal)                   # hide it again
+                    @test !app.term_open
+                end
+
+                @testset "a stale Super or Alt does not eat Enter" begin
+                    # A compositor binding can leave Super reported as held; imgui's
+                    # Enter is a no-modifier Shortcut, so the box took characters and
+                    # ignored Enter. Down here, and the release never comes until after.
+                    for mod in ((G.ImGuiKey_LeftSuper, G.ImGuiMod_Super), (G.ImGuiKey_LeftAlt, G.ImGuiMod_Alt))
+                        app.max_tokens = 8
+                        refocused!()
+                        for k in mod; key(k, true); end; frames!()
+                        type!("Say ok."); frames!()
+                        chord!(G.ImGuiKey_Enter)
+                        @test app.state === :generating
+                        @test GM.prompt_text(app) == ""
+                        for k in mod; key(k, false); end; frames!()
+                        until!(() -> app.state === :idle)
+                    end
+                end
+
+                @testset "Enter while a reply streams queues the message; it goes when the reply ends" begin
+                    app.max_tokens = 300
+                    refocused!()
+                    type!("Count from 1 to 100, one number per line."); frames!()
+                    chord!(G.ImGuiKey_Enter)
+                    @test app.state === :generating
+                    refocused!()
+                    type!("Now say done."); frames!()
+                    chord!(G.ImGuiKey_Enter)
+                    @test app.state === :generating        # 300 tokens outlast a few frames
+                    @test app.queued
+                    @test GM.prompt_text(app) == "Now say done."    # kept, still editable
+                    @test occursin("your message sends when this reply ends", GM.status_text(app))
+                    n = length(app.turns)
+                    until!(() -> !app.queued)              # the reply ended; the queue went
+                    @test app.state === :generating
+                    @test app.turns[end-1].role === :user && app.turns[end-1].text == "Now say done."
+                    @test length(app.turns) == n + 2
+                    @test GM.prompt_text(app) == ""
+                    refocused!()
+                    type!("z"); frames!(2)                 # imgui's copy was emptied too
+                    @test GM.prompt_text(app) == "z"
+                    chord!(G.ImGuiKey_Backspace)
+                    until!(() -> app.state === :idle)
+                end
+
+                @testset "Stop ends a reply at a token and keeps the session consistent" begin
+                    app.max_tokens = 1000
+                    refocused!()                 # hiding the terminal handed focus back
+                    type!("Count from 1 to 300, one number per line."); frames!()
+                    chord!(G.ImGuiKey_Enter)
+                    until!(() -> ncodeunits(app.turns[end].text) > 0)
+                    click!(:stop)
+                    until!(() -> app.state === :idle)
+                    s = app.session
+                    @test app.last.stop === :interrupt
+                    @test app.last.n_gen < 1000
+                    @test occursin("interrupt", app.turns[end].stats)
+                    @test !s.cancel[]
+                    formatted = LC._format(s, LC._messages(s), false)
+                    @test formatted[1:length(s.decoded)] == s.decoded
+                    # ...and the next turn runs normally.
+                    app.max_tokens = 32
+                    refocused!()                 # the click on Stop handed focus back
+                    type!("Say ok."); frames!()
+                    chord!(G.ImGuiKey_Enter)
+                    @test app.state === :generating
+                    until!(() -> app.state === :idle)
+                    @test app.last.stop in (:eog, :max_tokens)
+                end
+
+                @testset "the GPU drew it, against the window's own background" begin
+                    # The full-viewport window covers every pixel, so the GL clear
+                    # colour must show nowhere: make it one that cannot hide.
+                    app.clear = G.ImVec4(1f0, 0f0, 1f0, 1f0)
+                    bg = to8(GM.style_color(G.ImGuiCol_WindowBg))
+                    px, w, h = GM.capture!(app)
+                    n = w * h
+                    @test count(i -> rgb(px, i) == (0xff, 0x00, 0xff), 1:4:4n) == 0
+                    onbg = count(i -> rgb(px, i) == bg, 1:4:4n)
+                    @test onbg > n ÷ 4                     # the window's own colour…
+                    full = n - onbg
+                    @test full > 2000                      # …and things drawn on it
+
+                    click!(:new_chat)
+                    @test isempty(app.turns)
+                    @test isempty(app.session.history) && app.ctx_used == 0
+                    px, w, h = GM.capture!(app)
+                    empty_ = n - count(i -> rgb(px, i) == bg, 1:4:4n)
+                    @test full > empty_ + 2000             # the transcript was text
+                    @info "GUI pixels" off_window_bg = (with_transcript = full, empty = empty_)
+                end
+
+                @testset "switching models frees the old one before loading the new" begin
+                    old = app.session
+                    @test GM.switch!(app, MODEL)         # the same name: a reload is still a switch
+                    @test app.state === :loading && app.session === nothing
+                    @test !GM.switch!(app, MODEL)        # one at a time
+                    @test !GM.send!(app, "hi")           # nothing to send to yet
+                    @test GM.indicator(app)[2] == "loading"
+                    @test occursin("Enter sends once it is ready", GM.prompt_hint(app))
+                    until!(() -> app.state !== :loading)
+                    @test app.state === :idle
+                    @test !old.isopen && app.session.isopen
+                    @test any(t -> t.role === :note && startswith(t.text, "Switched from"), app.turns)
+                    @test app.turns[end].role === :ready
+                    @test GM.same_model("qwen3-coder", "qwen3-coder:latest")
+                    @test !GM.same_model("qwen3", "qwen3:4b")
+                end
+
+                @testset "Unload frees the model and keeps the window" begin
+                    s = app.session
+                    frames!()
+                    click!(:unload)
+                    until!(() -> app.state !== :unloading)
+                    @test app.state === :empty && app.session === nothing
+                    @test !s.isopen
+                    @test GM.indicator(app)[2] == "no model loaded"
+                    @test startswith(GM.prompt_hint(app), "Pick a model")
+                    frames!(2)
+                    @test app.title == "LlamaChat"
+                    # With nothing to report the status line is shorter; the
+                    # transcript still starts below it, at the left margin.
+                    @test app.rects[:transcript][2] > app.rects[:model][4]
+                    @test app.rects[:transcript][1] ≈ app.rects[:prompt][1]
+                    @test !GM.send!(app, "hi")
+                end
+            end
+        finally
+            GM.close!(app)
+        end
+
+        @testset "close! frees the model and the window, once" begin
+            @test app.term === nothing                  # the terminal went with it
+            @test app.session === nothing
+            @test app.win == C_NULL
+            GM.close!(app)                     # idempotent
+            @test app.win == C_NULL
+        end
+
+        @testset "gui() opens with no model unless one is named" begin
+            withenv("LLAMACHAT_GUI_MODEL" => nothing) do
+                @test LC.gui_default_model() === nothing
+            end
+            withenv("LLAMACHAT_GUI_MODEL" => "qwen3:4b") do
+                @test LC.gui_default_model() == "qwen3:4b"
+            end
+            withenv("LLAMACHAT_GUI_MODEL" => nothing) do
+                @test LC.gui(; visible = false, vsync = false, max_frames = 3) === nothing
+            end
+        end
+
+        if MODEL !== nothing
+            @testset "LlamaChat.gui end to end" begin
+                # Closing while the model is still loading: the window stays up
+                # until the load lands, then frees it.
+                @test LC.gui(MODEL; visible = false, vsync = false, max_frames = 3, n_ctx = 512) === nothing
+            end
+        end
+
+        @testset "one GLFW in the process" begin
+            # eachline, not read(): a whole-file read of /proc/self/maps came back
+            # without the mapping in a full process.
+            maps = unique(split(l)[end] for l in eachline("/proc/self/maps") if occursin("libglfw", l))
+            @test length(maps) == 1
+            @test !isempty(maps) && realpath(maps[1]) == realpath(joinpath(GUI_DIR, "libglfw.so"))
+        end
+    end
+end
 end
 
 end

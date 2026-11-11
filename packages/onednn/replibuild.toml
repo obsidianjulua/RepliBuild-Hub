@@ -1,0 +1,601 @@
+[project]
+name = "onednn"
+version = "3.11.3"
+root = "."
+
+# oneDNN = Intel's open (Apache-2.0) deep-learning primitives library: matmul,
+# convolution, reduction, eltwise, normalization, RNN. Built here CPU + Intel
+# GPU, with the GPU path on OpenCL — which reaches the Arc A750 through the
+# open NEO compute runtime (intel-compute-runtime), nothing closed anywhere in
+# the chain. That is why this package exists and an onemkl one does not:
+# oneMKL ships as a proprietary prebuilt .so with no source to compile, and
+# source is mandatory for a binding.
+#
+# Admission-gate notes (why this is a source-build candidate and not an ingest):
+#   * There IS a configure step AND a code generator. Both are handled by
+#     harvest.jl, which is where the cmake options live. Read its header before
+#     touching anything here — those options and this file's exclude list are
+#     two halves of one decision, and a config that disagrees with the compiled
+#     source set still compiles, links, and passes a shallow smoke test.
+#   * One flag set works, but only after pinning the GPU ISA. Under upstream's
+#     default DNNL_ENABLE_PRIMITIVE_GPU_ISA=ALL, generator.cpp is compiled SIX
+#     TIMES with six different -DDNNL_GPU_ISA_* values as six one-TU object
+#     libraries. RepliBuild compiles each source exactly once, so ALL is not
+#     untidy here, it is unbuildable. harvest.jl pins XEHPG (Arc A750 =
+#     Alchemist = Xe-HPG) and asserts the duplicate count is zero.
+#   * Upstream's remaining per-file COMPILE_FLAGS do not bite: nearly all are
+#     MSVC or Intel-compiler spellings (/bigobj, /Od, -prec-sqrt) irrelevant to
+#     a clang Linux build; -fno-lto on three gemm/jit files is satisfied
+#     globally by enable_lto = false; and -O1 on gemm/*/*_kern_autogen.cpp is
+#     applied by upstream purely to cut BUILD TIME ("remove optimizations of
+#     files that don't need them"), not for correctness.
+#   * No assembly. The x64 kernels are emitted at RUNTIME by Xbyak
+#     (third_party/xbyak, header-only) — which is also why -msse4.1 is correct
+#     and raising it would be a bug. See [compile].
+#   * The exclude list is not hand-guessed: it is the exact complement of the
+#     779 TUs in cmake's own compile_commands.json for these options.
+[dependencies.onednn]
+type = "git"
+url = "https://github.com/oneapi-src/oneDNN.git"
+tag = "v3.11.3"
+commit = "74d04752d9eaefff6a9ff62466c4d20b155e5bca"
+# Matching is occursin() on the clone-relative path (DependencyResolver.jl:317),
+# so a bare "sycl/" catches every SYCL directory at once. walkdir already drops
+# tests/, examples/ and doc/, so those are not repeated here.
+exclude = [
+    # ── Non-x86 CPU ISAs ──
+    "aarch64/",
+    "ppc64/",
+    "rv64/",
+    "s390x/",
+
+    # ── SYCL runtime ──
+    # Four separate directories (cpu/sycl, gpu/intel/sycl, gpu/generic/sycl,
+    # xpu/sycl). This is an OpenCL GPU build — DNNL_GPU_RUNTIME=OCL in the
+    # harvested config. These need icpx, a different compiler than the one
+    # RepliBuild drives, and the config does not claim them.
+    "sycl/",
+
+    # ── Other GPU vendors ──
+    "amd/",
+    "nvidia/",
+
+    # ── Graph component ──
+    # ONEDNN_BUILD_GRAPH=OFF in the harvest, so config carries
+    # /* #undef ONEDNN_BUILD_GRAPH */ and these 116 TUs must not build. The
+    # graph API is a separate higher-level fusion/IR layer over the primitives;
+    # the primitives are what makes GPU compute reachable from Julia. To add it
+    # later, flip BOTH the cmake option in harvest.jl and this line.
+    "graph/",
+
+    # ── Dev-mode host tool ──
+    # gpu/intel/conv/jit/v2/planner/ has a main() (planner_main.cpp). Upstream
+    # gates it on DNNL_EXPERIMENTAL AND DNNL_DEV_MODE and list(FILTER)s it out
+    # otherwise; linking it in drags a second entry point into the .so.
+    "planner/",
+
+    # ── #include'd, not compiled ──
+    # gemm/jit/generator/pieces/ holds 30 .cxx fragments that generator.cpp
+    # #includes directly, alongside 17 .cpp that ARE real TUs — so the
+    # directory cannot be excluded, only the extension. Verified against
+    # compile_commands.json: every .cxx in the tree is include-only (0 are
+    # compiled), so this drops exactly the 30 and nothing else.
+    #
+    # This is the pcre2_ucptables.c class, and it is worth stating why it is
+    # not merely cosmetic. Six of the 30 fail to compile standalone (the
+    # fragments rely on generator.cpp's using-declarations — 'use of
+    # undeclared identifier is_zero_or_pow2'), which aborts the build. The
+    # other 24 compile FINE and are the dangerous half: they silently
+    # re-emit template instantiations generator.cpp already carries.
+    ".cxx",
+
+    # ── cmake try_compile probe ──
+    # cmake/host_compiler_id.cpp is feature-detection scaffolding, not library
+    # code, and has no business in the .so. SysConfigGen's toml_fragment
+    # proposes "cmake/" for exactly this reason.
+    "cmake/",
+
+    # ── Config-gated single files ──
+    # Full relative paths: a bare filename would substring-match anything else
+    # ending the same way.
+    "src/common/logging.cpp",            # DNNL_EXPERIMENTAL_LOGGING only
+    "src/common/stream_threadpool.cpp",  # DNNL_CPU_RUNTIME=THREADPOOL only
+
+    # ── Vendored third-party ──
+    # gtest and friends. ittnotify's 3 C files would be required if EITHER
+    # DNNL_ENABLE_ITT_TASKS or DNNL_ENABLE_JIT_PROFILING were on
+    # (src/CMakeLists.txt:63 ORs them); the harvest turns both OFF, which is
+    # what lets this be a wholesale exclude rather than a carve-out. Both are
+    # VTune instrumentation, irrelevant to driving compute from Julia.
+    # xbyak/ngen/opencl here are header-only and still reachable — they enter
+    # as include dirs below, not as sources.
+    "third_party/",
+    "scripts/",
+]
+
+# The 92 .cl/.h blob sources plus ocl_kernel_list.cpp, produced by harvest.jl.
+# A local dep because that is the resolver's only mechanism for compiling
+# sources from OUTSIDE the dependency clone: the "local" branch walks the path
+# for .cpp, adds every hit to extra_sources, and pushes the path onto
+# extra_includes.
+#
+# That branch applies NO exclude filtering and treats any .a/.so it finds as a
+# link library, so this directory must hold nothing but generated sources.
+# harvest.jl rm -rf's it each run for exactly that reason. Gitignored (1.4 MB,
+# regenerable); the config/ headers next to it are committed instead, because
+# blobs are mechanical translation of checked-in .cl files while the config
+# encodes build DECISIONS that must be reviewable in a diff.
+[dependencies.oclkernels]
+type = "local"
+path = "ocl"
+
+[compile]
+# Flags are the UNION of cmake's own compile_commands.json across all ~19
+# object libraries, since RepliBuild builds them as one .so. Defines that
+# upstream scopes to a subset are inert on the rest (GEMMSTONE_CONFIG and
+# NGEN_CONFIG gate header content only for TUs that include those headers).
+# Two upstream flags are deliberately dropped: -DENABLE_LLVM_WCONVERSION and
+# -DDNNL_STATUS_NODISCARD are warning-only and would add noise on the ~750 TUs
+# upstream never applies them to.
+#
+# -msse4.1 is LOAD-BEARING and must not be raised. It is upstream's global x64
+# baseline (platform_clang_x64_arch_ccxx_flags), deliberately low because
+# oneDNN selects kernels by RUNTIME ISA dispatch. Copying llamacpp's
+# -march=x86-64-v3 here would let the compiler emit AVX2/AVX-512 into the
+# dispatch path that runs BEFORE the ISA check — a real bug on any machine
+# below that level, and silent on this one.
+#
+# -fvisibility=hidden + -DDNNL_DLL -DDNNL_DLL_EXPORTS: ONE mechanism, and the
+# defines are NOT optional. DNNL_API expands to
+# __attribute__((visibility("default"))) only inside `#ifdef DNNL_DLL` +
+# `#ifdef DNNL_DLL_EXPORTS`; with neither set it is a bare nothing and
+# -fvisibility=hidden then hides the ENTIRE public API, while the .so still
+# links and the wrapper still generates — empty of everything that matters.
+# Measured on the generated header before building: 0 visibility sites without
+# the defines, 174 with them. Checking that a function carries a DNNL_API
+# annotation proves nothing on its own; check the macro is ACTIVE.
+# (Upstream spells this -fvisibility=internal; hidden is the weaker, more
+# ordinary form and what the rest of the Hub uses.)
+#
+# -fstandalone-debug: same reason as llamacpp and box2d. dnnl.hpp's public
+# types are header-only aggregates; clang's default limited debug info emits
+# them as DW_AT_declaration-only stubs, which wrap to EMPTY Julia structs.
+#
+# -DDNNL_GPU_ISA_XEHPG / -DGEMMSTONE_BUILD_12P7: the Arc A750's ISA, pinned in
+# harvest.jl. Gen12.7 IS Xe-HPG — the two spellings are the same architecture
+# in nGEN's and gemmstone's respective vocabularies, not two choices.
+flags = [
+    "-O2", "-fPIC", "-std=c++17",
+    "-msse4.1",
+    "-fstandalone-debug",
+    "-fvisibility=hidden",
+    "-fvisibility-inlines-hidden",
+    "-fopenmp=libomp",
+    "-DDNNL_DLL", "-DDNNL_DLL_EXPORTS",
+    "-DCL_TARGET_OPENCL_VERSION=120",
+    "-DDNNL_ENABLE_CPU_ISA_HINTS",
+    "-DDNNL_ENABLE_MAX_CPU_ISA",
+    "-DDNNL_ENABLE_JIT_PROFILING=0",
+    "-DDNNL_X64=1",
+    "-DDNNL_GPU_ISA_XEHPG",
+    "-DGEMMSTONE_CONFIG",
+    "-DGEMMSTONE_BUILD_12P7",
+    "-DNGEN_CONFIG",
+    "-D__STDC_CONSTANT_MACROS",
+    "-D__STDC_LIMIT_MACROS",
+    "-D_FORTIFY_SOURCE=2",
+    "-DNDEBUG",
+]
+
+# Off for the first build of a 779-TU package: thunk AOT compilation only pays
+# for its build cost if the tier report actually shows Tier 2 functions, and
+# oneDNN's exported surface is the extern "C" API out of dnnl.h (dnnl.hpp is
+# header-only inline wrappers over it), which routes to Tier 3. Revisit against
+# the tier summary, not by assumption.
+aot_thunks = false
+parallel = true
+
+# The resolver auto-adds <clone>, <clone>/include and <clone>/src. The rest are
+# the remaining -I roots from cmake's compile_commands.json, in its order.
+# "config" is this package's harvested headers and must resolve first:
+# include/dnnl_config.h is a shim forwarding to oneapi/dnnl/dnnl_config.h,
+# which exists nowhere in the clone.
+#
+# One -I upstream emits is omitted: src/gpu/intel/gemm/jit/dnnl_gpu_intel_gemm_jit
+# is a cmake object-library directory that holds no headers (verified — only
+# CMakeFiles/ scratch).
+include_dirs = [
+    "config",
+    ".replibuild_cache/deps/onednn/third_party/opencl",
+    ".replibuild_cache/deps/onednn/third_party",
+    ".replibuild_cache/deps/onednn/third_party/ngen",
+    ".replibuild_cache/deps/onednn/src/gpu/intel/jit/config",
+    ".replibuild_cache/deps/onednn/src/gpu/intel/gemm/jit/include",
+    ".replibuild_cache/deps/onednn/src/gpu/intel/gemm/jit/include/gemmstone",
+    ".replibuild_cache/deps/onednn/src/gpu/intel/gemm/jit",
+]
+
+[link]
+# LTO off — Hub doctrine for C++, and upstream needs -fno-lto on three gemm/jit
+# files anyway, which this satisfies globally.
+enable_lto = false
+optimization_level = "2"
+# OpenCL = libOpenCL.so, the ICD loader (ocl-icd). oneDNN links the loader, not
+# a driver; NEO is picked up at runtime via /etc/OpenCL/vendors. omp is clang's
+# libomp, required by -fopenmp=libomp above.
+link_libraries = ["OpenCL", "omp", "m", "pthread", "dl"]
+
+[binary]
+type = "shared"
+
+# Distro LLVM, not a JLL and not whatever LLVM_CONFIG the shell exported.
+[llvm]
+toolchain = "system"
+
+[wrap]
+language = "cpp"
+# Public surface is dnnl.h extern "C". The walk is SCOPED now rather than off.
+#
+# Its default starting set is every header at the top level of every -I this
+# build uses — src/, third_party/, third_party/ngen, third_party/opencl — which
+# is why the first wrap spent 16 minutes in libclang and emitted Level Zero and
+# gpu/intel internals on top of the DWARF the compiled TUs already carry, and
+# dropped 4926 names from export.
+#
+# `use_clang_jl = false` fixed that by discarding the pass entirely, which also
+# discarded the one thing it is for: enums the optimizer removed, which exist in
+# no other source. [wrap] headers keeps the pass and bounds it — include_dirs is
+# still handed to libclang so these headers' own #includes resolve normally, and
+# only the starting set narrows.
+#
+# It does NOT supply the DNNL_* macros. extract_header_types declares a
+# "constants" key for #defines and never populates it, so [wrap.macros] below is
+# what makes DNNL_ARG_* reachable, and that needs a rebuild.
+use_clang_jl = true
+headers = [
+    "oneapi/dnnl/dnnl.h",
+    "oneapi/dnnl/dnnl_ocl.h",
+]
+
+# Emit only the types the wrap surface reaches. use_clang_jl = false stopped the
+# HEADER walk from adding Level Zero and gpu/intel types; this stops the DWARF
+# the compiled TUs already carry from being emitted wholesale. They are separate
+# sources of the same problem, and turning off the first left 2974
+# struct_definitions of which the 302 exported functions reach 79 (2.7%) — the
+# rest being dnnl::impl and nGEN GPU-JIT internals.
+#
+# Not a size optimisation. Those internals are what BREAK the module:
+# `const Integer = Pipe(3)` shadows Base.Integer and invalidates 522 bitfield
+# setters (GENERATOR-integer-shadow.md), and nGEN instruction structs emit
+# duplicate `_` fields. The wrapper parses and then dies at `include`.
+#
+# `Pipe` is instructive about why the filter gates globals on the DYNAMIC symbol
+# table rather than on metadata alone: it is reachable only through the global
+# `pipeMap` (`const Pipe[4]`), and all 332 of this package's recorded globals are
+# absent from the .so's dynsym — internals hidden by -fvisibility=hidden. A walk
+# that seeds from every recorded global keeps Pipe and the bug with it.
+surface_types_only = true
+
+# Four public enums the reachability walk cannot see, because no C function
+# takes or returns them — the API spells those parameters `unsigned` or `int`
+# and the caller is expected to pass the enum's value. They ARE in DWARF; the
+# walk simply has no path to them, which is the documented blind spot this
+# list exists for. Without these the wrapper drops:
+#
+#   dnnl_stream_flags_t         dnnl_stream_create's flags. in_order = 1,
+#                               out_of_order = 2, and 0 is NOT the default
+#   dnnl_normalization_flags_t  use_global_stats / use_scale / use_shift /
+#                               fuse_norm_relu / fuse_norm_add_relu / rms_norm
+#   dnnl_primitive_kind_t       what dnnl_primitive_desc_query reports back
+#   dnnl_attn_mask_type_t       SDPA attention mask kind
+#
+# Patterns match the bare name as well as the `__enum__` key, so these are
+# written the way the header spells them. A pattern that stops matching is a
+# hard error rather than a silent drop — which is the point, since a renamed
+# enum here means the constants vanish from the module.
+surface_types_extra = [
+    "dnnl_stream_flags_t",
+    "dnnl_normalization_flags_t",
+    "dnnl_primitive_kind_t",
+    "dnnl_attn_mask_type_t",
+]
+
+# The shim TU's include. A SUBPATH, not a bare "dnnl_types.h": the shim is
+# generated under the build cache rather than in the source tree, so a bare
+# spelling can fall through -I and pick up a system-installed oneDNN at another
+# version, baking wrong constants in with no other symptom. `extra/onednn` is
+# 3.11.3 on this box and not currently installed, but that is luck, not a
+# guarantee. RepliBuild hard-errors if a shim include resolves outside the
+# project/dependency tree, so this is belt and braces.
+shim_headers = ["oneapi/dnnl/dnnl_types.h"]
+
+[wrap.tier1]
+enable = false
+
+[cache]
+enabled = true
+
+# =============================================================================
+# Preprocessor macros
+# =============================================================================
+# Macros do not survive compilation: absent from the symbol table AND from
+# DWARF. RepliBuild emits a typed C shim per entry, compiles it into the
+# library, and wraps the resulting real symbol — so adding to this table needs
+# a REBUILD, not just a re-wrap.
+#
+# Without these the primitive API is unreachable from Julia. Every
+# dnnl_primitive_execute call is an array of {arg_index, memory}, and the
+# arg_index values exist only as #define. The C API is otherwise complete
+# (217/217 exported symbols bound), so this table is the difference between a
+# wrapper that lists the functions and one that can run them.
+#
+# `ret`/`args` are C type strings pasted verbatim into generated C, NOT Julia
+# types. The presence of `args` is what makes an entry function-like; every
+# value macro below omits it. Verified by compiling a representative shim TU
+# against these headers and printing the results before this table was
+# written: DNNL_ARG_SRC=1, DIFF_WEIGHTS=161, ATTR_SCALES=4096,
+# RUNTIME_DIM_VAL=INT64_MIN, MEMORY_ALLOCATE=0xffffffffffffffff,
+# MULTIPLE_POST_OP(0)=32768, (1)=65536.
+#
+# In Julia the `replibuild_shim_` prefix is stripped — call DNNL_ARG_SRC().
+# ── DNNL_ARG_* argument indices (77) ──
+# The keys dnnl_primitive_execute takes. Without these the primitive API
+# cannot be called at all: every exec_arg is {arg_index, memory}.
+[wrap.macros.DNNL_ARG_UNDEF]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_FROM]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_ITER_C]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SRC_3]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_AUGRU_ATTENTION]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_TO]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DST_ITER_C]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_PEEPHOLE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_3]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WEIGHTS_PROJECTION]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_BIAS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_REDUCE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_MEAN]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_VARIANCE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SCALE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SHIFT]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_WORKSPACE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_SCRATCHPAD]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_ITER_C]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SRC_3]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_AUGRU_ATTENTION]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_DST_ITER_C]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_0]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_LAYER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_1]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_ITER]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_2]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_PEEPHOLE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_3]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_WEIGHTS_PROJECTION]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_BIAS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SCALE]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_DIFF_SHIFT]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_DROPOUT_OFFSET]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_ROUNDING_SEED]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_DROPOUT_MASK]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_DROPOUT_PROBABILITY]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_DROPOUT_SEED]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_PRECOMPUTED_REDUCTIONS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_OUTPUT_SCALES]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_MULTIPLE_SRC]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_MULTIPLE_DST]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_SCALES]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_ZERO_POINTS]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_POST_OP_DW]
+ret = "int"
+
+[wrap.macros.DNNL_ARG_ATTR_MULTIPLE_POST_OP_BASE]
+ret = "int"
+
+# Function-like: (DNNL_ARG_ATTR_MULTIPLE_POST_OP_BASE * ((idx) + 1)).
+# `args` present is the switch that makes this a function-like macro.
+[wrap.macros.DNNL_ARG_ATTR_MULTIPLE_POST_OP]
+ret  = "int"
+args = ["int"]
+
+[wrap.macros.DNNL_MAX_NDIMS]
+ret = "int"
+
+[wrap.macros.DNNL_RUNTIME_DIM_VAL]
+ret = "int64_t"
+
+[wrap.macros.DNNL_RUNTIME_SIZE_VAL]
+ret = "size_t"
+
+[wrap.macros.DNNL_RUNTIME_F32_VAL]
+ret = "float"
+
+[wrap.macros.DNNL_RUNTIME_S32_VAL]
+ret = "int32_t"
+
+[wrap.macros.DNNL_MEMORY_NONE]
+ret = "void*"
+
+[wrap.macros.DNNL_MEMORY_ALLOCATE]
+ret = "void*"
+

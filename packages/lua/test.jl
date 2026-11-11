@@ -34,7 +34,10 @@ end
     build_dir = joinpath(PKG_DIR, "build")
     @test isfile(joinpath(build_dir, "lua_linked.ll"))
     @test isfile(joinpath(build_dir, "lua_opt.ll"))
-    @test isfile(joinpath(build_dir, "replibuild_shims.ll"))
+    # Per-file IR is content-addressed (`replibuild_shims.c-<hash>.ll`).
+    shims = filter(f -> startswith(f, "replibuild_shims") && endswith(f, ".ll") && !endswith(f, ".ll.key"),
+                   readdir(build_dir))
+    @test length(shims) == 1
 
     # Verify the linked IR is non-trivial
     @test filesize(joinpath(build_dir, "lua_linked.ll")) > 1_000_000
@@ -298,7 +301,8 @@ end
 @testset "lua_version" begin
     L = Lua.luaL_newstate()
     ver = Lua.lua_version(L)
-    @test ver == 504.0  # Lua 5.4
+    # Lua 5.5: major*100 + minor. The 5.4 pin was 504.
+    @test ver == 505.0
     Lua.lua_close(L)
 end
 

@@ -134,6 +134,7 @@ unchanged and still supported — it is simply not in your namespace:
 LlamaChat.ChatSession(model; kwargs...)   # a session you own the lifetime of
 LlamaChat.chat(s, prompt; kwargs...)      # one turn → Response
 LlamaChat.reset!(s) / close!(s)
+LlamaChat.cancel!(s)                      # stop a reply from another thread
 LlamaChat.resolve_model(name)             # name → blob path
 LlamaChat.default_model() / ollama_root()
 ```
@@ -142,6 +143,256 @@ That is the scripting path, and `chat.jl`'s one-shot branch is the worked
 example of it. Gone outright, not merely unexported: `md`, `chatrepl`, `start!`,
 `run_demo`, the module-global session behind bare `chat("...")`, and the
 `markdown` kwarg.
+
+## `LlamaChat.gui` — a chat window
+
+The same session in a window instead of a terminal: a scrolling transcript, a
+prompt box below it, and a status line with the model, context use and the
+last reply's tok/s. Window, widgets and model are all RepliBuild wrappers driven
+from Julia — Dear ImGui and GLFW beside the llama.cpp one. There is no C++ host
+program.
+
+```bash
+DISPLAY=:1 julia -t 4 --project=examples/LlamaChat -e 'using LlamaChat; LlamaChat.gui()'
+```
+
+On this machine `~/.local/bin/llamagui [model]` wraps that line (it lives
+outside the repo).
+
+```julia
+julia> using LlamaChat          # julia started with -t 2 or more
+julia> LlamaChat.gui()                                   # nothing loaded: pick a model in the window
+julia> LlamaChat.gui("qwen3:4b"; think = false, font_size = 20)
+```
+
+- The **model picker** (top left) lists the generative models in the ollama
+  store with their sizes, re-read each time it opens. Picking one unloads the
+  current model and then loads the new one, in that order and on the worker,
+  so the planner sizes the new load from the VRAM just given back. A new
+  model starts a new conversation: the turns above stay on screen but are not
+  sent to it. **Unload** frees the model and keeps the window.
+- The **status light** says what the window is doing: green *ready*, amber
+  *loading* / *unloading* and blue *replying* (both pulse), grey *no model
+  loaded*, red *load failed*. After it come the seconds spent on the current
+  step, context use, and the last reply's tok/s. The window title follows it
+  (`LlamaChat · qwen3:4b · ready`), and a finished load says where the model
+  runs: "qwen3:4b is ready · all 36 layers on GPU · 32768 ctx · loaded in
+  2.8 s". A partial offload reads "43/48 layers on GPU", and no GPU reads "CPU
+  only" (`LlamaChat.placement(session)`, from the planner's decision at load).
+- The empty prompt box says what Enter will do right now.
+- **Enter** sends, **Ctrl+Enter** is a newline. You can type while the model
+  loads or a reply streams: Enter then queues the message, the status line
+  says so, and it goes the moment the model is free (Stop frees it at once).
+- With no model given, the window opens with nothing loaded; pick one from
+  the list. `$LLAMACHAT_GUI_MODEL`, if set, is loaded instead.
+- Enter in the prompt sends even with Super or Alt reported as held. imgui
+  treats that as Super+Enter and does nothing, and a compositor keybinding
+  (Hyprland's, over Xwayland) can leave Super reported as held after its
+  release went to the compositor: the box kept taking characters but Enter
+  did nothing.
+- **Stop** ends the reply at the next token and keeps what it said (the
+  `Response` reads `stop = :interrupt`, as Ctrl-C does at the REPL). **New
+  chat** forgets the conversation and keeps the model.
+- Reasoning is folded and dimmed above each answer ("Reasoning (212 words)"),
+  open it to read it. It is there even with `think = false`: that setting
+  shortens reasoning and strips it from `Response.text`, but the stream still
+  carries it.
+- Replies render as markdown as they stream: bold, italic, `code` and links
+  inside wrapped paragraphs, headings, lists, tables, quotes, rules, and code
+  blocks in a mono face with their own **copy** button. Code is coloured like
+  an editor (functions, types, keywords, numbers, strings, comments): Julia
+  through `JuliaSyntaxHighlighting`, which runs Julia's own parser; C/C++,
+  Python, bash, Rust, JS/TS, Go, Java-likes, Lua, SQL and data formats
+  (TOML/YAML/JSON/INI) through a small tokenizer; unlabelled or `text` blocks
+  stay plain. A block is coloured once, when it is parsed, not per frame. It is the parser the
+  terminal uses (`Markdown.parse`), so it has the same blind spots: italic
+  nested in bold that closes on `***` stays literal. Emoji are dropped:
+  this imgui build's `ImWchar` is 16-bit, so code points above U+FFFF have no
+  glyph to draw. Copy keeps them. `markdown = false` shows replies raw.
+- The transcript follows the stream only while you are at the bottom. Scroll
+  up and it stays put; sending jumps back down.
+- **copy** under a reply puts its raw markdown on the clipboard (imgui text is
+  drawn, not selectable).
+- Closing the window frees the model, like `/exit`. Closing it during a load
+  waits for the load to land first, since a load cannot be interrupted.
+
+### Startup: the sysimage
+
+`sysimage/build.jl` builds `LlamaChat.so`, a PackageCompiler sysimage holding
+LlamaChat, its three GUI wrappers, the GUI itself and the code a first frame
+compiles:
+
+```bash
+DISPLAY=:1 julia -t 4 examples/LlamaChat/sysimage/build.jl
+```
+
+The GUI is the part a plain `create_sysimage([:LlamaChat])` misses: `using
+LlamaChat` never loads it (the first `gui()` includes it), so that image only
+removed the `using` time and left the slow part, including 1.7 MB of imgui
+wrapper and compiling the first frames. `sysimage/workload.jl` therefore runs
+as PackageCompiler's `script`, *inside* the image-writing process: it defines
+`LlamaChat.GUI` and draws frames in a hidden window (markdown, coloured code,
+the terminal, the Pull row), so all of that is in the image. It must not load
+a model; an initialised-backend flag would be baked in with no backend behind
+it.
+
+An image is a snapshot: Julia runs the LlamaChat inside it and ignores `src/`.
+`llamagui` uses `LlamaChat.so` only when it is at least as new as `src/` and
+`Project.toml`, and otherwise starts without it and says so. Rebuild after
+changing LlamaChat.
+
+### Downloading models
+
+**Pull...** opens a row: type a name from [ollama.com/library](https://ollama.com/library)
+(`qwen3:0.6b`, `gemma3`, `someone/model:tag`) and press Enter or **Download**.
+A progress bar shows size, speed and time left; **Cancel** stops it, and
+pulling the same name again resumes where it stopped. When it lands, the
+model is in the picker. You keep chatting while it downloads.
+
+No ollama involved: this is `LlamaChat.pull`, which works from the REPL too.
+
+```julia
+LlamaChat.pull("qwen3:0.6b")      # prints a progress line; returns the weights' path
+```
+
+- **Where it goes.** LlamaChat keeps its own store,
+  `~/.local/share/llamachat/models` (`$LLAMACHAT_MODELS` to move it), yours and
+  writable without root, in ollama's layout. `pull` writes there and nowhere
+  else. ollama's stores (`$OLLAMA_MODELS`, `/var/lib/ollama`,
+  `~/.ollama/models`) are read as well, but never written. A part that an
+  ollama store already has is copied across rather than downloaded, so the own
+  store never depends on ollama's.
+- **Moving off ollama.** `LlamaChat.import_ollama()` copies every model from
+  ollama's stores into the own store (59 GB, five models, in 49 s here), and is
+  safe to rerun. It trusts each file's sha256 name over the manifest's
+  recorded size, because ollama had a stale size for qwen3-coder's config (539
+  recorded, 542 on disk, digest intact). It never touches the originals;
+  `/var/lib/ollama` belongs to the `ollama` user, so removing it is a `sudo`
+  step for you.
+- **How it is fast.** One connection to the registry's storage (Cloudflare R2)
+  runs well below a home line; several saturate it (measured: 4.4–7.6 MiB/s
+  on one, 11.2 MiB/s on four, on a ~95 Mbit/s line). So a large part is cut
+  into 32 MiB byte ranges and six tasks (`Threads.@spawn`) fetch them through
+  Julia's `Downloads`, each streaming straight to its offset in a
+  preallocated file. qwen3:0.6b (498 MiB) took 62 s at the REPL.
+- **Safety.** Finished ranges are logged beside the partial file, which is what
+  resume reads. Every part is checked against its sha256 before it is renamed
+  into place, and the manifest is written last, so a model either exists
+  whole or not at all.
+- **Two things learned on the way:** `Downloads` notifies a request's
+  `interrupt` event itself when the request ends, so each request gets its own
+  event (a shared one let the manifest request cancel every range). And
+  `Downloads` waits on Julia's event loop, which only turns when the main task
+  yields, so the render loop yields once a frame. That is safe because Julia
+  runs the main task on an interactive thread, where a yield can never pick
+  up a reply's `@spawn`ed task.
+
+### The terminal
+
+**Terminal** opens a real terminal beside the chat, running
+`julia --banner=no` (this Julia's own executable, with your usual startup.jl)
+in the directory `gui()` was started from. It starts without a shell, so
+shell aliases do not apply; pass `terminal` for other flags. Drag the bar between them to share the width. **Hide terminal**
+hides it and leaves the process running; **Restart** starts it again after it
+exits.
+
+- Tick **Attach** and your next message carries the terminal's last 120 lines.
+  The model reads your REPL directly: the error, the stacktrace, what you
+  typed. That replaces `ask`'s second window and kitty remote control. It is
+  one message at a time: the box unticks after sending, and the transcript
+  folds the attached lines under your message.
+- Colours, bold, underline, the alternate screen (`less`, `htop`), resize
+  (the child gets SIGWINCH), bracketed paste with Ctrl+Shift+V, and
+  scrollback through the mouse wheel or Shift+PgUp/PgDn. Typing jumps back to
+  the live screen.
+- Not yet: F1–F12, text selection with the mouse, and emoji (the same 16-bit
+  `ImWchar` limit as the chat).
+- ``terminal = `bash` `` runs something else; `terminal_dir` sets where.
+
+How it works: a pty from libc (`posix_openpt`), the child started as
+`setsid --ctty --wait <cmd>` so the pty is its controlling terminal (job
+control and Ctrl-C work, and this process never `fork`s). The bytes go
+through **libvterm**, a VT220/xterm state machine wrapped by RepliBuild from
+`packages/libvterm`, and imgui draws its grid. Everything runs on the render
+thread: the pty is non-blocking and read once a frame, because a worker
+blocked in `read()` would hold off every garbage collection in the process
+until the child printed something.
+
+Keywords: `terminal` (a `Cmd`, default `julia`), `terminal_dir`, `width`, `height`, `font` (a .ttf; default is fontconfig's sans,
+override with `$LLAMACHAT_FONT`; bold, italic and mono come from fontconfig's
+`sans:bold`, `sans:italic` and `monospace`), `font_size` (18), `max_tokens` per
+reply (4096), `markdown` (true), `visible`, `vsync`. Everything else goes to `ChatSession` (`system`,
+`n_ctx`, `think`, `temp`, …). `gui` is not exported; it is `LlamaChat.gui`.
+
+### Requirements
+
+- **Threads.** Start Julia with `-t 2` or more. The window, its GL context and
+  every GLFW and imgui call stay on the calling thread. The model loads, and each
+  reply generates, in a `Threads.@spawn` task that streams into a buffer the
+  render loop reads once per frame. The window is created before the model
+  loads, so the VRAM planner's free-memory reading already includes the GL
+  context.
+- **X11.** The GLFW build is X11-only, so `gui()` asks for the X11 platform
+  itself and needs `$DISPLAY`. Under Hyprland (or any Wayland compositor) that
+  is Xwayland: `DISPLAY=:1` on this machine. Without `$DISPLAY` it fails with a
+  message listing the X servers it can find. In a `systemd-run --user` unit,
+  pass `-E DISPLAY=:1 -E PATH="$PATH"` and `-t N` explicitly.
+- **The wrappers**, in `lib/gui/` (below).
+
+### `lib/gui/` and re-vendoring
+
+`gui.jl` is not part of the package load. The first `LlamaChat.gui()` includes
+it (≈5 s for the three wrappers), so a terminal session never maps libimgui,
+libglfw, libvterm or libGL. It loads seven files from `lib/gui/`:
+
+```
+lib/gui/
+├── Imgui.jl     libimgui.so  libimgui_thunks.so  # packages/imgui/julia
+├── Glfw.jl      libglfw.so                       # packages/glfw/julia
+└── Libvterm.jl  liblibvterm.so                   # packages/libvterm/julia
+```
+
+They live in a subdirectory because `lib/` already holds llama.cpp's
+`compilation_metadata.json` and `thunk_manifest.json`. After rebuilding either
+package, copy them again with one command, then restart Julia (an open session
+keeps the copy it loaded):
+
+```bash
+examples/LlamaChat/vendor_gui.sh
+```
+
+The script refuses if a file is missing, prints each wrapper's
+`BUILD_GENERATOR`, and fails if `libimgui.so` would bind any `libglfw.so` but
+the one beside it. That check matters more than it looks. GLFW keeps
+process-global state, so two copies in one process are two GLFWs, and
+`glfwInit` on one does not initialise the other. Both wrappers resolve their
+library next to their own `.jl`, and `libimgui.so`'s RUNPATH starts with
+`$ORIGIN`, so the vendored pair binds one copy. The test suite checks
+`/proc/self/maps` for exactly one. `HUB=/other/checkout vendor_gui.sh` copies
+from another Hub checkout.
+
+### Measured
+
+qwen3:4b on the Arc B60, in a hidden 900×640 window. A 160-token reply streams
+at 77–92 tok/s across runs (the terminal path does the same) while frames hold
+at 17.1 ms median and 20 ms worst. Frames do not wait on tokens.
+
+The one way found to stall the UI is a long prompt meeting a garbage
+collection. Julia's GC stops every thread at a safepoint, and a thread inside
+`llama_decode` reaches none until the call returns. Prefill runs in `n_batch`
+chunks, so a GC that lands during a long paste holds the window for the rest
+of a chunk. Measured on a 3,379-token paste:
+
+| `n_batch`     | prefill | worst frame, no GC | worst frame, GC forced mid-prefill |
+|---------------|---------|--------------------|------------------------------------|
+| 512 (default) | 3.42 s  | 26.7 ms            | 257.7 ms                           |
+| 128           | 5.10 s  | 17.6 ms            | 43.8 ms                            |
+
+Left alone, no GC landed: the render loop allocates little per frame (it takes
+a new snapshot of the reply only when bytes arrived), so collections are rare.
+The default stays at 512, because 128 costs half again on every long prefill. If
+long pastes do stutter for you, trade that time back with
+`LlamaChat.gui(; n_batch = 128)`.
 
 ## Models
 
@@ -181,7 +432,8 @@ did nothing for anyone whose first `using LlamaChat` came before they set it.)
 ## Running on the GPU
 
 The vendored wrapper carries ggml's **Vulkan** backend, so `lib/libllamacpp.so`
-can offload to the Arc A750 through Mesa's ANV driver. Nothing about that
+can offload to the Arc Pro B60 (Battlemage, 24 GB, on the `xe` kernel driver)
+through Mesa's ANV driver. Nothing about that
 crosses the RepliBuild boundary — the kernels are ggml's, already compiled into
 the `.so` as SPIR-V, and the thunks stay host-side. One parameter turns it on:
 
@@ -206,14 +458,25 @@ about — a warning followed one second later by process death is not a warning.
 | Variable | Default | Meaning |
 |---|---|---|
 | `LLAMACHAT_NGL` | `auto` | `auto`, or an integer to force |
-| `LLAMACHAT_VRAM_GB` | `5` | VRAM the planner may spend |
+| `LLAMACHAT_VRAM_GB` | live | VRAM the planner may spend |
 | `LLAMACHAT_RAM_GB` | `35` | CPU-side ceiling |
 
-The 5 GiB default sits below the card's 7.94 GiB on purpose: the Vulkan heap
-reports ~7.14 GiB of budget, the compositor holds some, and overshooting aborts
-rather than swaps. Raise it if you want longer context on the GPU —
-`LLAMACHAT_VRAM_GB=6.5` is enough to put qwen3:4b at `n_ctx=16384` entirely on
-the card.
+The default is what Vulkan reports free on the card **now**, less 0.5 GiB: about
+20.5 GiB on an idle desktop. Where 24 GB goes: 96 MiB is Battlemage's
+compression metadata (`FLAT_CCS`, 1/256 of VRAM), leaving 23.91 GiB; the desktop
+holds ~0.6 GiB (Steam's web helper, this app's renderer); and Mesa's
+`VK_EXT_memory_budget` reports 90% of what is left, ~21.0 GiB, keeping the rest
+as headroom. Reading it live means a game or a second loaded model shrinks the
+budget instead of turning the plan into an over-commit, which is an abort, not a
+swap. Before the backend is up the B60's 20.5 stands in.
+
+**`n_ctx` defaults to `:auto`** as well: 32768, or the largest window (rounded
+down to 1024) that keeps the whole model on the GPU, whichever is smaller. That
+is what puts `load("qwen3-coder")` on the card with no flags — it opens at
+29696 instead of going partial at 32k. (On the A750 it did the same for
+qwen3:4b, at about 26k.) A model that would only fit below 8192
+keeps 32768 and the partial/CPU plan. Pass `n_ctx` to choose it yourself; an
+explicit value is never resized.
 
 ### Context is the expensive half
 
@@ -222,6 +485,7 @@ weights and 144 KiB/token of KV cache.** At the default `n_ctx = 32768` that is
 **4.5 GiB of cache — nearly twice the model.**
 
 ```
+at the old 5 GiB budget:
 ctx=2048…8192   →  ngl=99   whole model on GPU
 ctx=16384       →  ngl=35   partial (35 of 36 layers)
 ctx=32768       →  ngl=0    CPU — "n_ctx ≤ 15832 would fit it on the GPU"
@@ -231,29 +495,46 @@ So `n_ctx` is the dial that decides GPU vs CPU for a model this size, not the
 quantization. The KV figure comes from `block_count`, `head_count_kv` and
 `attention.key_length`/`value_length` in the GGUF header — read explicitly,
 because deriving head_dim as `embedding_length ÷ head_count` gives 80 where
-qwen3's truth is 128, a 1.6× under-count of every KV byte.
+qwen3's truth is 128, a 1.6× under-count of every KV byte. A hybrid model (qwen3.6,
+qwen3.8: Gated DeltaNet with full attention every fourth layer) keeps KV only on
+its full-attention layers, which the header says per layer (`head_count_kv` is
+an array, 0 on a linear layer) or through `full_attention_interval`; counting
+every layer put qwen3.6's cache at 32× its size. Its linear layers carry a fixed
+recurrent state instead (63 MiB for qwen3.6), which the plan adds once.
 
 Falling back to CPU always prints a line. A silent fallback is
 indistinguishable from a broken GPU build — the Vulkan backend still
 initializes, the card still gets opened, two DRI fds still appear, and the
 weights go to RAM anyway.
 
-What actually fits, measured on this box (7.14 GiB free of 7.94):
+What fits on the B60 (20.5 GiB budget), from the GGUF headers:
 
-| Model | Blob | Full offload |
+| Model | Weights | KV/token | Placement |
+|---|---|---|---|
+| qwen3-coder 30B-A3B (MoE, 128 experts) | 17.28 GiB | 96 KiB | whole, at n_ctx 29696 (49/49 layers) |
+| qwen3.8:27b (dense, hybrid attention) | 15.66 GiB | 64 KiB | whole, at 32768 |
+| qwen3:4b | 2.33 GiB | 144 KiB | whole, at 32768 |
+| qwen3.6:35b 35B-A3B (MoE, 256 experts) | 22.29 GiB | 20 KiB | partial, 31/40: the weights alone pass the budget |
+
+qwen3.6 would need expert offload (experts in RAM, attention on the card), which
+is not built. For qwen3-coder the plan said 20.5 GiB and llama.cpp allocated
+20.16 (17.11 weights, 2.72 KV, 0.29 compute).
+
+Measured through `chat()`, a 1,787-token prompt then up to 256 tokens, `temp = 0`
+(Ryzen 9 5900XT, Mesa 26.2.6, 2026-11-08):
+
+| | Prefill | Generation |
 |---|---|---|
-| qwen3:4b | 2.5 GB | yes — 37/37 layers, 2375.91 MiB on `Vulkan0`, 1.96 GiB VRAM delta |
-| qwen2.5-coder:1.5b-base | 940 MiB | yes, comfortably |
-| qwen3-coder 30B-A3B | 18 GB | **no** — leave `n_gpu_layers = 0` |
+| qwen3-coder, B60 | **815 tok/s** | **50.2 tok/s** |
+| qwen3-coder, CPU (`n_gpu_layers = 0`) | 114 tok/s | 9.6 tok/s |
+| qwen3:4b, B60 (`n_ctx = 8192`) | 1500 tok/s | 69.1 tok/s |
+| qwen3:4b, A750 (2026-09) | — | 55.3 tok/s |
 
-Measured through `chat()` on qwen3:4b, same prompt, `temp = 0`:
-
-| | Generation | VRAM |
-|---|---|---|
-| GPU (`n_ctx=8192`, auto) | **55.3 tok/s** | 2.95 GiB |
-| CPU (`n_gpu_layers = 0`) | 10.0 tok/s | 0 |
-
-**5.5×.** Note that qwen3 is a *reasoning* model — it opens with a `<think>`
+**5.2× on generation, 7× on prefill, for the 30B MoE.** The B60 numbers need the
+Hub package's `GGML_VULKAN_*_GLSLC_SUPPORT` defines (2026-11-08): without them
+ggml reports `matrix cores: none | int dot: 0` and the same runs were 202/33.1
+and 474/57.4 tok/s. ggml enables Intel's cooperative-matrix path only on Xe2,
+so the A750 never used it. Note that qwen3 is a *reasoning* model — it opens with a `<think>`
 block, so a low `max_tokens` returns an empty-looking answer because generation
 never escaped the thinking. Budget a few hundred tokens before concluding
 anything is broken.
@@ -315,11 +596,18 @@ LlamaChat/
 │   ├── Llamacpp.jl
 │   ├── libllamacpp.so
 │   ├── compilation_metadata.json
-│   └── thunk_manifest.json
+│   ├── thunk_manifest.json
+│   └── gui/             # Imgui.jl, Glfw.jl, Libvterm.jl and their .so — vendor_gui.sh copies them
 ├── src/
 │   ├── LlamaChat.jl     # the ergonomic layer — sessions, templating, KV bookkeeping
-│   └── window.jl        # ask(): sidecar window, ptys, scrollback capture
+│   ├── window.jl        # ask(): sidecar window, ptys, scrollback capture
+│   ├── gui.jl           # gui(): imgui window, loaded on first call
+│   ├── pull.jl          # pull(): ollama-registry downloads, parallel ranges, resume
+│   ├── gui_md.jl        # gui(): markdown parsed once per block, laid out per frame
+│   ├── gui_highlight.jl # gui(): syntax colours for code blocks
+│   └── gui_term.jl      # gui(): the embedded terminal — pty, libvterm, imgui grid
 ├── chat.jl              # thin launcher for shell use
+├── vendor_gui.sh        # copy the imgui + GLFW wrappers into lib/gui/
 └── test/runtests.jl
 ```
 
@@ -513,3 +801,12 @@ julia> Pkg.test()
 Tests pick the smallest generative model in the local ollama store (embedding
 models are skipped) and warn-and-skip the live half entirely if none is present.
 Override with `$LLAMACHAT_TEST_MODEL`.
+
+The GUI tests open a hidden window, type into it through `ImGuiIO`, stream a
+short reply on a worker while rendering, click Stop, and check the pixels
+against the window's own background. They skip cleanly without `lib/gui/`,
+without `$DISPLAY`, or with fewer than two threads, so run the suite as:
+
+```bash
+DISPLAY=:1 julia -t 4 --project=examples/LlamaChat examples/LlamaChat/test/runtests.jl
+```

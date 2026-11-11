@@ -46,6 +46,12 @@ enable = true
 # lua_pushfstring(lua_State *L, const char *fmt, ...)
 # Each entry lists ONLY the variadic arg types (fixed args come from DWARF)
 [wrap.varargs]
+# Re-checked by hand against the headers at this commit (v5.5.1):
+#   const char *lua_pushfstring(lua_State *L, const char *fmt, ...)   lua.h:252
+#   int lua_gc(lua_State *L, int what, ...)                           lua.h:360
+#   int luaL_error(lua_State *L, const char *fmt, ...)                lauxlib.h:76
+proven_at = "7579fc9d7ed90240487251dfb69168f8e64e9294"
+
 lua_pushfstring = [
     ["Cstring"],
     ["Cint"],

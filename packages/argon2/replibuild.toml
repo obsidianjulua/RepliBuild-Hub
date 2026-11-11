@@ -1,0 +1,104 @@
+[project]
+name = "argon2"
+version = "20190702"
+root = "."
+
+# argon2 = src/{argon2,core,thread,encoding}.c + src/blake2/blake2b.c
+# plus EXACTLY one of src/ref.c XOR src/opt.c. We take the portable
+# reference path (ref.c). No configure, no generated headers.
+#
+# Admission-gate notes:
+#   * Unique Hub category (password hashing).
+#   * opt.c needs -march=native (per-file flags → violates the one-flag-set
+#     gate). ref.c is the C fallback, same class as blake3's portable path.
+#   * CLI / bench / KAT-generator / in-tree test each have a main().
+#   * Public header lives at include/argon2.h.
+#   * -pthread is load-bearing (src/thread.c); ARGON2_NO_THREADS would
+#     compile but drop the parallel API the tests exercise.
+[dependencies.argon2]
+type = "git"
+url = "https://github.com/P-H-C/phc-winner-argon2.git"
+tag = "20190702"
+commit = "62358ba2123abd17fccf2a108a301d4b52c01a7c"
+exclude = [
+    "src/opt.c",     # SIMD; we take src/ref.c instead
+    "src/run.c",     # CLI main
+    "src/bench.c",   # benchmark main
+    "src/test.c",    # in-tree test main
+    "src/genkat.c",  # KAT generator main
+    "vs2015/",
+    "kats/",
+    "latex/",
+]
+
+[compile]
+# -fstandalone-debug: argon2_context is a header-only aggregate the
+# caller fills (pwd/salt/out pointers, costs, version). Empty here
+# would make argon2_ctx unusable from Julia.
+# -DA2_VISCTL=1 / -fvisibility=hidden: parity with upstream's shared
+# recipe (ARGON2_PUBLIC = default visibility).
+# -std=c89: upstream Makefile. The sources are C89.
+flags = [
+    "-O2", "-fPIC",
+    "-std=c89",
+    "-fstandalone-debug",
+    "-pthread",
+    "-fvisibility=hidden",
+    "-DA2_VISCTL=1",
+]
+parallel = true
+
+# Resolver auto-adds <clone>/include and <clone>/src. blake2 headers
+# are included as "blake2/blake2b.h" from -Isrc; src/ is already added.
+# include/ is already added. Listed so a filter-regression is loud.
+include_dirs = [
+    ".replibuild_cache/deps/argon2/include",
+    ".replibuild_cache/deps/argon2/src",
+]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# In-clone subpath so the shim cannot fall through to a system argon2.h.
+shim_headers = ["include/argon2.h"]
+
+[wrap.tier1]
+enable = false
+
+# ── Parameter bounds (compiler-erased; UINT32_C macros) ──
+
+[wrap.macros.ARGON2_MIN_LANES]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_MIN_THREADS]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_MIN_OUTLEN]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_MIN_SALT_LENGTH]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_SYNC_POINTS]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_DEFAULT_FLAGS]
+ret = "uint32_t"
+
+[wrap.macros.ARGON2_FLAG_CLEAR_PASSWORD]
+ret = "uint32_t"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

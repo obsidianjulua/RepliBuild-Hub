@@ -52,6 +52,10 @@ process, and the model is handed your terminal's own scrollback, so it sees the
 error and the stacktrace rather than only what you thought to retype. Closing
 that window is the hangup. See `window.jl`.
 
+`LlamaChat.gui()` is the same session in a window (Dear ImGui + GLFW, also
+RepliBuild wrappers). It is loaded on first call, not with the package — see
+`gui.jl`.
+
 Everything else (`ChatSession`, `chat`, `reset!`, `close!`, `resolve_model`,
 `default_model`) still exists and is still supported; it is simply not exported,
 because a chat app has no business putting a dozen names in your namespace.
@@ -161,31 +165,53 @@ Where the ollama blob store lives (`\$OLLAMA_MODELS`, default `/var/lib/ollama`)
 ollama_root() = get(ENV, "OLLAMA_MODELS", "/var/lib/ollama")
 
 """
+    models_dir() -> String
+
+LlamaChat's own model store: `\$LLAMACHAT_MODELS`, else
+`\$XDG_DATA_HOME/llamachat/models` (`~/.local/share/llamachat/models`). Yours,
+writable without root, in ollama's layout (manifests/ + blobs/). Everything
+`pull` and `import_ollama` write goes here and nowhere else.
+"""
+models_dir() = get(ENV, "LLAMACHAT_MODELS",
+                   joinpath(get(ENV, "XDG_DATA_HOME", joinpath(homedir(), ".local", "share")),
+                            "llamachat", "models"))
+
+"""
+    ollama_stores() -> Vector{String}
+
+ollama's stores, which LlamaChat only reads: `\$OLLAMA_MODELS` when set, else
+the system service's `/var/lib/ollama` (owned by the `ollama` user) and the
+per-user `~/.ollama/models`. `import_ollama` copies them into `models_dir()`.
+"""
+ollama_stores() = haskey(ENV, "OLLAMA_MODELS") ? [ENV["OLLAMA_MODELS"]] :
+    ["/var/lib/ollama", joinpath(homedir(), ".ollama", "models")]
+
+"""Every store LlamaChat reads, own store first: `[models_dir(); ollama_stores()]`."""
+model_roots() = unique([models_dir(); ollama_stores()])
+
+"""Where `pull` writes: always `models_dir()`, never an ollama store."""
+pull_root() = models_dir()
+
+"""
     default_model() -> String
 
 The model bare `load()` opens (`\$LLAMACPP_CHAT_MODEL`, default `qwen3-coder`).
 
-qwen3-coder is 30B-A3B: MoE, so only ~3B params are active per token. On CPU
-that makes an 18 GB model faster than a dense 8 GB one, and it has a chat
-template baked into the GGUF.
+qwen3-coder is 30B-A3B: MoE, so only ~3B params are active per token, and it
+has a chat template baked into the GGUF. On the Arc Pro B60 (24 GB) its 17.3 GiB
+of weights go on the card whole, at ~29k of context; on CPU it is still faster
+than a dense 8 GB model.
 """
 default_model() = get(ENV, "LLAMACPP_CHAT_MODEL", "qwen3-coder")
 
+# The first store holding a manifest for `name`, or nothing.
 function _manifest_path(name::AbstractString)
-    spec, tag = if occursin(':', name)
-        parts = split(name, ':'; limit = 2)
-        (String(parts[1]), String(parts[2]))
-    else
-        (String(name), "latest")
+    ns, model, tag = _split_name(name)
+    for root in model_roots()
+        p = joinpath(root, "manifests", REGISTRY, ns, model, tag)
+        isfile(p) && return p
     end
-    ns, model = if occursin('/', spec)
-        parts = split(spec, '/'; limit = 2)
-        (String(parts[1]), String(parts[2]))
-    else
-        ("library", spec)
-    end
-    p = joinpath(ollama_root(), "manifests", REGISTRY, ns, model, tag)
-    return isfile(p) ? p : nothing
+    return nothing
 end
 
 """
@@ -201,12 +227,16 @@ function resolve_model(name::AbstractString)
     if mp === nothing
         avail = try join(sort(first.(list_models())), ", ") catch; "" end
         error("no such model: \"$name\" (not a file, and no ollama manifest under " *
-              "$(ollama_root()))" * (isempty(avail) ? "" : "\n  available: $avail"))
+              "$(join(model_roots(), " or ")))" * (isempty(avail) ? "" : "\n  available: $avail") *
+              "\n  LlamaChat.pull(\"$name\") downloads it from the ollama registry")
     end
     manifest = JSON.parsefile(mp)
     for layer in manifest["layers"]
         layer["mediaType"] == "application/vnd.ollama.image.model" || continue
-        blob = joinpath(ollama_root(), "blobs", replace(layer["digest"], ':' => '-'))
+        # The weights may sit in either store: a pull skips blobs the system
+        # store already has, so its manifest can point across.
+        blob = something(_have_blob(layer["digest"], layer["size"]),
+                         _blob_file(dirname(dirname(dirname(dirname(dirname(mp))))), layer["digest"]))
         isfile(blob) || error("manifest $mp points at a missing blob: $blob")
         return blob
     end
@@ -237,7 +267,7 @@ end
 
 function Base.show(io::IO, ::MIME"text/plain", ms::ModelList)
     if isempty(ms)
-        printstyled(io, "no models under $(ollama_root())\n"; color = :light_black)
+        printstyled(io, "no models under $(join(model_roots(), " or "))\n"; color = :light_black)
         return
     end
     # Mark the one bare `load()` will open. list_models always tags a model,
@@ -259,12 +289,17 @@ end
 
 Every ollama model visible in the local blob store, largest first, as
 (name, bytes). Prints as a table; `→` marks the model bare `load()` opens.
+`roots` limits it to some stores, e.g. `[LlamaChat.models_dir()]` for only
+LlamaChat's own.
 """
-function list_models()
+function list_models(; roots = model_roots())
     out = Tuple{String,Int}[]
-    root = joinpath(ollama_root(), "manifests", REGISTRY)
-    isdir(root) || return ModelList(out)
+    seen = Set{String}()
+    for store in roots
+    root = joinpath(store, "manifests", REGISTRY)
+    isdir(root) || continue
     for (dir, _, files) in walkdir(root), f in files
+        endswith(f, ".tmp") && continue
         rel = relpath(joinpath(dir, f), root)
         parts = splitpath(rel)
         length(parts) >= 2 || continue
@@ -279,7 +314,8 @@ function list_models()
         catch
             0
         end
-        sz > 0 && push!(out, ("$model:$tag", sz))
+        sz > 0 && "$model:$tag" ∉ seen && (push!(seen, "$model:$tag"); push!(out, ("$model:$tag", sz)))
+    end
     end
     sort!(out; by = last, rev = true)
     return ModelList(out)
@@ -761,6 +797,16 @@ mutable struct ChatSession
     verbose::Bool
     think::Bool                            # false ⇒ prefill a closed <think> block
     isopen::Bool
+    # Stop request from another thread (the GUI's Stop button). Checked once per
+    # generated token and leaves through the same exit as Ctrl-C (`:interrupt`),
+    # so the cache/transcript invariant in `_generate!` holds for it too. An
+    # Atomic because it is the one field written while a generation runs on
+    # another thread; see `cancel!`.
+    cancel::Threads.Atomic{Bool}
+    # Where the planner put the model: `gpu_layers` of `n_layer` repeating layers
+    # on the GPU (0 when no GPU device is registered). See `placement`.
+    n_layer::Int
+    gpu_layers::Int
 end
 
 """
@@ -769,7 +815,9 @@ end
 Load a model and open a context. `model` is an ollama name or a path.
 
   `system`       system prompt (default none)
-  `n_ctx`        context window (default 32768; model trains to 262144)
+  `n_ctx`        context window (default `:auto`: 32768, or less if less keeps
+                 the whole model on the GPU, see `auto_ctx`; model trains to
+                 262144). qwen3:4b opens at ~26k, on the card, with no flags
   `n_threads`    default = physical cores (SMT threads / 2)
   `n_gpu_layers` default `:auto` (from `\$LLAMACHAT_NGL`) — `plan_offload`
                  reads the model's GGUF shape and places it inside the VRAM
@@ -778,7 +826,8 @@ Load a model and open a context. `model` is an ollama name or a path.
                  integer to force it; over-budget values are REFUSED, not
                  warned, because llama.cpp over-commit on Vulkan is a
                  `GGML_ASSERT` abort that kills the REPL.
-                 Budgets: `\$LLAMACHAT_VRAM_GB` (default 5),
+                 Budgets: `\$LLAMACHAT_VRAM_GB` (default: what Vulkan
+                 reports free on the GPU now, less 0.5 GiB; ~20.6 on the B60),
                  `\$LLAMACHAT_RAM_GB` (default 35).
                  `GGML_DISABLE_VULKAN=1` unregisters the backend entirely
   `temp`         default 0.7; `temp <= 0` selects greedy sampling
@@ -803,7 +852,7 @@ asynchronously, several seconds after you moved on, is worse than no line.
 function ChatSession(model::AbstractString = default_model();
                      system::AbstractString = "",
                      log::IO = stderr,
-                     n_ctx::Integer = 32768,
+                     n_ctx = :auto,
                      n_batch::Integer = 512,
                      n_threads::Integer = max(1, Sys.CPU_THREADS ÷ 2),
                      n_gpu_layers = _env_ngl(),
@@ -818,6 +867,14 @@ function ChatSession(model::AbstractString = default_model();
     path = resolve_model(model)
     _ensure_backend(verbose)
 
+    # An unchosen context is sized to keep the model on the GPU (`auto_ctx`),
+    # but only when placement is also automatic: a forced `n_gpu_layers`
+    # already says where the model goes, and 32768 is the window to give it.
+    if n_ctx === :auto
+        n_ctx = n_gpu_layers === :auto ? auto_ctx(path) : _CTX_CEILING
+    end
+    n_ctx = Int(n_ctx)
+
     # Placement is decided from the model's GGUF shape and the VRAM budget
     # BEFORE the load, because llama.cpp does not fit-to-available: an
     # over-commit on the Vulkan backend is a GGML_ASSERT abort that takes this
@@ -829,6 +886,9 @@ function ChatSession(model::AbstractString = default_model();
                         requested = n_gpu_layers === :auto ? nothing : Int(n_gpu_layers))
     check_request(plan, path, n_ctx)
     ngl = plan.ngl
+    # With no GPU device registered (GGML_DISABLE_VULKAN=1) the budget falls
+    # back to a fixed figure and the plan can say "fits"; nothing is on a GPU.
+    on_gpu = _live_vram_free() === nothing ? 0 : clamp(ngl, 0, plan.shape.n_layer)
     if verbose
         println(log, describe_plan(plan, path, n_ctx))
     else
@@ -891,7 +951,8 @@ function ChatSession(model::AbstractString = default_model();
 
     s = ChatSession(String(model), path, m, ctx, vocab, chain, tmpl, sys_eff,
                     Pair{String,String}[], UInt8[], 0, Int(n_ctx), Int(n_batch),
-                    verbose, think, true)
+                    verbose, think, true, Threads.Atomic{Bool}(false),
+                    plan.shape.n_layer, on_gpu)
 
     verbose || (println(log, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
                              "n_ctx=$n_ctx, $n_threads threads, " *
@@ -924,6 +985,31 @@ function _invalidate!(s::ChatSession)
     s.n_past = 0
     return s
 end
+
+"""
+    placement(session) -> String
+
+Where the model runs, as the planner placed it at load: `"all 48 layers on
+GPU"`, `"43/48 layers on GPU"`, or `"CPU only"`.
+"""
+function placement(s::ChatSession)
+    s.gpu_layers == 0       && return "CPU only"
+    s.gpu_layers >= s.n_layer && return "all $(s.n_layer) layers on GPU"
+    return "$(s.gpu_layers)/$(s.n_layer) layers on GPU"
+end
+
+"""
+    cancel!(session) -> session
+
+Ask the generation running on `session` to stop, from any thread. It stops
+before the next token, exactly as Ctrl-C would: `chat` returns a `Response`
+with `stop == :interrupt` holding the text generated so far, and the session
+stays consistent for the next turn. A request made while nothing is generating
+applies to the next generation to start; `chat` clears it whenever it returns.
+
+The one call that is safe on a session while another thread is inside `chat`.
+"""
+cancel!(s::ChatSession) = (s.cancel[] = true; s)
 
 """
     reset!(session) -> session
@@ -1105,6 +1191,14 @@ function _generate!(s::ChatSession, max_tokens::Int, stream::Bool, sink::_MDSink
             break
         end
 
+        # A Stop from another thread. Checked before sampling, so nothing has
+        # been sampled or decoded for this step yet: `out` already holds exactly
+        # the decoded tokens, the same state the Ctrl-C exits below leave.
+        if s.cancel[]
+            stop = :interrupt
+            break
+        end
+
         # Ctrl-C stops generation without corrupting the session: every token
         # already decoded is accounted for in `out`, and the caller appends
         # exactly that to s.decoded, so cache and transcript stay in step.
@@ -1244,6 +1338,10 @@ function chat(s::ChatSession, prompt::AbstractString;
         _invalidate!(s)
         pop!(s.history)
         rethrow()
+    finally
+        # A Stop that lands after the last token was sampled has nothing left
+        # to stop; dropping it here keeps it from cutting off the NEXT turn.
+        s.cancel[] = false
     end
     t_gen = (time_ns() - t1) / 1e9
     # Renders the block still open and leaves the cursor at column 0.
@@ -1383,7 +1481,8 @@ failed halfway, since the teardown is in a `finally`. The cost of that is a full
 reload to resume (~35 s for a 30B MoE off warm cache), which is the trade: no
 lingering 18 GB you have to remember to drop.
 
-Keywords are `ChatSession`'s — `system`, `n_ctx` (default 32768), `n_threads`,
+Keywords are `ChatSession`'s — `system`, `n_ctx` (default: fitted to the GPU,
+at most 32768), `n_threads`,
 `temp`, `top_k`/`top_p`/`min_p`, `seed`, `verbose`:
 
 ```julia
@@ -1407,6 +1506,76 @@ end
 # this REPL stays yours. Kept in its own file because it is terminal plumbing
 # (ptys, ioctls, kitty remote control), not part of the ABI story above.
 include("window.jl")
+
+# `pull` — download a model from ollama's public registry, no ollama needed.
+include("pull.jl")
+
+# ── GUI ──────────────────────────────────────────────────────────────────────
+# `gui.jl` is NOT included here. It pulls in two more generated wrappers (imgui,
+# GLFW) and, through them, libGL — ~4 s and three native libraries a terminal
+# session has no use for. The first `gui()` call includes it into this module
+# as `LlamaChat.GUI`; later calls reuse it.
+const _GUI = Ref{Union{Nothing,Module}}(nothing)
+const _GUI_LOCK = ReentrantLock()
+const _GUI_FILES = ("Imgui.jl", "libimgui.so", "libimgui_thunks.so", "Glfw.jl", "libglfw.so",
+                    "Libvterm.jl", "liblibvterm.so")
+
+function _gui_module()
+    lock(_GUI_LOCK) do
+        _GUI[] === nothing || return _GUI[]
+        dir = joinpath(dirname(@__DIR__), "lib", "gui")
+        gone = [f for f in _GUI_FILES if !isfile(joinpath(dir, f))]
+        isempty(gone) || error("LlamaChat.gui needs the Dear ImGui and GLFW wrappers in $dir " *
+                               "(missing: $(join(gone, ", "))). Run " *
+                               "$(joinpath(dirname(@__DIR__), "vendor_gui.sh")) to copy them " *
+                               "from the Hub's packages/imgui and packages/glfw.")
+        _GUI[] = Base.include(@__MODULE__, joinpath(@__DIR__, "gui.jl"))
+    end
+end
+
+"""
+    gui_default_model() -> Union{String,Nothing}
+
+What `gui()` loads with no argument: `\$LLAMACHAT_GUI_MODEL` if set, else
+nothing — the window opens empty and you pick a model in it. Read at call
+time, like every env override here.
+"""
+gui_default_model() = (m = get(ENV, "LLAMACHAT_GUI_MODEL", ""); isempty(m) ? nothing : m)
+
+"""
+    LlamaChat.gui(model = gui_default_model(); kwargs...)
+
+Chat in a window: a scrolling transcript, a prompt box below it. With no
+`model` the window opens with nothing loaded; pick one from its model list.
+Enter sends, Ctrl+Enter is a newline; Enter while a model loads or replies
+queues the message until it is free. **Stop** ends a reply at the next token
+and keeps what it said; **New chat** forgets the conversation and keeps the
+model. Reasoning (`<think>…</think>`) is folded, dimmed, above each answer. The
+status line shows the model, context use and the last reply's tok/s. Closing
+the window frees the model, as `/exit` does in `load`.
+
+Needs Julia started with `-t 2` or more (the model loads and generates on a
+worker thread so the window keeps drawing) and an X display: this GLFW build is
+X11-only, so under Wayland point `\$DISPLAY` at Xwayland. The first call
+loads the GUI wrappers (`vendor_gui.sh` puts them in `lib/gui/`).
+
+Window keywords: `width`, `height`, `font` (a .ttf; default the fontconfig
+sans), `font_size` (18), `max_tokens` per reply (4096), `visible`, `vsync`.
+Every other keyword is `ChatSession`'s — `system`, `n_ctx`, `think`, `temp`, …
+
+```julia
+LlamaChat.gui()                                   # nothing loaded: pick in the window
+LlamaChat.gui("qwen3:4b"; think = false, font_size = 20)
+```
+
+Blocks until the window closes. Not exported, like everything but the REPL's
+three names: reach it as `LlamaChat.gui`.
+"""
+function gui(model::Union{Nothing,AbstractString} = gui_default_model(); kwargs...)
+    m = _gui_module()
+    # `m` was defined after this method was compiled: call it in the newest world.
+    return Base.invokelatest(() -> m.run(model; kwargs...))
+end
 
 function __init__()
     # A @cfunction pointer is this process's, so it cannot be baked into the .ji.

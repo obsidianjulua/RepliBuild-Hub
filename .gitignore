@@ -16,6 +16,21 @@ julia/
 # that script stands in for it.
 packages/llamacpp/vulkan/
 
+# onednn's harvested OpenCL kernel blobs — 92 generated .cpp holding each .cl
+# kernel and gpu/intel header as a C string, plus ocl_kernel_list.cpp mapping
+# kernel name -> blob. 1.4 MB, regenerated from the pinned tag by
+# packages/onednn/harvest.jl. Same class as the shaders above: these come from
+# a BUILD rule (per-file `cmake -P` custom commands), which is precisely what
+# SysConfigGen cannot capture and says so.
+#
+# NOTE packages/onednn/config/ is deliberately NOT ignored: those three headers
+# (dnnl_config.h, dnnl_version.h, dnnl_version_hash.h) are configure-step
+# output and ARE committed, per the 2026-08-17 config-harvest rule and the
+# curl/pcre2 config/ precedent. The blobs are mechanical translation of
+# checked-in .cl files; the config encodes build DECISIONS that must be
+# reviewable in a diff.
+packages/onednn/ocl/
+
 # imgui writes imgui.ini next to the process cwd on exit — window positions,
 # sizes and collapsed state from whoever last ran a demo. Runtime residue of a
 # test run, not configuration.
@@ -46,3 +61,9 @@ examples/*/lib/
 # Generated wrapper metadata, if ever emitted outside build/ or lib/
 compilation_metadata.json
 thunk_manifest.json
+
+# Example lockfiles — machine-local resolution (dev'd paths), same as LlamaChat's.
+examples/*/Manifest.toml
+
+# Claude Code session state and worktrees (nested git checkouts).
+.claude/

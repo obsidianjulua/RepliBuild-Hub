@@ -1,0 +1,47 @@
+[project]
+name = "msdfgen"
+version = "1.13.0"
+root = "."
+
+[dependencies.msdfgen]
+type = "git"
+url = "https://github.com/Chlumsky/msdfgen.git"
+tag = "v1.13"
+commit = "1874bcf7d9624ccc85b4bc9a85d78116f690f35b"
+# Core only (MSDFGEN_CORE_ONLY): ext/ needs freetype, tinyxml2 and libpng.
+exclude = ["ext/", "main.cpp"]
+
+[compile]
+# From cmake_probe (MSDFGEN_CORE_ONLY=ON, standalone/vcpkg/skia OFF): msdfgen-core
+# compiles 24 TUs under one flag set. Upstream's compile_commands spells the
+# export macro -DMSDFGEN_PUBLIC="" — that is SHELL quoting for an empty value,
+# so it is written here as the empty define it means. With MSDFGEN_PUBLIC
+# defined, base.h skips the generated <msdfgen/msdfgen-config.h> entirely.
+# -fstandalone-debug: Range, BitmapSection<T,N> and ErrorCorrectionConfig are
+# header-only with inline ctors, so constructor homing never emits their
+# definitions and they wrap as 0-byte stubs — while generateSDF & co. take
+# Range BY VALUE (a 0-byte stub there segfaults inside Projection::Projection).
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug",
+         "-DMSDFGEN_PUBLIC=", "-DMSDFGEN_USE_CPP11",
+         "-DMSDFGEN_VERSION=1.13.0", "-DMSDFGEN_VERSION_MAJOR=1",
+         "-DMSDFGEN_VERSION_MINOR=13", "-DMSDFGEN_VERSION_REVISION=0",
+         "-DMSDFGEN_COPYRIGHT_YEAR=2026", "-Dmsdfgen_core_EXPORTS", "-DNDEBUG"]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

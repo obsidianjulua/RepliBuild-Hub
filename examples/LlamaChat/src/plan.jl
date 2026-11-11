@@ -48,9 +48,29 @@ function _gguf_skip_value(io, t::UInt32)
     return nothing
 end
 
+# GGUF integer element types, for the per-layer arrays below.
+const _GGUF_INT = Dict{UInt32,DataType}(0 => UInt8, 1 => Int8, 2 => UInt16, 3 => Int16,
+                                        4 => UInt32, 5 => Int32, 10 => UInt64, 11 => Int64)
+
 function _gguf_read_value(io, t::UInt32)
     t == 8 && return _gguf_str(io)
-    t == 9 && (_gguf_skip_value(io, t); return nothing)
+    if t == 9
+        # A short integer array is a per-layer value: a hybrid model's
+        # `head_count_kv` is one ([0,2,…] for qwen3.6, 0 on a linear-attention
+        # layer). Anything else (the vocabulary, token types) is skipped.
+        et = read(io, UInt32); n = read(io, UInt64)
+        if haskey(_GGUF_INT, et) && n <= 4096
+            return Int[read(io, _GGUF_INT[et]) for _ in 1:n]
+        end
+        if et == 8
+            for _ in 1:n; _gguf_str(io); end
+        elseif et == 9
+            error("GGUF: nested arrays unsupported")
+        else
+            skip(io, _GGUF_SZ[et] * n)
+        end
+        return nothing
+    end
     T = t == 0  ? UInt8   : t == 1  ? Int8    :
         t == 2  ? UInt16  : t == 3  ? Int16   :
         t == 4  ? UInt32  : t == 5  ? Int32   :
@@ -63,10 +83,10 @@ end
 """
     gguf_header(path) -> Dict{String,Any}
 
-Scalar + string metadata from a GGUF file's header. Arrays are skipped: the only
-array in a typical header is the tokenizer vocabulary, which is both enormous and
-irrelevant here, and skipping it is the difference between reading kilobytes and
-reading hundreds of megabytes.
+Scalar + string metadata from a GGUF file's header, and short integer arrays
+(per-layer values, `Vector{Int}`). Long arrays are skipped: the tokenizer
+vocabulary is the big one, both enormous and irrelevant here, and skipping it is
+the difference between reading kilobytes and reading hundreds of megabytes.
 """
 function gguf_header(path::AbstractString)
     open(path, "r") do io
@@ -119,17 +139,45 @@ function model_shape(path::AbstractString)
         error("GGUF: no `$arch.block_count` in $path — cannot determine layer count")
     end
     n_head    = g("attention.head_count", 0)
-    n_head_kv = g("attention.head_count_kv", n_head)
     n_embd    = g("embedding_length", 0)
+
+    # KV heads per layer. A hybrid model (qwen35, qwen35moe, qwen3next) keeps a
+    # KV cache only on its full-attention layers; the rest are linear attention
+    # (Gated DeltaNet) with a fixed recurrent state instead. qwen3.6 states it as
+    # an array, `head_count_kv = [0,0,0,2, …]`; qwen3.8 gives a scalar 4 and
+    # `full_attention_interval = 4`, and llama.cpp makes layer `il` recurrent
+    # unless `(il + 1) % 4 == 0`. Counting every layer at the scalar (or at
+    # `head_count`, the fallback when the array was skipped) made qwen3.6's cache
+    # 640 KiB/token where llama.cpp allocates 20: 20 GiB at 32k against 0.63.
+    hkv = get(md, "$arch.attention.head_count_kv", nothing)
+    interval = g("full_attention_interval", 0)
+    kv_heads = if hkv isa AbstractVector
+        length(hkv) == n_layer || error("GGUF: $arch.attention.head_count_kv has $(length(hkv)) entries for $n_layer layers")
+        Int.(hkv)
+    else
+        h = hkv === nothing ? n_head : Int(hkv)
+        [interval > 0 && (il + 1) % interval != 0 ? 0 : h for il in 0:n_layer-1]
+    end
+    n_head_kv = maximum(kv_heads; init = 0)
     # Fall back to the derivation only when the explicit keys are absent.
     k_len = g("attention.key_length",   n_head > 0 ? n_embd ÷ n_head : 0)
     v_len = g("attention.value_length", n_head > 0 ? n_embd ÷ n_head : 0)
 
     n_expert = g("expert_count", 0)
 
+    # A recurrent layer's state, per sequence, in f32: llama.cpp's n_embd_r (the
+    # conv window) plus n_embd_s (the SSM state). Zero for a plain transformer.
+    n_rec = count(==(0), kv_heads)
+    d_conv, d_inner = g("ssm.conv_kernel", 0), g("ssm.inner_size", 0)
+    d_state, n_group = g("ssm.state_size", 0), g("ssm.group_count", 0)
+    rs_per_layer = d_inner > 0 ?
+        (max(d_conv - 1, 0) * (d_inner + 2 * n_group * d_state) + d_state * d_inner) * 4 : 0
+
     return (arch = String(arch), n_layer = n_layer, n_head = n_head,
-            n_head_kv = n_head_kv, n_embd = n_embd, k_len = k_len, v_len = v_len,
+            n_head_kv = n_head_kv, kv_heads = kv_heads,
+            n_kv_layers = n_layer - n_rec, n_embd = n_embd, k_len = k_len, v_len = v_len,
             n_expert = n_expert, is_moe = n_expert > 0,
+            rs_bytes = n_rec * rs_per_layer,
             file_bytes = filesize(path))
 end
 
@@ -137,11 +185,45 @@ end
 
 const _GiB = 1024.0^3
 
-# Deliberately BELOW the card's 7.94 GiB. The Vulkan heap reports ~7.14 GiB of
-# budget, the compositor holds some of it, and overshooting is an abort rather
-# than a swap. 5 GiB leaves that margin without being so tight it refuses models
-# that clearly fit.
-_vram_budget() = parse(Float64, get(ENV, "LLAMACHAT_VRAM_GB", "5")) * _GiB
+# The card is an Arc Pro B60 (BMG-G21, Battlemage) on xe, since 2026-11-08: a
+# 23.91 GiB device-local heap, of which Mesa's VK_EXT_memory_budget reports
+# ~21.08 GiB free with the desktop up (88%; the A750 before it showed the same
+# ratio, 7.14 of 7.94). Overshooting is still an abort rather than a swap.
+#
+# So the budget is that live figure, less a margin, read from ggml's own device
+# query (the Vulkan backend answers it from the same extension). A constant could
+# only be right for an idle desktop: a game or a second loaded model holding VRAM
+# would make it an over-commit. `$LLAMACHAT_VRAM_GB` still overrides, and before
+# the backend is up (or with no GPU device) the B60's figure stands in.
+const _VRAM_MARGIN     = 0.5 * _GiB
+const _B60_BUDGET_GIB  = 20.5
+
+"""
+    _live_vram_free() -> Union{Int, Nothing}
+
+Free VRAM on the GPU, as ggml's Vulkan backend reports it
+(`ggml_backend_dev_memory`: the heap's budget less this process's usage).
+`nothing` before `llama_backend_init` or when no GPU device is registered
+(`GGML_DISABLE_VULKAN=1`).
+"""
+function _live_vram_free()
+    _backend_up[] || return nothing
+    best = nothing
+    for i in 0:Int(L.ggml_backend_dev_count()) - 1
+        d = L.ggml_backend_dev_get(i)
+        L.ggml_backend_dev_type(d) == L.GGML_BACKEND_DEVICE_TYPE_GPU || continue
+        free, total = Ref{Csize_t}(0), Ref{Csize_t}(0)
+        L.ggml_backend_dev_memory(d, free, total)
+        free[] > 0 && (best = max(something(best, 0), Int(free[])))
+    end
+    return best
+end
+
+function _vram_budget()
+    haskey(ENV, "LLAMACHAT_VRAM_GB") && return parse(Float64, ENV["LLAMACHAT_VRAM_GB"]) * _GiB
+    live = _live_vram_free()
+    return live === nothing ? _B60_BUDGET_GIB * _GiB : max(live - _VRAM_MARGIN, 0.0)
+end
 _ram_budget()  = parse(Float64, get(ENV, "LLAMACHAT_RAM_GB",  "35")) * _GiB
 
 # Compute buffers scale with n_batch, not n_ctx: measured 301.75 MiB on Vulkan0
@@ -154,11 +236,14 @@ const _COMPUTE_RESERVE = 0.5 * _GiB
     kv_bytes(shape, n_ctx; bits = 16) -> Int
 
 Bytes of KV cache for `n_ctx` tokens. K and V are stored per KV-head per layer,
-so this is `2 × n_layer × n_head_kv × (k_len + v_len)/2 × n_ctx × bytes`, which
-reduces to the form below. llama.cpp's default cache type is F16.
+so this is `Σ_layers n_head_kv × (k_len + v_len) × n_ctx × bytes`: for a plain
+transformer `n_layer × n_head_kv × …`, and for a hybrid only its full-attention
+layers count (`shape.kv_heads` is 0 on the others). llama.cpp's default cache
+type is F16. A hybrid's recurrent state does not grow with `n_ctx`; it is
+`shape.rs_bytes`, which `plan_offload` adds once.
 """
 kv_bytes(s, n_ctx::Integer; bits::Integer = 16) =
-    Int(s.n_layer) * Int(s.n_head_kv) * (Int(s.k_len) + Int(s.v_len)) *
+    sum(s.kv_heads; init = 0) * (Int(s.k_len) + Int(s.v_len)) *
     Int(n_ctx) * (bits ÷ 8)
 
 """
@@ -178,13 +263,14 @@ function plan_offload(path::AbstractString; n_ctx::Integer, requested = nothing)
     s        = model_shape(path)
     weights  = s.file_bytes
     kv       = kv_bytes(s, n_ctx)
-    full     = weights + kv + _COMPUTE_RESERVE
+    rs       = s.rs_bytes                  # a hybrid's recurrent state, fixed per sequence
+    full     = weights + kv + rs + _COMPUTE_RESERVE
     budget   = _vram_budget()
 
     # Largest n_ctx that would let the whole model sit on the GPU. Reported so a
     # refusal can say "or lower n_ctx to this" instead of only saying no.
     per_tok  = kv_bytes(s, 1)
-    max_ctx  = per_tok > 0 ? max(0, Int((budget - weights - _COMPUTE_RESERVE) ÷ per_tok)) : 0
+    max_ctx  = per_tok > 0 ? max(0, Int((budget - weights - rs - _COMPUTE_RESERVE) ÷ per_tok)) : 0
 
     if requested !== nothing
         return (ngl = Int(requested), why = :requested, vram_needed = full,
@@ -207,7 +293,7 @@ function plan_offload(path::AbstractString; n_ctx::Integer, requested = nothing)
     # full-fit branch above does not care — it measures the whole file — but
     # this one would creep over the budget, and over the budget is an abort.
     # Hence the 0.9: spend nine tenths of the headroom, keep one in reserve.
-    per_layer = (weights + kv) / s.n_layer
+    per_layer = (weights + kv + rs) / s.n_layer
     usable    = 0.9 * (budget - _COMPUTE_RESERVE)
     k = per_layer > 0 ? Int(floor(usable / per_layer)) : 0
     k = clamp(k, 0, s.n_layer)
@@ -219,6 +305,34 @@ function plan_offload(path::AbstractString; n_ctx::Integer, requested = nothing)
 
     return (ngl = 0, why = :too_big, vram_needed = full, kv = kv,
             weights = weights, shape = s, max_ctx_on_gpu = max_ctx)
+end
+
+# The context `ChatSession` opens when the caller does not pass `n_ctx`.
+const _CTX_CEILING = 32768
+const _CTX_FLOOR   = 8192
+
+"""
+    auto_ctx(path) -> Int
+
+The context window to open when the caller did not choose one: 32768, unless
+that pushes the model off the GPU and a smaller window keeps all of it on. Then
+it is the largest such window, rounded down to a multiple of 1024.
+
+This is what puts qwen3-coder on the B60 with no flags. Its 17.28 GiB of weights
+and 96 KiB/token of KV need 20.78 GiB at 32768 against a ~20.5 GiB budget, so
+the plan would go partial, while 29696 keeps the whole model on. GPU generation
+is 5.2× CPU for it (50.2 against 9.6 tok/s), which is worth a tenth of the
+window. (On the A750 it was qwen3:4b, opening at about 26k.)
+
+Below 8192 a window is too short for a chat that carries scrollback, so a model
+that only fits that small keeps 32768 and gets the plan's partial or CPU answer,
+as before. An explicit `n_ctx` never comes through here.
+"""
+function auto_ctx(path::AbstractString)
+    p = plan_offload(path; n_ctx = _CTX_CEILING)
+    p.why === :fits && return _CTX_CEILING
+    fit = (p.max_ctx_on_gpu ÷ 1024) * 1024
+    return fit >= _CTX_FLOOR ? fit : _CTX_CEILING
 end
 
 _gib(x) = round(x / _GiB, digits = 2)
@@ -245,7 +359,7 @@ function check_request(p, path::AbstractString, n_ctx::Integer)
 
       model          $(basename(path))
       weights        $(_gib(p.weights)) GiB
-      KV @ n_ctx=$(n_ctx)  $(_gib(p.kv)) GiB   ($(s.n_layer) layers × $(s.n_head_kv) kv-heads × $(s.k_len + s.v_len) dims, F16)
+      KV @ n_ctx=$(n_ctx)  $(_gib(p.kv)) GiB   ($(s.n_kv_layers) layers × $(s.n_head_kv) kv-heads × $(s.k_len + s.v_len) dims, F16)$(s.rs_bytes > 0 ? "\n      recurrent      $(_gib(s.rs_bytes)) GiB   ($(s.n_layer - s.n_kv_layers) linear-attention layers, f32)" : "")
       compute        $(_gib(_COMPUTE_RESERVE)) GiB
       ─ required     $(_gib(p.vram_needed)) GiB
       ─ budget       $(_gib(budget)) GiB   (\$LLAMACHAT_VRAM_GB)
@@ -257,8 +371,9 @@ function check_request(p, path::AbstractString, n_ctx::Integer)
     Options:
       • n_ctx = $(p.max_ctx_on_gpu) or less would fit the whole model on the GPU
       • n_gpu_layers = 0 runs on CPU ($(_gib(p.weights)) GiB of $(_gib(_ram_budget())) GiB RAM budget)
-      • raise the budget if you know the card has room:
-          LLAMACHAT_VRAM_GB=7 …$(s.is_moe ? "\n      • this is an MoE ($(s.n_expert) experts) — expert-offload to CPU would\n        fit the attention layers on the GPU and keep the experts in RAM" : "")""")
+      • raise the budget if you know the card has room (the default is what
+        Vulkan reports free now, less $(_gib(_VRAM_MARGIN)) GiB):
+          LLAMACHAT_VRAM_GB=<GiB> …$(s.is_moe ? "\n      • this is an MoE ($(s.n_expert) experts) — expert-offload to CPU would\n        fit the attention layers on the GPU and keep the experts in RAM" : "")""")
 end
 
 """
@@ -309,8 +424,9 @@ function describe_plan(p, path::AbstractString, n_ctx::Integer)
           p.why === :partial   ? "partial" :
           p.why === :too_big   ? "too big for VRAM" : "requested"
     moe = s.is_moe ? ", MoE/$(s.n_expert)e" : ""
+    rs = s.rs_bytes > 0 ? string(" + ", _gib(s.rs_bytes), " GiB recurrent") : ""
     string("gpu-plan: n_gpu_layers=", p.ngl, " ($tag) — ",
-           _gib(p.weights), " GiB weights + ", _gib(p.kv), " GiB KV@", n_ctx,
+           _gib(p.weights), " GiB weights + ", _gib(p.kv), " GiB KV@", n_ctx, rs,
            " + ", _gib(_COMPUTE_RESERVE), " GiB compute = ", _gib(p.vram_needed),
            " GiB vs ", _gib(_vram_budget()), " GiB budget [", s.arch, "/",
            s.n_layer, "L", moe, "]")

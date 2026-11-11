@@ -125,7 +125,7 @@ end
 @testset "SQLite Deep Tests" begin
 
 @testset "Library identity and value macros" begin
-    @test S.sqlite3_libversion() == "3.53.3"
+    @test S.sqlite3_libversion() == "3.53.4"
 
     @test S.SQLITE_OK() == 0
     @test S.SQLITE_ERROR() == 1

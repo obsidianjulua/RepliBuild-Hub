@@ -158,8 +158,8 @@ end
 end
 
 @testset "Tier-1 dispatch at scale" begin
-    # Sliced llvmcall is on for this package; at ~560 emitted kernels this is
-    # the largest Tier-1 surface in the Hub.
+    # Sliced llvmcall is on for this package. About a thousand kernels are
+    # emitted; this floor catches a collapse back to a handful.
     @test !isempty(Miniaudio.TIER1_FUNCTIONS)
     @test length(Miniaudio.TIER1_FUNCTIONS) > 400
 
@@ -179,11 +179,11 @@ end
     @test "ma_volume_db_to_linear" in Miniaudio.TIER1_FUNCTIONS
     @test "ma_volume_linear_to_db" in Miniaudio.TIER1_FUNCTIONS
 
-    # Note the converse is NOT true: plenty of libm-declaring functions
-    # (ma_notch2_reinit, ma_waveform_read_pcm_frames) still dispatch via ccall,
-    # demoted by the emission gate rather than the pre-flight. Tier 1 is
-    # opportunistic — ~560 of ~1180 functions — and that mix is the point.
-    @test !("ma_waveform_read_pcm_frames" in Miniaudio.TIER1_FUNCTIONS)
+    # libm callers stay Tier 1 once the .so's DT_NEEDED chain includes libm.
+    # ma_waveform_read_pcm_frames is exercised above: the sine buffer is the
+    # check that the slice actually runs.
+    @test "ma_notch2_reinit" in Miniaudio.TIER1_FUNCTIONS
+    @test "ma_waveform_read_pcm_frames" in Miniaudio.TIER1_FUNCTIONS
 end
 
 end  # testset

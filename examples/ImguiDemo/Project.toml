@@ -1,10 +1,14 @@
 name = "ImguiDemo"
 uuid = "3f6a9c21-5d84-4e7b-9a12-6c3e8b5f1d47"
-authors = ["John <archjulialua@gmail.com>"]
 version = "0.1.0"
+authors = ["John <archjulialua@gmail.com>"]
 
 [deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
+
+[compat]
+Libdl = "1.11.0"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

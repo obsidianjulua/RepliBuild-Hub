@@ -11,7 +11,11 @@ commit = "321ea883b7190d4e85cae5512a12e5eaa8f8731f"
 exclude = ["xmltest.cpp"]
 
 [compile]
-flags = ["-O2", "-fPIC", "-std=c++17"]
+# One translation unit. XMLNode and the document types are header-defined;
+# limited debug info emits them as declaration stubs. -fstandalone-debug
+# is cheap here. The lighter -Xclang -fno-use-ctor-homing is for a library
+# big enough that full type debug would blow Clang's source-location budget.
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
 
 [link]
 enable_lto = false

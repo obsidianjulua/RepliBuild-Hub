@@ -1,0 +1,131 @@
+[project]
+name = "lmdb"
+version = "0.9.36"
+root = "."
+
+# LMDB = libraries/liblmdb/{mdb.c,midl.c}. Two C files, no configure, no
+# generated headers. The rest of the tree is OpenLDAP (the parent repo is a
+# read-only GitHub mirror of OpenLDAP's LMDB branch) plus the CLI tools and
+# mtest* programs that each have a `main`.
+#
+# Admission-gate notes:
+#   * Unique Hub category (KV, not SQL). sqlite is the only other database.
+#   * One flag set: -pthread. No SIMD, no per-file flags.
+#   * Public header lives at libraries/liblmdb/lmdb.h (not include/).
+[dependencies.lmdb]
+type = "git"
+url = "https://github.com/LMDB/lmdb.git"
+tag = "LMDB_0.9.36"
+commit = "028f61b6832032174f893484719ed4848d8d60db"
+exclude = [
+    # CLI tools — each has a main()
+    "mdb_copy.c",
+    "mdb_dump.c",
+    "mdb_load.c",
+    "mdb_stat.c",
+    "mplay.c",
+    # In-tree tests (also have main)
+    "mtest.c",
+    "mtest2.c",
+    "mtest3.c",
+    "mtest4.c",
+    "mtest5.c",
+    "mtest6.c",
+]
+
+[compile]
+# -fstandalone-debug: load-bearing. MDB_val (and MDB_stat / MDB_envinfo) are
+# header-only aggregates the caller fills; clang's default limited debug info
+# emits them as DW_AT_declaration-only stubs, which wrap to EMPTY Julia structs.
+# Put/get would then have nowhere to write mv_size / mv_data.
+# -pthread: mdb.c uses pthread mutexes for the lock table (upstream Makefile).
+flags = [
+    "-O2", "-fPIC",
+    "-fstandalone-debug",
+    "-pthread",
+]
+parallel = true
+
+# The resolver auto-adds <clone>, <clone>/include and <clone>/src only.
+# LMDB headers live at libraries/liblmdb/ (non-standard).
+include_dirs = [
+    ".replibuild_cache/deps/lmdb/libraries/liblmdb",
+]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# In-clone subpath so the shim cannot fall through to a system lmdb.h
+# (/usr/include/lmdb.h is common). Same class as zstd's lib/zstd.h.
+shim_headers = ["libraries/liblmdb/lmdb.h"]
+
+[wrap.tier1]
+enable = false
+
+# ── Version macros (compiler-erased; the shim-header canary) ──
+# mdb_version() is the runtime twin of MDB_VERSION_STRING. Asserting them
+# equal in test_deep.jl is the proof the shim compiled against THIS header.
+
+[wrap.macros.MDB_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.MDB_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.MDB_VERSION_PATCH]
+ret = "int"
+
+[wrap.macros.MDB_VERSION_FULL]
+ret = "int"
+
+[wrap.macros.MDB_VERSION_STRING]
+ret = "const char*"
+
+# ── Result codes ──
+
+[wrap.macros.MDB_SUCCESS]
+ret = "int"
+
+[wrap.macros.MDB_KEYEXIST]
+ret = "int"
+
+[wrap.macros.MDB_NOTFOUND]
+ret = "int"
+
+[wrap.macros.MDB_MAP_FULL]
+ret = "int"
+
+[wrap.macros.MDB_INVALID]
+ret = "int"
+
+# ── Environment / database / write flags ──
+
+[wrap.macros.MDB_NOSUBDIR]
+ret = "unsigned"
+
+[wrap.macros.MDB_RDONLY]
+ret = "unsigned"
+
+[wrap.macros.MDB_NOSYNC]
+ret = "unsigned"
+
+[wrap.macros.MDB_CREATE]
+ret = "unsigned"
+
+[wrap.macros.MDB_NOOVERWRITE]
+ret = "unsigned"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

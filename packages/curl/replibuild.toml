@@ -54,7 +54,56 @@ type = "shared"
 
 [wrap]
 language = "c"
+# In-clone subpath. include/curl/curl.h is the public header; a bare "curl.h"
+# is not how callers spell it, but a system /usr/include/curl/curl.h is
+# common and would silently bake a foreign LIBCURL_VERSION into the shim.
 shim_headers = ["curl/curl.h", "curl/easy.h", "curl/multi.h"]
+
+[wrap.tier1]
+enable = false
+
+# ── Value macros (compiler-erased public constants) ──
+# CURL_GLOBAL_DEFAULT is what curl_global_init wants. The CURL_VERSION_*
+# bits are the harvest canary: they must agree with curl_version_info().
+# A shim compiled against a foreign curl.h, or a curl_config.h that turned
+# TLS/zlib back off, is the only way these disagree.
+
+[wrap.macros.CURL_GLOBAL_DEFAULT]
+ret = "long"
+
+[wrap.macros.CURL_ERROR_SIZE]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_IPV6]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_SSL]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_LIBZ]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_HTTP2]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_BROTLI]
+ret = "int"
+
+[wrap.macros.CURL_VERSION_ZSTD]
+ret = "int"
+
+# ── Owned char* returns ──
+# curl_easy_escape / unescape / maprintf / getenv allocate through curl's
+# allocator; the caller must curl_free. Without this the wrapper copies to
+# a Julia String and leaks the C buffer on every call. curl_version() is
+# a STATIC string and is deliberately absent.
+[wrap.cstring_owned]
+curl_easy_escape = "curl_free"
+curl_easy_unescape = "curl_free"
+curl_escape = "curl_free"
+curl_unescape = "curl_free"
+curl_maprintf = "curl_free"
+curl_getenv = "curl_free"
 
 # ── printf-family and the option setters ─────────────────────────────────────
 # libcurl is STRICT about the C type of a variadic argument, and it tells you
@@ -72,6 +121,15 @@ shim_headers = ["curl/curl.h", "curl/easy.h", "curl/multi.h"]
 # Types are post-promotion (float→double, narrow ints→int); RepliBuild refuses
 # the un-promoted spellings outright.
 [wrap.varargs]
+# Re-checked by hand against include/curl at this commit (curl-8_21_0):
+#   CURLcode  curl_easy_setopt(CURL *curl, CURLoption option, ...)        easy.h:42
+#   CURLcode  curl_easy_getinfo(CURL *curl, CURLINFO info, ...)           easy.h:59
+#   CURLMcode curl_multi_setopt(CURLM *m, CURLMoption option, ...)        multi.h:438
+#   CURLSHcode curl_share_setopt(CURLSH *sh, CURLSHoption option, ...)    curl.h:3083
+#   int   curl_mprintf / curl_mfprintf / curl_msprintf / curl_msnprintf   mprintf.h:56-62
+#   char *curl_maprintf(const char *format, ...)                          mprintf.h:74
+proven_at = "68720b4837284335b2d63cb358f8f6ce65f5bc55"
+
 curl_easy_setopt = [
     ["Clong"],        # CURLOPTTYPE_LONG    — TIMEOUT, VERBOSE, FOLLOWLOCATION, PORT…
     ["Cstring"],      # STRINGPOINT         — URL, USERAGENT, POSTFIELDS…

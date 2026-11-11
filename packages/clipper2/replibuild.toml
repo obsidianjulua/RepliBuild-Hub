@@ -1,0 +1,84 @@
+[project]
+name = "clipper2"
+version = "2.0.1"
+root = "."
+
+# Clipper2 = the C++ library under CPP/Clipper2Lib (engine, offset, rectclip,
+# triangulation). The public convenience functions (Intersect/Union/…) are
+# header-inline; the wrappable surface is the classes those inlines call
+# (Clipper64, ClipperOffset, ClipperD, …) plus Point64/Path64/Paths64.
+#
+# Admission-gate notes:
+#   * No configure and no code generator. Headers and .cpp live in git.
+#   * One flag set: C++17, the four library TUs under src/.
+#   * The rest of the repo is C# / Delphi / DLL scaffolding / examples /
+#     tests / Utils (SVG helpers). Exclude them or they compile into the
+#     DWARF.
+[dependencies.clipper2]
+type = "git"
+url = "https://github.com/AngusJohnson/Clipper2.git"
+tag = "Clipper2_2.0.1"
+commit = "21ebba05db8894f0c7217ad35ea518080f324946"
+exclude = [
+    "CSharp/",
+    "Delphi/",
+    "DLL/",                 # Windows pch.cpp / dllmain.cpp
+    "CPP/Examples/",
+    "CPP/Tests/",
+    "CPP/BenchMark/",
+    "CPP/Utils/",           # SVG / file-IO helpers, not the library
+]
+
+[compile]
+# -fstandalone-debug: Point64 / Rect64 / several header-only aggregates
+# the caller fills. Same class as box2d's def structs.
+# aot_thunks: C++ methods are Tier 2 (not noexcept); pre-compile the
+# MLIR thunks into libclipper2_thunks.so so load is a dlopen.
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
+aot_thunks = true
+parallel = true
+
+# Headers live at CPP/Clipper2Lib/include/clipper2/, not include/ at the
+# clone root. The resolver only auto-adds <clone>, <clone>/include, <clone>/src.
+include_dirs = [
+    ".replibuild_cache/deps/clipper2/CPP/Clipper2Lib/include",
+]
+
+# clipper.export.h is the language-agnostic ABI (BooleanOp64, InflatePaths64,
+# Version, DisposeArray64). It is header-defined and not in any library TU.
+# Merges with resolver-discovered sources rather than replacing them.
+source_files = ["src/export_tu.cpp"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# Subpath so the shim cannot fall through to a system clipper2 header.
+# Resolves against the include_dirs root above.
+shim_headers = [
+    "clipper2/clipper.h",
+    "clipper2/clipper.core.h",
+    "clipper2/clipper.export.h",
+]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+# Path64 = vector<Point64>, Paths64 = vector<Path64>. Uninstantiated
+# templates do not exist in DWARF — "STL needs STL in the TOML".
+templates = [
+    "std::vector<Clipper2Lib::Point64>",
+    "std::vector<std::vector<Clipper2Lib::Point64>>",
+    "std::vector<Clipper2Lib::PointD>",
+    "std::vector<std::vector<Clipper2Lib::PointD>>",
+]
+template_headers = ["clipper2/clipper.core.h"]
+
+[cache]
+enabled = true

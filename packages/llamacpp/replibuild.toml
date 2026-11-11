@@ -138,6 +138,16 @@ path = "vulkan"
 # of everything that matters. Checking that a function carries a GGML_API
 # annotation proves nothing on its own — check that the macro is ACTIVE.
 #
+# The GGML_VULKAN_*_GLSLC_SUPPORT defines: upstream's CMake hands
+# ggml-vulkan.cpp the same glslc probe results it hands the shader generator.
+# harvest_vulkan_shaders.sh probes and generates, but the defines never reached
+# this compile, so the shader variants were in the .so and ggml-vulkan.cpp could
+# not select them: the B60 reported `int dot: 0 | matrix cores: none` and ran
+# every matmul on plain shaders (2026-11-08). ggml enables Intel's KHR
+# cooperative matrix only on Xe2, so the A750 never needed them. They must match
+# the harvest's probe (it prints the list): a define with no shaders behind it
+# fails the compile, and a missing one silently drops a code path.
+#
 # The matching *_BUILD defines are upstream's dllexport/dllimport discriminator
 # and are inert on the ELF and mingw paths, but they are what upstream pairs
 # these with (ggml/src/CMakeLists.txt:287,515; src/CMakeLists.txt:61), and
@@ -162,6 +172,13 @@ flags = [
     "-DNDEBUG",
     "-DGGML_USE_CPU",
     "-DGGML_USE_VULKAN",
+    "-DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_COOPMAT2_DECODE_VECTOR_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_FLOAT_E2M1_GLSLC_SUPPORT",
+    "-DGGML_VULKAN_FLOAT_E4M3_GLSLC_SUPPORT",
     "-D_GNU_SOURCE",
     '-DGGML_VERSION="0.18.1"',
     '-DGGML_COMMIT="b10286"',

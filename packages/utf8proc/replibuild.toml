@@ -1,0 +1,100 @@
+[project]
+name = "utf8proc"
+version = "2.11.3"
+root = "."
+
+# utf8proc = utf8proc.c (which #includes utf8proc_data.c). One TU, no
+# configure. The Unicode data tables are committed as utf8proc_data.c at
+# the tag; data/ is the generator that rebuilds them, not a compile input.
+#
+# Admission-gate notes:
+#   * Unique Hub category (unicode). Julia-adjacent — this is the C library
+#     Julia itself vendors for Unicode.
+#   * utf8proc_data.c MUST be excluded: compiling it as its own TU would
+#     duplicate every table symbol already pulled in via the #include.
+#   * Public header is at the clone root. System libutf8proc is common
+#     (/usr/include/utf8proc.h); the version macros are the canary.
+[dependencies.utf8proc]
+type = "git"
+url = "https://github.com/JuliaStrings/utf8proc.git"
+tag = "v2.11.3"
+commit = "e5e799221b45bbb90f5fdc5c69b6b8dfbf017e78"
+exclude = [
+    "utf8proc_data.c",   # #included by utf8proc.c; not a standalone TU
+    "test/",
+    "bench/",
+    "data/",             # table generator, not the library
+]
+
+[compile]
+# -fstandalone-debug: utf8proc_property_t is a header-defined aggregate with
+# bitfields; the caller reads it via utf8proc_get_property(). Limited debug
+# info would wrap it empty.
+# -DUTF8PROC_EXPORTS: matches upstream's shared-library recipe (visibility
+# default on the public API). Harmless on Unix; required on Windows.
+flags = [
+    "-O2", "-fPIC",
+    "-std=c99",
+    "-fstandalone-debug",
+    "-DUTF8PROC_EXPORTS",
+]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# Header is at the clone root. Named explicitly so verify_shim_headers
+# can catch a system-header fallthrough (libutf8proc is commonly installed
+# next to Julia).
+shim_headers = ["utf8proc.h"]
+
+[wrap.tier1]
+enable = false
+
+# ── Version macros (compiler-erased; the shim-header canary) ──
+# utf8proc_version() is the runtime twin. A shim compiled against a
+# different utf8proc.h is the only way these disagree.
+
+[wrap.macros.UTF8PROC_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.UTF8PROC_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.UTF8PROC_VERSION_PATCH]
+ret = "int"
+
+# ── Error codes ──
+
+[wrap.macros.UTF8PROC_ERROR_NOMEM]
+ret = "int"
+
+[wrap.macros.UTF8PROC_ERROR_OVERFLOW]
+ret = "int"
+
+[wrap.macros.UTF8PROC_ERROR_INVALIDUTF8]
+ret = "int"
+
+[wrap.macros.UTF8PROC_ERROR_NOTASSIGNED]
+ret = "int"
+
+[wrap.macros.UTF8PROC_ERROR_INVALIDOPTS]
+ret = "int"
+
+# utf8proc_NFC / NFD / NFKC / NFKD / NFKC_Casefold return utf8proc_uint8_t*
+# (malloc'd). That is not a C `char*`, so [wrap.cstring_owned] does not
+# apply — tests copy with unsafe_string and Libc.free. utf8proc_map writes
+# through a **dstptr out-parameter and is also not a Cstring return.
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

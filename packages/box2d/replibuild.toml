@@ -40,6 +40,11 @@ shim_headers = ["box2d/box2d.h"]
 # joint/world dumpers. List ONLY the variadic arg types; the fixed `const char*`
 # format comes from DWARF. (Both confirmed present: b2Log weak, b2Dump defined.)
 [wrap.varargs]
+# Re-checked by hand against the headers at this commit (v2.4.1):
+#   inline void b2Log(const char* string, ...)   include/box2d/b2_settings.h:115
+#   void b2Dump(const char* string, ...)         include/box2d/b2_common.h:123
+proven_at = "9ebbbcd960ad424e03e5de6e66a40764c16f51bc"
+
 b2Log = [
     ["Cint"],
     ["Cdouble"],

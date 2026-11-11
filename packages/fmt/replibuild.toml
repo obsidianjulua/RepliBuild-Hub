@@ -8,10 +8,18 @@ type = "git"
 url = "https://github.com/fmtlib/fmt.git"
 tag = "12.1.0"
 commit = "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f"
-exclude = ["test", "doc", "support", "benchmark"]
+# src/fmt.cc is the C++20 module unit (`module;` / `module :private;`), which
+# upstream compiles only under FMT_MODULE=ON (CMakeLists add_module_library).
+# The traditional library is src/format.cc + src/os.cc. As a plain TU, Clang 23
+# rejects its preprocessor-conditional module directives, so it is not a source.
+exclude = ["test", "doc", "support", "benchmark", "src/fmt.cc"]
 
 [compile]
-flags = ["-O2", "-fPIC", "-std=c++20"]
+# fmt's public types live in headers and the library is one or two TUs.
+# -fstandalone-debug is cheap at that size and keeps those aggregates
+# complete. A multi-hundred-TU library would use -Xclang -fno-use-ctor-homing
+# instead; full standalone debug is what exhausts Clang's source locations.
+flags = ["-O2", "-fPIC", "-std=c++20", "-fstandalone-debug"]
 
 [link]
 enable_lto = false

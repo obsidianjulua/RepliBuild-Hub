@@ -37,7 +37,11 @@ exclude = [
 ]
 
 [compile]
-flags = ["-O2", "-fPIC", "-std=c++17"]
+# ImVec2 / ImGuiStyle / ImGuiIO are header-only aggregates the caller fills.
+# A handful of TUs, not hundreds, so -fstandalone-debug stays inside Clang's
+# source-location budget. Ctor homing off alone still leaves limited-debug
+# declaration stubs for those structs.
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
 parallel = true
 # Resolver auto-adds <clone>, <clone>/include, <clone>/src only. The two
 # backend TUs #include "imgui_impl_glfw.h" / "imgui_impl_opengl3.h" from
@@ -136,6 +140,12 @@ allow_function_pointers = true
 #   AddLog                     — ExampleAppLog/ExampleAppConsole in
 #                                imgui_demo.cpp; weak symbols, not API
 [wrap.varargs]
+# Checked against imgui.h at this commit (2026-11-08): all 12 names are
+# `IM_FMTARGS` variadics with the fixed arguments noted beside each entry
+# (TreeNode and TreeNodeEx have two overloads each). Moving
+# [dependencies.imgui] commit makes wrap a hard error until these are
+# re-checked against the new header and this is updated.
+proven_at = "f1cc2ae15e53a861a874c3034aae6798fde194ab"
 
 # void Text(const char* fmt, ...)
 Text = [

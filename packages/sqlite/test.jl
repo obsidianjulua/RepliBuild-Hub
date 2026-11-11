@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # SQLite Hub package — integration test
 #
-# Tests the full RepliBuild pipeline for SQLite 3.53.3:
+# Tests the full RepliBuild pipeline for SQLite 3.53.4:
 #   clean → build → load wrapper → exercise API
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/sqlite/test.jl

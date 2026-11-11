@@ -1,0 +1,178 @@
+[project]
+name = "zstd"
+version = "1.5.7"
+root = "."
+
+# zstd = libzstd (lib/{common,compress,decompress,dictBuilder}).
+#
+# Admission-gate notes (why this is a source-build candidate and not an ingest):
+#   * No configure script and no code generator on the path we build. The
+#     public headers (zstd.h, zstd_errors.h, zdict.h) live in git as-is.
+#   * One uniform flag set works because arch-specific work is a single
+#     .S file (huf_decompress_amd64.S) that the resolver never compiles
+#     (it only walks .c/.cpp) and that we additionally disable with
+#     -DZSTD_DISABLE_ASM so the C fallback is the only Huffman path.
+#   * The rest of the tree is consumers: CLI (programs/), contrib (pzstd
+#     C++, linux-kernel shims, seekable format), zlibWrapper, examples,
+#     tests, the educational decoder under doc/. Exclude them or they
+#     compile into the DWARF the wrapper is generated from.
+[dependencies.zstd]
+type = "git"
+url = "https://github.com/facebook/zstd.git"
+tag = "v1.5.7"
+commit = "f8745da6ff1ad1e7bab384bd1f9d742439278e99"
+exclude = [
+    # ── Consumers, not the library ──
+    # (tests/, examples/, doc/, build/ are already dropped by the resolver's
+    # walkdir filter; listed here too so a filter-regression is loud)
+    "programs/",
+    "contrib/",
+    "zlibWrapper/",
+    "tests/",
+    "examples/",
+    "doc/",
+    "build/",
+
+    # ── Optional modules we pin OFF ──
+    # Default shared libzstd.mk builds these only when ZSTD_LEGACY_SUPPORT>0
+    # / ZSTD_LIB_DEPRECATED=1. Compiling them in with the flags below would
+    # either fail (legacy TUs assume the default of 5) or leak the retired
+    # zbuff_* API into the wrapper.
+    "lib/legacy/",
+    "lib/deprecated/",
+]
+
+[compile]
+# -fstandalone-debug: load-bearing. ZSTD_inBuffer / ZSTD_outBuffer (and
+# ZSTD_bounds) are header-only aggregates the caller fills; clang's default
+# limited debug info emits them as DW_AT_declaration-only stubs, which wrap
+# to EMPTY Julia structs. Standalone debug info materializes their members.
+# -fvisibility=hidden: parity with upstream's shared-library recipe. API
+# symbols carry ZSTDLIB_VISIBLE (default visibility) in the header; without
+# this flag every internal helper is exported and lands in the wrapper.
+# -DZSTD_DISABLE_ASM: C Huffman path only (the .S is not compiled anyway;
+# this keeps the fallback from expecting the missing symbols).
+# -DZSTD_LEGACY_SUPPORT=0: do not pull v0.1–v0.7 frame decoders. Matches
+# the exclude of lib/legacy/.
+# -DZSTD_MULTITHREAD: upstream's *shared* library default (static is
+# single-threaded). ZSTD_c_nbWorkers is a real parameter only with this.
+# XXH_NAMESPACE / DEBUGLEVEL: injected by libzstd.mk into every TU;
+# xxhash.c is compiled as part of libzstd and must not clash with a
+# system libxxhash.
+# Tracing (ZSTD_trace_*) is upstream's ELF default when weak symbols exist.
+# The weak-symbol NULL check used to fail at `.ll → .so` because a newer
+# system clang assembled IR from Clang_unified_jll; create_library now uses
+# the same clang that emitted the IR. Do not pin `-DZSTD_TRACE=0` — that was
+# a dodge of GENERATOR-icmp-constexpr.md, not a library choice.
+flags = [
+    "-O2", "-fPIC",
+    "-fstandalone-debug",
+    "-fvisibility=hidden",
+    "-pthread",
+    "-DZSTD_DISABLE_ASM",
+    "-DZSTD_LEGACY_SUPPORT=0",
+    "-DZSTD_MULTITHREAD",
+    "-DXXH_NAMESPACE=ZSTD_",
+    "-DDEBUGLEVEL=0",
+]
+parallel = true
+
+# The resolver auto-adds <clone>, <clone>/include and <clone>/src only.
+# zstd headers live at lib/ (non-standard), and TUs include siblings via
+# -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Ilib/dictBuilder
+# (lib/Makefile). Relative to the package dir because build() cd's there.
+include_dirs = [
+    ".replibuild_cache/deps/zstd/lib",
+    ".replibuild_cache/deps/zstd/lib/common",
+    ".replibuild_cache/deps/zstd/lib/compress",
+    ".replibuild_cache/deps/zstd/lib/decompress",
+    ".replibuild_cache/deps/zstd/lib/dictBuilder",
+]
+
+[link]
+# LTO off → Tier 3 ccall (Hub doctrine). Whole-module llvmcall is
+# scale-limited and duplicates file-local statics (see cjson).
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# zstd keeps its public headers under lib/, and the macro shim is generated
+# in the build cache rather than beside them — so a bare "zstd.h" has no
+# sibling to find and falls through to the system libzstd (/usr/include/zstd.h
+# here), baking a foreign version's ZSTD_VERSION_* / ZSTD_COMPRESSBOUND into
+# the shim with no other symptom. The in-clone subpath resolves against the
+# absolute clone root and cannot collide. (Same class as lz4's lib/lz4.h and
+# blake3's c/blake3.h; caught by verify_shim_headers.)
+shim_headers = ["lib/zstd.h", "lib/zstd_errors.h", "lib/zdict.h"]
+
+# Tier 1 is quarantined (2026-08-19): experimental, not a supported Hub
+# path. Default-off matches the generator default; do not flip this on
+# without an explicit request. enable_lto is already false, so every
+# function is Tier 3 ccall.
+[wrap.tier1]
+enable = false
+
+# ── Function-like macros ──
+# ZSTD_COMPRESSBOUND is the compile-time twin of ZSTD_compressBound().
+# Asserting them equal in test_deep.jl is the shim-header canary.
+
+[wrap.macros.ZSTD_COMPRESSBOUND]
+ret = "size_t"
+args = ["size_t"]
+
+# ── Value macros (compiler-erased public constants) ──
+
+[wrap.macros.ZSTD_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.ZSTD_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.ZSTD_VERSION_RELEASE]
+ret = "int"
+
+[wrap.macros.ZSTD_VERSION_NUMBER]
+ret = "int"
+
+[wrap.macros.ZSTD_VERSION_STRING]
+ret = "const char*"
+
+[wrap.macros.ZSTD_CLEVEL_DEFAULT]
+ret = "int"
+
+[wrap.macros.ZSTD_MAGICNUMBER]
+ret = "unsigned"
+
+[wrap.macros.ZSTD_MAGIC_DICTIONARY]
+ret = "unsigned"
+
+[wrap.macros.ZSTD_MAGIC_SKIPPABLE_START]
+ret = "unsigned"
+
+[wrap.macros.ZSTD_MAGIC_SKIPPABLE_MASK]
+ret = "unsigned"
+
+[wrap.macros.ZSTD_BLOCKSIZELOG_MAX]
+ret = "int"
+
+[wrap.macros.ZSTD_BLOCKSIZE_MAX]
+ret = "int"
+
+[wrap.macros.ZSTD_CONTENTSIZE_UNKNOWN]
+ret = "unsigned long long"
+
+[wrap.macros.ZSTD_CONTENTSIZE_ERROR]
+ret = "unsigned long long"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

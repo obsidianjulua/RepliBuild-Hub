@@ -159,22 +159,17 @@ sku = 284758393
 end
 
 @testset "Tier-1 surface is empty here, and consistently so" begin
-    # tomlc17 legitimately gets NO Tier-1 slices, and that is the correct
-    # outcome rather than a build failure: nearly every entry point returns
-    # toml_datum_t / toml_result_t BY VALUE, which the shape gate keeps on
-    # Tier 3, and the one remaining candidate was Bool-shaped (Julia passes
-    # Bool across llvmcall as i8, clang emits C _Bool as i1) so it demotes too.
-    # What matters is that the surface and the files on disk AGREE — a
-    # non-empty TIER1_FUNCTIONS with no .ll files, or the reverse, is the
-    # drift this asserts against.
+    # By-value toml_datum_t / toml_result_t stay on Tier 3, and the Bool-shaped
+    # candidate demotes (llvmcall passes Bool as i8, clang emits C _Bool as i1).
+    # The slicer can still accept candidates; the shape gate then emits nothing.
+    # An enabled Tier 1 surface with zero survivors omits TIER1_FUNCTIONS, the
+    # same as enable = false, and writes no slice files and no @generated kernels.
     slices_dir = joinpath(PKG_DIR, "julia", "slices")
     lls = isdir(slices_dir) ? filter(f -> endswith(f, ".ll"), readdir(slices_dir)) : String[]
-    @test length(lls) == length(T.TIER1_FUNCTIONS)
-    @test isempty(T.TIER1_FUNCTIONS)
-    @test !occursin("@generated function _TIER1_", read(WRAPPER, String))
-    for f in lls
-        @test occursin("define", read(joinpath(slices_dir, f), String))
-    end
+    src = read(WRAPPER, String)
+    @test isempty(lls)
+    @test !isdefined(T, :TIER1_FUNCTIONS)
+    @test !occursin("@generated function _TIER1_", src)
 end
 
 @testset "Scalar types" begin

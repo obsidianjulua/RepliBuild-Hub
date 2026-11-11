@@ -1,0 +1,97 @@
+[project]
+name = "md4c"
+version = "0.5.3"
+root = "."
+
+# md4c = src/{md4c.c, md4c-html.c, entity.c}. SAX-like CommonMark parser
+# plus the HTML renderer. No configure, no generated headers.
+#
+# Admission-gate notes:
+#   * Unique Hub category (markdown).
+#   * One flag set. md2html/ is a CLI with main() — exclude it.
+#   * Public API is md_parse (callback-driven) plus md_html (easier
+#     round-trip). MD_FLAG_* are preprocessor macros, not enums.
+#   * Headers live under src/ (auto-added by the resolver).
+[dependencies.md4c]
+type = "git"
+url = "https://github.com/mity/md4c.git"
+tag = "release-0.5.3"
+commit = "472c417005c2c71b8617de4f7b8d6b30411d78f4"
+exclude = [
+    "md2html/",    # CLI, has main()
+    "test/",
+    "scripts/",
+]
+
+[compile]
+# -fstandalone-debug: MD_PARSER is a header-only aggregate the caller
+# fills with function pointers; MD_ATTRIBUTE / MD_BLOCK_*_DETAIL are
+# similarly header-defined. Limited debug info wraps them empty and
+# md_parse has nowhere to read enter_block / text.
+flags = [
+    "-O2", "-fPIC",
+    "-std=c99",
+    "-fstandalone-debug",
+]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# In-clone subpath. Resolves against the clone root, cannot collide
+# with a system md4c.h.
+shim_headers = ["src/md4c.h", "src/md4c-html.h"]
+
+[wrap.tier1]
+enable = false
+
+# ── Parser flags (compiler-erased public constants) ──
+
+[wrap.macros.MD_FLAG_COLLAPSEWHITESPACE]
+ret = "unsigned"
+
+[wrap.macros.MD_FLAG_TABLES]
+ret = "unsigned"
+
+[wrap.macros.MD_FLAG_STRIKETHROUGH]
+ret = "unsigned"
+
+[wrap.macros.MD_FLAG_TASKLISTS]
+ret = "unsigned"
+
+[wrap.macros.MD_FLAG_PERMISSIVEAUTOLINKS]
+ret = "unsigned"
+
+[wrap.macros.MD_FLAG_NOHTML]
+ret = "unsigned"
+
+[wrap.macros.MD_DIALECT_COMMONMARK]
+ret = "unsigned"
+
+[wrap.macros.MD_DIALECT_GITHUB]
+ret = "unsigned"
+
+# ── HTML renderer flags ──
+
+[wrap.macros.MD_HTML_FLAG_DEBUG]
+ret = "unsigned"
+
+[wrap.macros.MD_HTML_FLAG_VERBATIM_ENTITIES]
+ret = "unsigned"
+
+[wrap.macros.MD_HTML_FLAG_XHTML]
+ret = "unsigned"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

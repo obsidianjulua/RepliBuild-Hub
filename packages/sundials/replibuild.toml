@@ -1,0 +1,277 @@
+[project]
+name = "sundials"
+version = "7.9.0"
+root = "."
+
+[dependencies.sundials]
+type = "git"
+url = "https://github.com/LLNL/sundials.git"
+tag = "v7.9.0"
+commit = "312fc0f3684f27209ca9dc9249d194436eb41a7a"
+
+# ── What this package is ─────────────────────────────────────────────────────
+# CVODE: LLNL's adaptive-order, adaptive-step BDF/Adams integrator for stiff and
+# non-stiff ODE IVPs, plus the serial vector, dense/band matrices, the direct and
+# Krylov linear solvers, and the Newton/fixed-point nonlinear solvers it needs.
+# ARKODE, CVODES, IDA, IDAS and KINSOL are configured OFF and excluded below.
+#
+# ── Why the exclude list is hand-inverted, not taken from the proposal ───────
+# SUNDIALS does not build one library. cmake configures TWENTY-TWO object
+# libraries and links them into per-solver .so's. `SysConfigGen.toml_fragment`
+# picks the single largest target (sundials_core_obj_shared, 26 TUs) and proposes
+# excluding everything else — which would wrap SUNDIALS' infrastructure with NO
+# ODE SOLVER IN IT. The list below is the inverse: the union of the ten targets
+# that make up a working serial CVODE, 55 TUs.
+#
+# That union is legitimate under one flag set, and this is checked rather than
+# assumed twice over:
+#   * cmake's own compile_commands.json gives sundials_context.c (core),
+#     cvode.c (cvode) and nvector_serial.c (nvecserial) BYTE-IDENTICAL flags,
+#     down to the same -Dsundials_core_EXPORTS. Upstream already compiles the
+#     whole union with one flag set; the per-target split is a link-time
+#     packaging choice, not a compile-time one.
+#   * sundials_export.h expands BOTH branches of `#ifdef sundials_core_EXPORTS`
+#     to __attribute__((visibility("default"))) on ELF, and there is ONE export
+#     header for the whole project rather than one per target.
+# harvest.jl re-checks the first of those on every version bump.
+exclude = [
+    # not library code
+    "benchmarks/",
+    "bindings/",
+    "examples/",          # 227 files, each with main()
+    "test/",              # 157 files
+    # solvers this package does not ship
+    "src/arkode/",
+    "src/cvodes/",
+    "src/ida/",
+    "src/idas/",
+    "src/kinsol/",
+    # Fortran interface — 84 .f90 plus their C shims. RepliBuild only walks
+    # .c/.cpp so the .f90 are inert, but the fmod_* dirs hold C code too.
+    # Substring match, so this covers every solver's copy at once.
+    "fmod_int32/",
+    "fmod_int64/",
+    # core files needing a TPL that is configured OFF
+    "src/sundials/sundials_mpi_errors.c",
+    "src/sundials/sundials_xbraid.c",
+    # CVODE's fused kernels. Gated behind SUNDIALS_ENABLE_PACKAGE_FUSED_KERNELS
+    # (OFF here) and, even when ON, built as their OWN libraries
+    # (sundials_cvode_fused_{cuda,hip,stubs}) — never part of sundials_cvode.
+    # cvode_fused_gpu.cpp is the one C++ file that reaches the compile set, and
+    # it is the reason the first build died: RepliBuild applies ONE flag set to
+    # every TU, so the -std=gnu99 the C sources need is illegal on a .cpp. A C
+    # package with a stray .cpp cannot work; the file has to go.
+    "src/cvode/cvode_fused_gpu.cpp",
+    "src/cvode/cvode_fused_stubs.c",
+    # N_Vector implementations other than serial
+    "src/nvector/cuda/",
+    "src/nvector/hip/",
+    "src/nvector/manyvector/",
+    "src/nvector/mpiplusx/",
+    "src/nvector/openmp/",
+    "src/nvector/openmpdev/",
+    "src/nvector/parallel/",
+    "src/nvector/parhyp/",
+    "src/nvector/petsc/",
+    "src/nvector/pthreads/",
+    "src/nvector/raja/",
+    "src/nvector/sycl/",
+    "src/nvector/trilinos/",
+    # SUNLinearSolver implementations needing a TPL (KLU, LAPACK, SuperLU, …)
+    "src/sunlinsol/cusolversp/",
+    "src/sunlinsol/klu/",
+    "src/sunlinsol/lapackband/",
+    "src/sunlinsol/lapackdense/",
+    "src/sunlinsol/magmadense/",
+    "src/sunlinsol/onemkldense/",
+    "src/sunlinsol/superludist/",
+    "src/sunlinsol/superlumt/",
+    # SUNMatrix implementations not kept (sparse is only useful with KLU/SuperLU)
+    "src/sunmatrix/cusparse/",
+    "src/sunmatrix/magmadense/",
+    "src/sunmatrix/onemkldense/",
+    "src/sunmatrix/slunrloc/",
+    "src/sunmatrix/sparse/",
+    # device memory helpers
+    "src/sunmemory/cuda/",
+    "src/sunmemory/hip/",
+    "src/sunmemory/sycl/",
+    # needs PETSc
+    "src/sunnonlinsol/petscsnes/",
+    # dominant-eigenvalue estimator: power is kept, arnoldi is not configured
+    "src/sundomeigest/arnoldi/",
+]
+
+[compile]
+# Taken verbatim from what cmake passes every TU of the union, not guessed.
+#   -std=gnu99          upstream's dialect; SUNDIALS is C99 with GNU extensions
+#   -Dsundials_core_EXPORTS
+#                       cmake's per-target visibility define. cmake passes THIS
+#                       name to the cvode and nvecserial object libs too, not a
+#                       per-target one. Kept rather than pruned: on ELF both
+#                       branches of the macro expand to visibility("default") so
+#                       it is a no-op here — but that was CHECKED (see the note
+#                       above), and dropping an EXPORTS define you have not
+#                       checked can empty the dynamic symbol table without
+#                       failing the build.
+#   -DNDEBUG            release, as configured
+flags = ["-O2", "-fPIC", "-std=gnu99", "-Dsundials_core_EXPORTS", "-DNDEBUG"]
+parallel = true
+
+# `config/` holds cmake's configure output, checked in — see config/SYSCONFIG.md
+# and harvest.jl. Two headers that do not exist in a bare checkout:
+#   sundials/sundials_config.h   feature probes + the precision/index pins
+#   sundials/sundials_export.h   visibility macros (generate_export_header)
+#
+# They sit in config/sundials/ rather than flat in config/ because the sources
+# include them as <sundials/sundials_config.h> (25 sites). capture_config
+# flattens captured paths; harvest.jl relocates them.
+#
+# config IS FIRST ON PURPOSE. This box has a system /usr/include/sundials from
+# the distro package, and an explicit -I outranks the system search path — a
+# stale system sundials_config.h would silently redefine sunrealtype for the
+# whole build. verify_shim_headers fails loud if a shim ever resolves to the
+# system copy; ordering it correctly is what prevents the question.
+# Paths are relative to the package dir — build() cd's here.
+include_dirs = [
+    "config",
+    ".replibuild_cache/deps/sundials/include",
+    ".replibuild_cache/deps/sundials/src/sundials",
+]
+
+[link]
+# LTO off, as in every other Hub package: the whole-module llvmcall payload is
+# scale-limited, and at 55 TUs this is one of the larger C packages in the Hub.
+# Tier 1 slicing stays off — CVODE does real numerical work per call, so FFI
+# overhead is not the cost that matters.
+enable_lto = false
+optimization_level = "2"
+# sundials_math.c calls into libm (SUNRsqrt/SUNRabs/SUNRpowerR → sqrt/fabs/pow).
+link_libraries = ["m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# The four headers a CVODE caller actually needs: the integrator, the vector it
+# integrates, and the matrix + linear solver the Newton iteration factors with.
+shim_headers = [
+    "cvode/cvode.h",
+    "nvector/nvector_serial.h",
+    "sunmatrix/sunmatrix_dense.h",
+    "sunlinsol/sunlinsol_dense.h",
+]
+
+# ── Residue ──────────────────────────────────────────────────────────────────
+# Earned from the first wrap, not guessed. Two kinds turned up.
+#
+# SUNDIALS' *SUN*-prefixed constants really are enums — SUNLogLevel, SUNErrCode_,
+# N_Vector_ID, SUNMatrix_ID, SUNLinearSolver_ID all came through DWARF untouched.
+# CVODE's do not: cvode.h:38-73 declares every CV_* constant as a bare #define,
+# so the preprocessor erased all of them and the wrapper had no way to name the
+# method, the task mode, or a single return code. They are shimmed below.
+#
+# The three varargs are printf-style — fixed args end in a format string, then `...`.
+# Only the VARIADIC types are listed; the fixed args come from DWARF.
+[wrap.varargs]
+# Re-checked by hand against the headers at this commit (v7.9.0):
+#   SUNErrCode SUNLogger_QueueMsg(SUNLogger, SUNLogLevel, const char* scope,
+#                                 const char* label, const char* msg_txt, ...)
+#                                            include/sundials/sundials_logger.h:104
+#   void cvProcessError(CVodeMem, int error_code, int line, const char* func,
+#                       const char* file, const char* msgfmt, ...)
+#                                            src/cvode/cvode_impl.h:623
+#   void SUNGlobalFallbackErrHandler(int line, const char* func, const char* file,
+#                                    const char* msgfmt, SUNErrCode err_code, ...)
+#                                            src/sundials/sundials_errors.c:138
+proven_at = "312fc0f3684f27209ca9dc9249d194436eb41a7a"
+
+# The public one — SUNDIALS_EXPORT in sundials_logger.h. This is how you get
+# anything into SUNDIALS' log stream from Julia.
+SUNLogger_QueueMsg = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cdouble", "Cdouble"],
+]
+
+# Internal (cvode_impl.h) but an exported symbol, and the single most useful
+# thing to reach when debugging why an integration failed — it is what CVODE
+# itself calls on every error path.
+cvProcessError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+
+# The handler CVODE falls back to when no SUNContext error handler is set.
+# Note the fixed args end with SUNErrCode err_code AFTER the format string —
+# unusual ordering, and a reason to let DWARF supply the fixed half rather than
+# hand-writing it.
+SUNGlobalFallbackErrHandler = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+]
+
+# ── Owned char* returns ──────────────────────────────────────────────────────
+# The three *GetReturnFlagName functions this package ships malloc a fresh
+# buffer on every call (cvode_io.c:1804, cvode_diag.c:251, cvode_ls.c:863) and
+# the caller frees it with plain free(). Without this the wrapper copies to a
+# Julia String and leaks the C buffer each call. The ARKode/IDA/KINSOL twins
+# are excluded from the build above.
+[wrap.cstring_owned]
+CVodeGetReturnFlagName = "free"
+CVodeGetLinReturnFlagName = "free"
+CVDiagGetReturnFlagName = "free"
+
+# ── Value macros ─────────────────────────────────────────────────────────────
+# Every CV_* constant in cvode.h is a #define, not an enum member, so none of
+# them survived preprocessing. Without these a caller cannot say "use BDF" or
+# compare a return code against success — they would have to hardcode 2 and 0
+# against a header they cannot see. All are plain int.
+# Re-checked by hand against include/cvode/cvode.h at this commit; line numbers
+# are from that file.
+
+# lmm argument to CVodeCreate — cvode.h:38-39
+[wrap.macros.CV_ADAMS]
+ret = "int"
+[wrap.macros.CV_BDF]
+ret = "int"
+
+# itask argument to CVode — cvode.h:42-43
+[wrap.macros.CV_NORMAL]
+ret = "int"
+[wrap.macros.CV_ONE_STEP]
+ret = "int"
+
+# success/normal returns — cvode.h:47-49
+[wrap.macros.CV_SUCCESS]
+ret = "int"
+[wrap.macros.CV_TSTOP_RETURN]
+ret = "int"
+[wrap.macros.CV_ROOT_RETURN]
+ret = "int"
+
+# the failure returns a caller actually branches on — cvode.h:53-73
+[wrap.macros.CV_TOO_MUCH_WORK]
+ret = "int"
+[wrap.macros.CV_CONV_FAILURE]
+ret = "int"
+[wrap.macros.CV_RHSFUNC_FAIL]
+ret = "int"
+[wrap.macros.CV_MEM_NULL]
+ret = "int"
+[wrap.macros.CV_ILL_INPUT]
+ret = "int"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

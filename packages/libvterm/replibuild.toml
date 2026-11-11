@@ -1,0 +1,84 @@
+[project]
+name = "libvterm"
+version = "0.3.3"
+root = "."
+
+# libvterm = src/{vterm,parser,state,screen,pen,encoding,keyboard,mouse,unicode}.c.
+# A VT220/xterm/ECMA-48 terminal emulator as a pure state machine: bytes in,
+# a grid of cells out. No pty, no rendering, no I/O — the caller owns all
+# three, which is what makes it embeddable (it is neovim's :terminal core).
+#
+# Admission-gate notes:
+#   * Unique Hub category (terminal emulation).
+#   * Pinned to neovim's mirror HEAD, not the v0.3.3 tag. The tag does not
+#     carry src/encoding/{DECdrawing,uk}.inc — upstream's Makefile generates
+#     them from .tbl files with a Perl script (tbl2inc_c.pl), a build step the
+#     resolver cannot run. The mirror committed them (0a15c6e). Everything else
+#     between the tag and HEAD is upstream's own: the `premove` state callback
+#     and `sb_pushline4` (scrollback push with a soft-wrap continuation flag),
+#     plus CI and docs. Source-wise this is 0.3.3 + those two callbacks.
+#   * bin/ holds three CLIs with main() (unterm, vterm-ctrl, vterm-dump);
+#     t/ is the upstream test harness (also main()). Exclude both.
+#   * The ABI points worth a wrapper's attention, all in include/vterm.h:
+#       - VTermScreenCellAttrs: 13 bitfields packed in one 32-bit word
+#       - VTermColor: a union tagged by its first byte (RGB vs palette index)
+#       - VTermScreenCell: a uint32_t[6] array, a char, the bitfield word, two
+#         unions — read through pointers, not by value
+#       - VTermScreenCallbacks / VTermStateCallbacks: structs of function
+#         pointers the caller fills, and VTermPos / VTermRect passed BY VALUE
+#         into those callbacks
+#   * VTERM_COLOR_IS_* and vterm_color_rgb/indexed are macros / static inline
+#     in the header: no symbol, nothing to wrap. Callers test the tag byte.
+[dependencies.libvterm]
+type = "git"
+url = "https://github.com/neovim/libvterm.git"
+commit = "934bc2fbf21800ac3458a499df8820ca5fb45fd3"
+exclude = [
+    "bin/",    # CLIs with main()
+    "t/",      # test harness, main()
+    "doc/",
+]
+
+[compile]
+# -fstandalone-debug: the callback structs and VTermScreenCell are
+# header-defined aggregates the caller fills or reads; limited debug info
+# leaves them without members.
+flags = [
+    "-O2", "-fPIC",
+    "-std=c99",
+    "-fstandalone-debug",
+]
+include_dirs = [
+    ".replibuild_cache/deps/libvterm/include",
+]
+parallel = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# In-clone subpaths: Arch ships libvterm 0.3.3 in /usr/include, and that
+# header lacks sb_pushline4. The wrapper must describe the library it binds.
+shim_headers = ["include/vterm.h", "include/vterm_keycodes.h"]
+
+[wrap.macros.VTERM_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.VTERM_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.VTERM_MAX_CHARS_PER_CELL]
+ret = "int"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
