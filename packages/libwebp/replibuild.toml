@@ -1,0 +1,58 @@
+[project]
+name = "libwebp"
+version = "1.6.0"
+root = "."
+
+# libwebp as a GRAPH: upstream's own CMake project, four shared libraries,
+# taken from a pinned git checkout ([graph] dependency, RepliBuild.jl #84).
+#
+#   sharpyuv     RGB→YUV with sharp chroma (webp's encoder uses it)
+#   webp         encode + decode (links sharpyuv)
+#   webpdemux    container parsing, animation decoding (links webp)
+#   libwebpmux   container assembly, animation encoding (links webp) —
+#                the CMake target really is named `libwebpmux`
+#
+# Selecting webpdemux + libwebpmux brings webp and sharpyuv with them.
+# webpdecoder (a decode-only duplicate of webp's symbols) is not selected.
+#
+# Why a graph and not one flag set: the SIMD files need per-file flags
+# (-msse4.1 on *_sse41.c, -mavx2 on *_avx2.c; cmake/cpu.cmake sets them with
+# set_source_files_properties), and config.h comes from cmake's configure.
+# Graph mode takes both from CMake's File API, so neither is hand-copied here.
+#
+# Shared types across the graph (the #80 identity rule):
+#   owner webp       → WebPPicture, WebPConfig, WEBP_CSP_MODE … imported by
+#                      libwebpmux / webpdemux, which link it
+#   siblings only    → WebPData (header-only mux_types.h) is used by demux and
+#                      mux but not by webp, their common dependency: each keeps
+#                      its own Julia type, and wrap reports it.
+#
+# Needs RepliBuild.jl with branch fix/graph-target-objects (2026-11-11):
+# $<TARGET_OBJECTS> sources, VERSIONed sonames on the link line, and the two
+# file-local `MemBuffer` structs each stopped the graph before that.
+[dependencies.libwebp]
+type = "git"
+url = "https://github.com/webmproject/libwebp.git"
+tag = "v1.6.0"
+commit = "4fa21912338357f89e4fd51cf2368325b59e9bd9"
+
+[graph]
+dependency = "libwebp"
+source = "."
+targets = ["webpdemux", "libwebpmux"]
+build_type = "Release"
+# Lean configure: libraries only. BUILD_SHARED_LIBS=ON because upstream's
+# add_library() calls carry no SHARED keyword.
+options = [
+    "-DBUILD_SHARED_LIBS=ON",
+    "-DWEBP_BUILD_ANIM_UTILS=OFF",
+    "-DWEBP_BUILD_CWEBP=OFF",
+    "-DWEBP_BUILD_DWEBP=OFF",
+    "-DWEBP_BUILD_GIF2WEBP=OFF",
+    "-DWEBP_BUILD_IMG2WEBP=OFF",
+    "-DWEBP_BUILD_VWEBP=OFF",
+    "-DWEBP_BUILD_WEBPINFO=OFF",
+    "-DWEBP_BUILD_WEBPMUX=OFF",
+    "-DWEBP_BUILD_EXTRAS=OFF",
+    "-DWEBP_BUILD_LIBWEBPMUX=ON",
+]

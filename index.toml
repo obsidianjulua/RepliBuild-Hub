@@ -219,3 +219,9 @@ description = "libjpeg-turbo TurboJPEG API — JPEG compress/decompress (8/12-bi
 version = "3.2.1"
 language = "c"
 tags = ["jpeg", "image", "imaging", "codec", "compression", "png", "bmp"]
+
+[libwebp]
+description = "libwebp as a graph — webp (encode/decode), libwebpmux (animation encoding), webpdemux (animation decoding), sharpyuv; upstream CMake, SIMD per-file flags, one Julia type per shared C type"
+version = "1.6.0"
+language = "c"
+tags = ["webp", "image", "imaging", "codec", "animation", "graph"]
