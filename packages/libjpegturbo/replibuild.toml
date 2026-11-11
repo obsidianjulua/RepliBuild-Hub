@@ -1,0 +1,137 @@
+[project]
+name = "libjpegturbo"
+version = "3.2.1"
+root = "."
+
+# libjpeg-turbo's `turbojpeg` shared library: the TurboJPEG API (tj3*) over
+# the full libjpeg codec, plus its BMP/PPM/PNG image I/O (tj3LoadImage*/
+# tj3SaveImage*).
+#
+# Admission-gate notes:
+#   * Configure-time headers (jconfig.h, jconfigint.h, jversion.h) are
+#     harvested into config/ by harvest.jl (cmake configure only).
+#   * 8/12/16-bit precision is NOT per-target flags: since 3.1 upstream ships
+#     one tiny wrapper TU per precision (src/wrapper/jcapistd-12.c is
+#     `#define BITS_IN_JSAMPLE 12` + `#include "../jcapistd.c"`). So the whole
+#     target is one flag set, and the BASE files those wrappers include must be
+#     excluded or they compile a second, 8-bit copy of every symbol.
+#   * WITH_SIMD=OFF: x86-64 SIMD is NASM .asm with per-file flags. The C paths
+#     are the reference implementation: bit-identical output, slower.
+#   * The in-tree spng + zlib (src/spng/) are folded in as upstream does; the
+#     only flag they add over the turbojpeg target is -DZ_PREFIX, which renames
+#     zlib's symbols to z_* and is inert for every other TU.
+#
+# Exclude list = every .c in the tree minus the 129 TUs CMake's `turbojpeg`
+# target compiles (JPEG_SOURCES + arithmetic coding + TURBOJPEG_SOURCES +
+# spng/zlib objects). Entries match by file / prefix / substring of the
+# clone-relative path; none of these is a substring of a file we keep.
+[dependencies.libjpegturbo]
+type = "git"
+url = "https://github.com/libjpeg-turbo/libjpeg-turbo.git"
+tag = "3.2.1"
+commit = "7b4993786d856cbccabfc0ed2f923ba000e326cc"
+exclude = [
+    # ── Not C TUs we can build, or not the library ──
+    "simd/", "fuzz/", "java/", "test/", "cmakescripts/", "sharedlib/", "win/",
+    "src/md5/",
+
+    # ── Base files #included by src/wrapper/*-{8,12,16}.c ──
+    "src/jcapistd.c", "src/jccoefct.c", "src/jccolext.c", "src/jccolor.c",
+    "src/jcdctmgr.c", "src/jcdiffct.c", "src/jclossls.c", "src/jcmainct.c",
+    "src/jcprepct.c", "src/jcsample.c",
+    "src/jdapistd.c", "src/jdcoefct.c", "src/jdcol565.c", "src/jdcolext.c",
+    "src/jdcolor.c", "src/jddctmgr.c", "src/jddiffct.c", "src/jdlossls.c",
+    "src/jdmainct.c", "src/jdmerge.c", "src/jdmrg565.c", "src/jdmrgext.c",
+    "src/jdpostct.c", "src/jdsample.c",
+    "src/jfdctfst.c", "src/jfdctint.c",
+    "src/jidctflt.c", "src/jidctfst.c", "src/jidctint.c", "src/jidctred.c",
+    "src/jquant1.c", "src/jquant2.c", "src/jutils.c", "src/jstdhuff.c",
+    "src/rdpng.c", "src/rdppm.c", "src/wrpng.c", "src/wrppm.c",
+    "src/turbojpeg-mp.c",
+    "src/wrapper/template.c",
+
+    # ── Command-line tools and their helpers (WITH_TOOLS/TESTS=OFF) ──
+    "src/bmpsizetest.c", "src/cdjpeg.c", "src/cjpeg.c", "src/djpeg.c",
+    "src/example.c", "src/jcstest.c", "src/jpegtran.c", "src/rdcolmap.c",
+    "src/rdgif.c", "src/rdjpgcom.c", "src/rdswitch.c", "src/rdtarga.c",
+    "src/strtest.c", "src/tjbench.c", "src/tjcomp.c", "src/tjdecomp.c",
+    "src/tjtran.c", "src/tjunittest.c", "src/tjutil.c",
+    "src/wrgif.c", "src/wrjpgcom.c", "src/wrtarga.c",
+    "src/wrapper/rdcolmap-", "src/wrapper/wrgif-",
+]
+
+[compile]
+# turbojpeg target, CMAKE_BUILD_TYPE=Release:
+#   COMPILE_FLAGS  -DBMP_SUPPORTED -DPNG_SUPPORTED -DSPNG_STATIC -DPPM_SUPPORTED
+#   shared lib     -Dturbojpeg_EXPORTS
+#   spng/zlib      -DZ_PREFIX (see header note)
+#   Release        -DNDEBUG (upstream bumps -O2 to -O3; Hub stays at -O2)
+# Do NOT add -fvisibility=hidden: DLLEXPORT is empty on Linux and upstream
+# trims exports with a linker version script (src/turbojpeg-mapfile), so
+# hidden would erase the whole API. The surface is trimmed at wrap time.
+flags = [
+    "-O2", "-fPIC",
+    "-DNDEBUG",
+    "-DBMP_SUPPORTED", "-DPNG_SUPPORTED", "-DPPM_SUPPORTED",
+    "-DSPNG_STATIC", "-DZ_PREFIX",
+    "-Dturbojpeg_EXPORTS",
+]
+parallel = true
+
+# config/ first: jconfig.h / jconfigint.h / jversion.h live in CMake's binary
+# dir upstream. src/spng/zlib before the system path: spng.c includes
+# "zlib.h", and /usr/include/zlib.h is a different zlib without Z_PREFIX.
+include_dirs = [
+    "config",
+    ".replibuild_cache/deps/libjpegturbo/src/spng/zlib",
+    ".replibuild_cache/deps/libjpegturbo/src/spng",
+    ".replibuild_cache/deps/libjpegturbo/src",
+]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["src/turbojpeg.h"]
+# Upstream's src/turbojpeg-mapfile exports ONLY tj*/TJ* from libturbojpeg —
+# the libjpeg API ships in the separate libjpeg.so. With no visibility
+# annotations to lean on, mirror that mapfile at wrap time (no recompile).
+# Every glob below matched symbols in the 3.2.1 build (a non-matching one is a
+# hard error, which is how an upstream rename will announce itself).
+exclude_symbols = [
+    "jpeg_*", "jpeg12_*", "jpeg16_*",    # libjpeg API, all precisions
+    "jinit_*", "j12*", "j16*",            # libjpeg module internals
+    "jcopy_*", "jtransform_*",            # transupp.c (tj3Transform's engine)
+    "jdiv_round_up", "jround_up", "jzero_far",
+    "spng_*", "z_*",                      # folded spng + Z_PREFIX'd zlib
+]
+# Then only types the tj surface reaches are emitted (tjtransform, tjregion,
+# tjscalingfactor …), not libjpeg's/spng's internal structs.
+surface_types_only = true
+
+# ── Value macros ──
+# TURBOJPEG_VERSION_NUMBER is the shim-header canary (3.2.x → 3002000). It is
+# also the argument the header's tj3Init(t) macro passes to tj3InitVersion; the
+# .so exports a real tj3Init too, for ABI compatibility.
+[wrap.macros.TURBOJPEG_VERSION_NUMBER]
+ret = "int"
+
+[wrap.macros.TJ_NUMPF]
+ret = "int"
+
+[wrap.tier1]
+enable = false
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

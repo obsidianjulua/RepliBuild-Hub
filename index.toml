@@ -213,3 +213,9 @@ description = "raylib — simple game library: window/input, 2D shapes, textures
 version = "6.2"
 language = "c"
 tags = ["games", "2d", "graphics", "gamedev", "audio", "input", "opengl"]
+
+[libjpegturbo]
+description = "libjpeg-turbo TurboJPEG API — JPEG compress/decompress (8/12-bit lossy, 16-bit lossless), lossless transforms, BMP/PPM/PNG image I/O; C paths, no SIMD"
+version = "3.2.1"
+language = "c"
+tags = ["jpeg", "image", "imaging", "codec", "compression", "png", "bmp"]
