@@ -1,0 +1,123 @@
+[project]
+name = "raylib"
+version = "6.2"
+root = "."
+
+# raylib = src/{rcore,rshapes,rtextures,rtext,rmodels,raudio,rglfw}.c, the
+# PLATFORM_DESKTOP_GLFW + OpenGL 3.3 build that src/Makefile produces on Linux.
+#
+# Admission-gate notes:
+#   * No configure step. src/config.h (the feature switches) is checked into
+#     git as-is; the Makefile only adds -D flags, and they are uniform across
+#     every TU, so this is one flag set.
+#   * rglfw.c is a unity TU: it #includes GLFW's sources from src/external/glfw.
+#     rcore.c likewise #includes exactly one src/platforms/rcore_*.c, and
+#     raudio.c #includes external/stb_vorbis.c and external/qoaplay.c. All of
+#     src/external/ and src/platforms/ must be excluded or each of those .c
+#     files compiles twice (duplicate symbols) or for the wrong platform.
+#   * projects/, tools/ and examples/ are consumers, not the library.
+[dependencies.raylib]
+type = "git"
+url = "https://github.com/raysan5/raylib.git"
+tag = "6.2"
+commit = "02566453880e06bec97f5b8160fa6fe1e98397ca"
+exclude = [
+    # ── Unity-included by rcore.c / rglfw.c / raudio.c, never standalone ──
+    "src/external/",
+    "src/platforms/",
+
+    # ── Consumers, not the library ──
+    "examples/",
+    "projects/",
+    "tools/",
+]
+
+[compile]
+# From src/Makefile, PLATFORM_DESKTOP_GLFW on Linux, RAYLIB_LIBTYPE=SHARED:
+#   -std=gnu99 -D_DEFAULT_SOURCE  (Makefile uses _DEFAULT_SOURCE on native
+#                                  Linux so glibc ≥ 2.38 does not redirect
+#                                  sscanf & co. to __isoc23_*)
+#   -DPLATFORM_DESKTOP_GLFW -DGRAPHICS_API_OPENGL_33
+#   -D_GLFW_X11                   (GLFW_LINUX_ENABLE_X11 ?= TRUE; Wayland needs
+#                                  wayland-scanner at build time — same
+#                                  boundary as packages/glfw)
+#   -DBUILD_LIBTYPE_SHARED -fvisibility=hidden
+#                                 (RLAPI is __attribute__((visibility("default")))
+#                                  under BUILD_LIBTYPE_SHARED, so hidden keeps
+#                                  GLFW/miniaudio/stb internals out of dynsym
+#                                  and the public API in)
+#   -fno-strict-aliasing -Wno-missing-braces
+# -fstandalone-debug: Hub default for libraries whose public structs (Color,
+# Vector2, Rectangle, Camera2D…) are header-only aggregates the caller fills.
+flags = [
+    "-O2", "-fPIC",
+    "-std=gnu99",
+    "-fstandalone-debug",
+    "-fno-strict-aliasing",
+    "-Wno-missing-braces",
+    "-D_DEFAULT_SOURCE",
+    "-DPLATFORM_DESKTOP_GLFW",
+    "-DGRAPHICS_API_OPENGL_33",
+    "-D_GLFW_X11",
+    "-DBUILD_LIBTYPE_SHARED",
+]
+visibility = "hidden"
+parallel = true
+
+# rcore_desktop_glfw.c includes "GLFW/glfw3.h". This box also has the distro
+# /usr/include/GLFW/glfw3.h; the Makefile's -Iexternal/glfw/include must come
+# first so raylib's vendored GLFW header wins.
+include_dirs = [
+    ".replibuild_cache/deps/raylib/src/external/glfw/include",
+    ".replibuild_cache/deps/raylib/src",
+]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+# X11: raylib itself (not GLFW) calls Xlib directly — GetClipboardImage() in
+# platforms/rcore_desktop_glfw.c uses XInternAtom / XConvertSelection /
+# XCheckTypedEvent / XGetWindowProperty / XSync / XFree under _GLFW_X11.
+# Without it the .so fails the load-time resolve check on `XFree`.
+# Not GL: the vendored GLFW dlopens libGL/libX11 for its own use
+# (posix_module.c) and rlgl loads GL entry points via glfwGetProcAddress.
+# miniaudio (raudio) dlopens its backends (PulseAudio/ALSA/JACK) the same way.
+link_libraries = ["m", "pthread", "dl", "rt", "X11"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+# In-clone subpath: the shim is generated in the build cache, so a bare
+# "raylib.h" has no sibling to resolve against.
+shim_headers = ["src/raylib.h"]
+
+# ── Value macros ──
+# Version constants are the shim-header canary: test_deep.jl asserts them
+# against the pinned tag, so a shim that resolved to some other raylib.h fails.
+# Color constants (RED, RAYWHITE, …) are CLITERAL compound literals, not
+# scalars; the Julia side builds Color(r, g, b, a) directly instead.
+
+[wrap.macros.RAYLIB_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.RAYLIB_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.RAYLIB_VERSION_PATCH]
+ret = "int"
+
+[wrap.macros.RAYLIB_VERSION]
+ret = "const char*"
+
+[wrap.tier1]
+enable = false
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

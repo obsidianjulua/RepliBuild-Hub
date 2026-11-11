@@ -207,3 +207,9 @@ description = "msdfgen core — multi-channel signed distance field generator fo
 version = "1.13.0"
 language = "cpp"
 tags = ["sdf", "fonts", "graphics", "vector", "cpp"]
+
+[raylib]
+description = "raylib — simple game library: window/input, 2D shapes, textures, text, audio, cameras, collision (desktop GLFW + OpenGL 3.3, X11)"
+version = "6.2"
+language = "c"
+tags = ["games", "2d", "graphics", "gamedev", "audio", "input", "opengl"]
