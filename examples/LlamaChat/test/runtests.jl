@@ -12,8 +12,11 @@ const LC = LlamaChat
 # the tests must not depend on ollama's /var/lib/ollama, which may be gone.
 function test_model()
     haskey(ENV, "LLAMACHAT_TEST_MODEL") && return ENV["LLAMACHAT_TEST_MODEL"]
-    cands = filter(m -> !occursin("embed", lowercase(first(m))),
-                   LC.list_models(; roots = [LC.models_dir()]))
+    # Typed decision models (Laya, Nimble) are in the store too and are not
+    # chat models: told apart by their files, not their names.
+    chat(m) = !occursin("embed", lowercase(first(m))) &&
+              (try LC.model_kind(LC.resolve_model(first(m))) === :chat catch; false end)
+    cands = filter(chat, LC.list_models(; roots = [LC.models_dir()]))
     isempty(cands) && return nothing
     return first(cands[end])          # list_models sorts by size, descending
 end
@@ -318,6 +321,26 @@ end
     doc = sprint(io -> LC._show_markdown(io, "## Title\n\nbody text\n"))
     @test occursin("Title", doc) && occursin("body text", doc)
     @test findfirst("Title", doc).start < findfirst("body text", doc).start
+end
+
+@testset "dollar signs are money, not LaTeX or interpolation" begin
+    esc = LC._escape_dollars
+    plain(x) = Markdown.plain(Markdown.parse(esc(x)))
+    @test plain(raw"Cost $10k–$100k/kg") == "Cost \$10k–\$100k/kg\n"     # was LaTeX in the middle
+    @test plain(raw"| a | $10 |") == "| a | \$10 |\n"                   # was an interpolated 10
+    @test plain(raw"run it with $HOME set") == "run it with \$HOME set\n"
+    @test esc(raw"area $x^2$ here") == raw"area $x^2$ here"            # real maths stays maths
+    @test esc("```bash\necho \$5\n```") == "```bash\necho \$5\n```"     # code is left alone
+    @test esc(raw"set `$5` and $5") == raw"set `$5` and \$5"
+    @test esc(raw"already \$5") == raw"already \$5"
+    @test esc("no dollars") == "no dollars"
+    # A pair whose inside looks like maths stays maths, even starting with a digit.
+    @test esc(raw"$9.81 \times 2 \approx 19.6$ m/s") == raw"$9.81 \times 2 \approx 19.6$ m/s"
+    @test esc(raw"mass $\rightarrow$ curve") == raw"mass $\rightarrow$ curve"
+    # ***bold italic*** is literal to the parser; **_…_** is not.
+    @test esc("a ***both*** b") == "a **_both_** b"
+    @test Markdown.parse(esc("a ***both*** b")).content[1].content[2] isa Markdown.Bold
+    @test esc("```\n***x***\n```") == "```\n***x***\n```"
 end
 
 @testset "markdown parsing and fallback" begin
@@ -980,7 +1003,45 @@ end
         # A block that does not OPEN the reply is content too.
         @test LC._strip_think("Hi <think>x</think> there") == "Hi <think>x</think> there"
         @test LC._strip_think("") == ""
+        # Gemma 4's thought channel is a reasoning block too.
+        @test LC._strip_think("<|channel>thought\nhm\n<channel|>Answer.") == "Answer."
+        @test LC._strip_think("Say <channel|> literally.") == "Say <channel|> literally."
     end
+end
+
+# llama_chat_apply_template returns -1 for Gemma 4's template, and the ChatML
+# fallback made gemma4:26b answer in garbage. LlamaChat writes the format itself.
+@testset "Gemma 4 chat format (llama.cpp's matcher does not know it)" begin
+    tmpl = "{{- bos_token -}}{{- '<|turn>' + role + '\\n' }}…{{- '<turn|>\\n' -}}"
+    @test LC._is_gemma4(tmpl)
+    @test !LC._is_gemma4(nothing) && !LC._is_gemma4("{% for m in messages %}<|im_start|>")
+    # The C matcher really does refuse it, which is what made this necessary.
+    L = LC.L
+    m = [L.llama_chat_message(pointer("user"), pointer("hi"))]
+    buf = zeros(UInt8, 256)
+    @test GC.@preserve m buf L.llama_chat_apply_template(tmpl, m, 1, true, buf, Int32(256)) == -1
+
+    f(think, msgs, add) = String(LC._format_gemma4(think, msgs, add))
+    @test f(false, ["user" => " hi "], true) ==
+          "<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    @test f(true, ["user" => "hi"], true) ==
+          "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n"
+    @test f(false, ["system" => "Be brief.", "user" => "hi"], true) ==
+          "<|turn>system\nBe brief.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    # The KV-cache invariant: a finished turn renders as an extension of what
+    # was decoded — the transcript up to the generation prompt, then the reply.
+    for think in (false, true)
+        msgs = ["system" => "S", "user" => "q1"]
+        reply = think ? "<|channel>thought\nr\n<channel|>A1" : "A1"
+        decoded = f(think, msgs, true) * reply
+        next = f(think, [msgs; "assistant" => reply; "user" => "q2"], true)
+        @test startswith(next, decoded)
+        @test next[ncodeunits(decoded)+1:end] == "<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n" *
+                                                 (think ? "" : "<|channel>thought\n<channel|>")
+    end
+end
+
+@testset "terse mode (think = false), continued" begin
 
     if MODEL !== nothing
         @testset "the directive lands in the system prompt" begin
@@ -1171,6 +1232,160 @@ end
             end
         end
 
+        # q4's shape plus a vocabulary: the compute buffer is mostly the logits
+        # node, n_batch × n_vocab × f32, so the reserve has to see n_vocab.
+        qv = write_gguf(joinpath(dir, "qv.gguf"); arch = "qwen3", pad = 2 * 1024^3,
+              kv = Dict{String,Any}("qwen3.block_count" => 36,
+                                    "qwen3.attention.head_count" => 32,
+                                    "qwen3.attention.head_count_kv" => 8,
+                                    "qwen3.attention.key_length" => 128,
+                                    "qwen3.attention.value_length" => 128,
+                                    "qwen3.embedding_length" => 2560,
+                                    "qwen3.vocab_size" => 151936))
+
+        @testset "sliding-window layers are a fixed cost (Gemma 4)" begin
+            # One sliding layer (8 heads, 256+256, window 1024) and one full one
+            # (2 heads, 512+512). llama.cpp gives the sliding layer
+            # pad256(window + ubatch) cells whatever n_ctx is.
+            s = (kv_heads = [8, 2], swa = BitVector([true, false]), n_swa = 1024,
+                 k_len = 512, v_len = 512, k_len_swa = 256, v_len_swa = 256)
+            swa = 8 * 512 * 1536 * 2                  # 1024 + 512, already a multiple of 256
+            @test LC.kv_bytes(s, 32768; n_batch = 512) == swa + 2 * 1024 * 32768 * 2
+            @test LC.kv_bytes(s, 65536; n_batch = 512) - LC.kv_bytes(s, 32768; n_batch = 512) ==
+                  2 * 1024 * 32768 * 2                # only the full layer grows
+            @test LC.kv_bytes(s, 512; n_batch = 512) == (8 * 512 + 2 * 1024) * 512 * 2   # window > n_ctx
+            # A bigger ubatch widens the sliding cache.
+            @test LC.kv_bytes(s, 32768; n_batch = 2048) - LC.kv_bytes(s, 32768; n_batch = 512) ==
+                  8 * 512 * (3072 - 1536) * 2
+            # q8_0 stores 32 values in 34 bytes.
+            @test LC.kv_bytes(s, 32768; n_batch = 512, kv_type = :q8_0) ==
+                  round(Int, (LC.kv_bytes(s, 32768; n_batch = 512) ÷ 2) * 34 / 32)
+            @test LC.kv_bytes(s, 32768; n_batch = 512, kv_type = :f16) == LC.kv_bytes(s, 32768; n_batch = 512)
+            g4 = try LC.resolve_model("gemma4:26b") catch; nothing end
+            if g4 !== nothing
+                sh = LC.model_shape(g4)
+                @test count(sh.swa) == 25 && sh.n_swa == 1024 && sh.k_len_swa == 256
+                # 20 KiB/token past the window, not the 430 KiB of counting
+                # every layer at full context; and so a 32k window fits.
+                @test LC.kv_bytes(sh, 65537) - LC.kv_bytes(sh, 65536) == 20480
+                withenv("LLAMACHAT_VRAM_GB" => "20.5") do
+                    @test LC.auto_ctx(g4) == LC._CTX_CEILING
+                end
+            end
+        end
+
+        @testset "flash attention off: the scores' buffer, and when to pay it" begin
+            s = (n_head = 32,)
+            MiB = 1024^2
+            @test LC.attn_scores_bytes(s, 512, 32768, :on) == 0 && LC.attn_scores_bytes(s, 512, 32768, :auto) == 0
+            # Two copies from 1 GiB of scores. llama.cpp's own figures for
+            # qwen3:4b: 4194.01 MiB at 512/32768, 2114.01 at 512/16384.
+            @test LC.attn_scores_bytes(s, 512, 32768, :off) == 4096MiB
+            @test LC.attn_scores_bytes(s, 512, 16384, :off) == 2048MiB
+            # One copy (and the mask) up to 768 MiB: 562.01 MiB at 512/8192.
+            @test LC.attn_scores_bytes(s, 512, 8192, :off) == 512MiB + 12 * 512 * 8192
+            @test 562.01MiB - 0.5 * 1024MiB < LC.attn_scores_bytes(s, 512, 8192, :off) <= 562.01MiB
+            # qwen3.8:27b (24 heads): 832.01 MiB at 256/32768, 864.01 at 512/16384.
+            s24 = (n_head = 24,)
+            # The estimate covers both and overshoots neither by 5%.
+            @test 832.01MiB - 64.01MiB <= LC.attn_scores_bytes(s24, 256, 32768, :off) <= 1.05 * 832.01MiB
+            @test LC.attn_scores_bytes(s24, 512, 16384, :off) == LC.attn_scores_bytes(s24, 256, 32768, :off)
+            @test 864.01MiB - 0.02MiB <= LC.attn_scores_bytes(s24, 512, 16384, :off) <= 864.01MiB
+            @test LC.attn_scores_bytes(s24, 512, 32768, :off) == 2 * 1536MiB     # past one copy
+            # Unmeasured between 768 MiB and 1 GiB: counted as two.
+            @test LC.attn_scores_bytes(s, 512, 12800, :off) == 2 * 800MiB
+            @test LC._batch_floor(:off) == 256 && LC._batch_floor(:on) == 512
+            for (m, want) in (("gemma4:26b", :off), ("qwen3-coder", :on))
+                p = try LC.resolve_model(m) catch; nothing end
+                p === nothing && continue
+                withenv("LLAMACHAT_VRAM_GB" => "20.5") do
+                    @test LC.auto_flash_attn(p) === want
+                    @test LC.auto_flash_attn(p; kv_type = :q8_0) === :on     # quantised V needs it
+                    on  = LC.plan_offload(p; n_ctx = 16384, n_batch = 512, flash_attn = :on)
+                    off = LC.plan_offload(p; n_ctx = 16384, n_batch = 512, flash_attn = :off)
+                    @test off.compute > on.compute                             # the scores cost VRAM…
+                    @test off.compute - on.compute == LC.attn_scores_bytes(off.shape, 512, 16384, :off)
+                    # The largest window the plan offers is one it then accepts.
+                    for nb in (256, 512, 1024)
+                        c = LC.plan_offload(p; n_ctx = 8192, n_batch = nb, flash_attn = :off).max_ctx_on_gpu
+                        c > 0 || continue
+                        @test LC.plan_offload(p; n_ctx = c, n_batch = nb, flash_attn = :off).why === :fits
+                        @test LC.plan_offload(p; n_ctx = c + 1024, n_batch = nb, flash_attn = :off).why !== :fits
+                    end
+                end
+            end
+        end
+
+        @testset "compute reserve: n_batch × n_vocab" begin
+            # The token array's LENGTH survives the header skipping its contents.
+            tv = joinpath(dir, "tv.gguf")
+            open(tv, "w") do io
+                wstr(x) = (write(io, UInt64(sizeof(x))); write(io, codeunits(x)))
+                write(io, b"GGUF"); write(io, UInt32(3)); write(io, UInt64(0)); write(io, UInt64(3))
+                wstr("general.architecture");  write(io, UInt32(8)); wstr("qwen3")
+                wstr("qwen3.block_count");     write(io, UInt32(4)); write(io, UInt32(2))
+                wstr("tokenizer.ggml.tokens"); write(io, UInt32(9)); write(io, UInt32(8))
+                write(io, UInt64(5000)); for i in 1:5000; wstr("t$i"); end
+            end
+            @test LC.model_shape(tv).n_vocab == 5000
+            @test LC.model_shape(q4).n_vocab == 0            # unknown: the floor alone
+
+            sv = LC.model_shape(qv)
+            @test sv.n_vocab == 151936
+            # Vulkan0 compute buffers measured on the B60 (plan.jl's table):
+            # qwen3-coder shares this vocab — 300.75 MiB at 512, 1643.05 at 2048.
+            MiB = 1024^2
+            @test LC.compute_reserve(sv, 512) == LC._COMPUTE_RESERVE  # floor binds at 512
+            @test LC.compute_reserve(sv, 512)  >= 300.75  * MiB
+            @test LC.compute_reserve(sv, 2048) >= 1643.05 * MiB
+            # gemma4:26b was over the old flat 0.5 GiB even at 512.
+            @test LC.compute_reserve((n_vocab = 262144,), 512)  >= 535.66  * MiB
+            @test LC.compute_reserve((n_vocab = 262144,), 2048) >= 2512.08 * MiB
+            @test LC.compute_reserve((n_vocab = 248320,), 512)  >= 505.00  * MiB
+            @test LC.compute_reserve((n_vocab = 248320,), 2048) >= 2604.19 * MiB
+            p = LC.plan_offload(qv; n_ctx = 1024, n_batch = 2048)
+            @test p.compute == LC.compute_reserve(sv, 2048)
+            @test p.vram_needed == sv.file_bytes + LC.kv_bytes(sv, 1024) + p.compute
+        end
+
+        @testset "auto_batch: context first, then speed" begin
+            # Room to spare: the biggest batch costs no window.
+            withenv("LLAMACHAT_VRAM_GB" => "16") do
+                @test LC.auto_batch(qv) == 2048
+            end
+            # Tight: 2048's buffer would come out of the window, so it steps
+            # down until the window is what 512 gets (here, all the way).
+            withenv("LLAMACHAT_VRAM_GB" => "6.5") do
+                nb = LC.auto_batch(qv)
+                @test nb < 2048
+                @test LC.auto_ctx(qv; n_batch = nb) >= LC.auto_ctx(qv; n_batch = 512)
+                # An explicit small window leaves room the batch can use.
+                @test LC.auto_batch(qv; n_ctx = 8192) == 2048
+            end
+            # Not on the GPU at 512: no batch helps it onto the card.
+            withenv("LLAMACHAT_VRAM_GB" => "1") do
+                @test LC.auto_batch(qv) == 512
+            end
+            # Flash attention off: the scores scale with n_batch × n_ctx, so
+            # the steps go down to 256 and the widest window wins.
+            withenv("LLAMACHAT_VRAM_GB" => "8.5") do
+                nb = LC.auto_batch(qv; flash_attn = :off)
+                @test nb == 256
+                @test LC.auto_ctx(qv; n_batch = 256, flash_attn = :off) >
+                      LC.auto_ctx(qv; n_batch = 512, flash_attn = :off)
+                @test LC.auto_batch(qv; flash_attn = :on) >= 512         # never below 512 with it on
+                @test LC.auto_batch(qv; n_ctx = 4096, flash_attn = :off) == 2048
+            end
+            q38 = try LC.resolve_model("qwen3.8:27b") catch; nothing end
+            if q38 !== nothing
+                withenv("LLAMACHAT_VRAM_GB" => "20.4") do
+                    @test LC.auto_flash_attn(q38) === :off
+                    @test LC.auto_batch(q38; flash_attn = :off) == 256
+                    @test LC.auto_ctx(q38; n_batch = 256, flash_attn = :off) == LC._CTX_CEILING
+                end
+            end
+        end
+
         @testset "explicit over-budget is refused, not warned" begin
             withenv("LLAMACHAT_VRAM_GB" => "5") do
                 p = LC.plan_offload(q4; n_ctx = 32768, requested = 99)
@@ -1290,6 +1505,8 @@ else
         @test GM.split_think("plain answer") == (nothing, "plain answer", false)
         @test GM.split_think("<think>\nhm\n</think>\n\nAnswer.") == ("hm", "Answer.", false)
         @test GM.split_think("\n<think>still going") == ("still going", "", true)
+        @test GM.split_think("<|channel>thought\nhm\n<channel|>Answer.") == ("hm", "Answer.", false)
+        @test GM.split_think("<|chan") == (nothing, "", false)   # Gemma 4's tag arriving
         @test GM.split_think("<thi") == (nothing, "", false)       # tag arriving in pieces
         @test GM.split_think("<think></think>Hi") == ("", "Hi", false)
         # Only a block that OPENS the reply is reasoning.
@@ -1318,12 +1535,354 @@ else
         @test t isa GM.TableBlk && t.header == ["A", "B"] && length(t.rows) == 1
         @test only(GM.parse_md("---\n")) isa GM.Rule
         @test only(GM.parse_md("> q\n")) isa GM.Quote
-        # 16-bit ImWchar: emoji cannot be drawn, so they are dropped, not shown as U+FFFD.
+        # No usable emoji font (16-bit ImWchar, or only Noto's bitmap strike):
+        # emoji are dropped, not shown as U+FFFD.
         @test GM.display_text("📊 Summary 1️⃣ ✓") == " Summary 1 ✓"
         # A streaming reply re-parses only the segment that changed.
         a = GM.segments("para one\n\npara two", GM.Seg[])
         b = GM.segments("para one\n\npara two grows", a)
         @test length(b) == 2 && b[1] === a[1] && b[2] !== a[2]
+    end
+
+    # A GGUF header that says "typed decision model", and a stand-in for the
+    # `laya daemon`: the ready line, then one canned answer per request line.
+    function fake_typed_gguf(path, family; max_opts = 16)
+        open(path, "w") do io
+            wstr(x) = (write(io, UInt64(sizeof(x))); write(io, codeunits(x)))
+            kv = Any["general.architecture" => "ggmlc", "laya.family" => family,
+                     "laya.model_name" => "laya-$family", "laya.max_len" => 1024, "laya.max_opts" => max_opts]
+            write(io, b"GGUF"); write(io, UInt32(3)); write(io, UInt64(0)); write(io, UInt64(length(kv)))
+            for (k, v) in kv
+                wstr(k)
+                v isa String ? (write(io, UInt32(8)); wstr(v)) : (write(io, UInt32(4)); write(io, UInt32(v)))
+            end
+            write(io, family)                       # so two families hash apart
+        end
+        return path
+    end
+    function fake_laya_bin(dir)
+        bin = joinpath(dir, "fake-laya")
+        write(bin, raw"""
+        #!/bin/sh
+        case "$2" in *broken*) echo "cannot load $2" >&2; exit 3 ;; esac
+        echo '{"status":"ready","model":"laya"}'
+        while IFS= read -r line; do
+          case "$line" in
+            *boom*) echo '{"error":"JSON parse error: bad literal at 0"}' ;;
+            *) echo '{"model":"laya","family":"english","answers":{"churn_risk":{"type":"noul","confidence":0.7,"noul":0.7},"intent":{"type":"choice","confidence":0.5,"choice":"b","probabilities":{"a":0.2,"b":0.8}},"frustration":{"type":"score","confidence":0.3,"score":1.4,"legend":{"0":"lo","1":"mid","2":"hi"},"probabilities":{"0":0.1,"1":0.4,"2":0.5}}},"usage":{"input_tokens":42,"output_tokens":0,"latency_ms":12.5}}' ;;
+          esac
+        done
+        """)
+        chmod(bin, 0o755)
+        return bin
+    end
+    TYPED_QS = """{"intent": {"type": "choice", "instructions": "Which?", "criteria": {"b": "second", "a": null}},
+                         "frustration": {"type": "score", "instructions": "How much?", "criteria": ["lo", "mid", "hi"]},
+                         "churn_risk": {"type": "noul", "instructions": "Leaving?"}}"""
+
+    @testset "typed decisions: the format, the engine, the store" begin
+        dir = mktempdir()
+        # A chat model's header, for telling the two kinds apart.
+        q4 = joinpath(mktempdir(), "chat.gguf")
+        open(q4, "w") do io
+            wstr(x) = (write(io, UInt64(sizeof(x))); write(io, codeunits(x)))
+            write(io, b"GGUF"); write(io, UInt32(3)); write(io, UInt64(0)); write(io, UInt64(2))
+            wstr("general.architecture"); write(io, UInt32(8)); wstr("qwen3")
+            wstr("qwen3.block_count"); write(io, UInt32(4)); write(io, UInt32(2))
+        end
+        # Objects keep file order: option order is input to the model.
+        o = LC._parse_json("""{"z": 1, "a": {"y": null, "b": [1, 2]}, "m": "s"}""")
+        @test collect(keys(o)) == ["z", "a", "m"] && collect(keys(o["a"])) == ["y", "b"]
+        @test LC.JSON.json(o) == """{"z":1,"a":{"y":null,"b":[1,2]},"m":"s"}"""
+        o["z"] = 2
+        @test collect(keys(o)) == ["z", "a", "m"] && o["z"] == 2 && !haskey(o, "q")
+
+        qs = LC.parse_questions(LC._parse_json(TYPED_QS))
+        @test [q.id for q in qs] == ["intent", "frustration", "churn_risk"]
+        @test qs[1] isa LC.Choice && qs[1].criteria == ["b" => "second", "a" => nothing]   # as written, not sorted
+        @test qs[2] isa LC.Score && qs[2].criteria == ["lo", "mid", "hi"]
+        @test qs[3] isa LC.Noul && qs[3].no === nothing && qs[3].yes === nothing
+        @test LC.n_options.(qs) == [2, 3, 2] && LC.question_type.(qs) == [:choice, :score, :noul]
+        # Out and back in, unchanged.
+        @test LC.JSON.json(LC.questions_json(LC.parse_questions(LC.questions_json(qs)))) == LC.JSON.json(LC.questions_json(qs))
+        n = LC.parse_questions(LC._parse_json("""{"q": {"type": "noul", "instructions": "x", "criteria": {"true": "yes!", "false": "no!"}}}"""))[1]
+        @test n.no == "no!" && n.yes == "yes!"
+
+        # Every way a request can be wrong is refused with the field named. The
+        # engine itself answers a question typed "nope" with a confident "".
+        bad(json) = try LC.parse_questions(LC._parse_json(json)); nothing catch e; e end
+        for (json, param, word) in (
+                ("[1]", "questions", "object"),
+                ("{}", "questions", "no questions"),
+                ("""{"q": 3}""", "questions.q", "object"),
+                ("""{"q": {"instructions": "x"}}""", "questions.q.type", "missing"),
+                ("""{"q": {"type": "nope", "instructions": "x"}}""", "questions.q.type", "\"nope\""),
+                ("""{"q": {"type": "noul"}}""", "questions.q.instructions", "sentence"),
+                ("""{"q": {"type": "noul", "instructions": " "}}""", "questions.q.instructions", "sentence"),
+                ("""{"q": {"type": "noul", "instructions": "x", "options": []}}""", "questions.q.options", "not a field"),
+                ("""{"q": {"type": "choice", "instructions": "x"}}""", "questions.q.criteria", "label"),
+                ("""{"q": {"type": "choice", "instructions": "x", "criteria": {"a": null}}}""", "questions.q.criteria", "2 to 16"),
+                ("""{"q": {"type": "choice", "instructions": "x", "criteria": {"a": null, "b": 4}}}""", "questions.q.criteria.b", "string or null"),
+                ("""{"q": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]}}""", "questions.q.criteria", "object"),
+                ("""{"q": {"type": "score", "instructions": "x", "criteria": {"a": null, "b": null}}}""", "questions.q.criteria", "list"),
+                ("""{"q": {"type": "score", "instructions": "x", "criteria": ["only"]}}""", "questions.q.criteria", "2 to 16"),
+                ("""{"q": {"type": "noul", "instructions": "x", "criteria": {"maybe": "y"}}}""", "questions.q.criteria.maybe", "only"))
+            e = bad(json)
+            @test e isa LC.TypedFormatError && e.param == param && occursin(word, e.msg)
+        end
+        many = "{" * join(("\"l$i\": null" for i in 1:17), ", ") * "}"
+        @test bad("""{"q": {"type": "choice", "instructions": "x", "criteria": $many}}""").param == "questions.q.criteria"
+        @test sprint(showerror, bad("""{"q": 3}""")) == "questions.q: must be an object with `type` and `instructions`"
+
+        # The four shapes a JSON file can have.
+        r = LC.parse_typed("""{"id": "1", "state": {"m": "hi"}, "questions": $TYPED_QS}""")
+        @test r.kind === :request && length(r.states) == 1 && r.states[1]["m"] == "hi" && length(r.questions) == 3
+        b = LC.parse_typed("""{"states": [{"l": 1}, "plain", {"l": 3}], "questions": $TYPED_QS}""")
+        @test b.kind === :batch && length(b.states) == 3 && b.states[2] == "plain"
+        q = LC.parse_typed(TYPED_QS)
+        @test q.kind === :questions && isempty(q.states) && length(q.questions) == 3
+        @test LC.parse_typed("""{"questions": $TYPED_QS}""").kind === :questions
+        s = LC.parse_typed("""{"ticket": 4, "message": "late"}""")
+        @test s.kind === :state && isempty(s.questions) && collect(keys(s.states[1])) == ["ticket", "message"]
+        pt = LC.parse_typed("  Where is my refund?\n")
+        @test pt.kind === :state && pt.states == ["Where is my refund?"]          # not JSON: a plain-text state
+        @test LC.parse_typed("""{"type": "x", "note": {"type": "memo"}}""").kind === :state   # looks like one, is not
+        @test_throws LC.TypedFormatError LC.parse_typed("""{"state": 1, "questions": {"q": {"type": "pick", "instructions": "x"}}}""")
+        @test_throws LC.TypedFormatError LC.parse_typed("""{"states": [], "questions": $TYPED_QS}""")
+        f = joinpath(dir, "req.json"); write(f, """{"state": "s", "questions": $TYPED_QS}""")
+        @test LC.load_typed(f).kind === :request
+
+        # The model file: told apart by its header, and into the store by name.
+        g1 = fake_typed_gguf(joinpath(dir, "laya_english.gguf"), "english")
+        g2 = fake_typed_gguf(joinpath(dir, "laya_typed.gguf"), "typed-decisions"; max_opts = 2)
+        @test LC.model_kind(g1) === :typed && LC.model_kind(q4) === :chat
+        @test LC.model_kind(joinpath(dir, "req.json")) === :chat           # not a GGUF at all
+        @test LC.typed_info(g2) == (family = "typed-decisions", name = "laya-typed-decisions",
+                                    max_len = 1024, head_max_len = 192, max_opts = 2, max_batch = 8)
+        write(joinpath(dir, "other.gguf"), read(q4))                        # a chat model in the same folder
+        root = joinpath(dir, "store")
+        withenv("LLAMACHAT_MODELS" => root, "OLLAMA_MODELS" => joinpath(dir, "no-ollama")) do
+            @test LC.bring_laya(; from = dir) == ["laya:english", "laya:typed-decisions"]
+            @test sort(first.(LC.list_models())) == ["laya:english", "laya:typed-decisions"]
+            blob = LC.resolve_model("laya:typed-decisions")
+            @test read(blob) == read(g2) && startswith(blob, joinpath(root, "blobs", "sha256-"))
+            @test stat(blob).nlink == 2                                 # a hard link, not a second copy
+            @test LC.bring_laya(; from = dir) == ["laya:english", "laya:typed-decisions"]   # again: the same store
+            @test length(readdir(joinpath(root, "blobs"))) == 2
+            @test LC.add_model(q4, "me/tiny:q4") == "me/tiny:q4" && isfile(LC.resolve_model("me/tiny:q4"))
+            @test_throws ErrorException LC.add_model(f, "x")           # not a GGUF
+            @test_throws ErrorException LC.bring_laya(; from = joinpath(dir, "nope"))
+            err = try LC.ChatSession("laya:english"; log = devnull); nothing catch e; e end
+            @test err isa ErrorException && occursin("typed decision model", err.msg)
+
+            withenv("LLAMACHAT_LAYA" => fake_laya_bin(dir)) do
+                log = IOBuffer()
+                ts = LC.open_model("laya:english"; log = log, n_ctx = 2048, think = false)   # chat keywords: ignored
+                @test ts isa LC.TypedSession && ts.info.family == "english" && ts.isopen
+                @test occursin("typed decisions", String(take!(log)))
+                @test LC.placement(ts) == "typed decisions on $(LC.laya_device())"
+                d = LC.decide(ts, LC.ODict("message" => "hi"), TYPED_QS)
+                @test d isa LC.Decisions && d.input_tokens == 42 && d.latency_ms == 12.5 && length(d) == 3
+                # Answers come back in the QUESTIONS' order, options in theirs.
+                @test [a.id for a in d] == ["intent", "frustration", "churn_risk"]
+                @test d["intent"].value == "b" && d["intent"].probabilities == ["b" => 0.8, "a" => 0.2]
+                @test d["frustration"].value == 1.4 && d["frustration"].probabilities == ["lo" => 0.1, "mid" => 0.4, "hi" => 0.5]
+                @test d["churn_risk"].value == 0.7 && last.(d["churn_risk"].probabilities) ≈ [0.3, 0.7]
+                @test LC.headline.(d.answers) == ["b  0.8", "1.4 of 2", "yes  0.7"]
+                @test_throws KeyError d["nope"]
+                shown = sprint(show, MIME"text/plain"(), d)
+                @test occursin("[intent] choice  b  0.8", shown) && occursin("###################.....  0.8     b", shown)
+                # A batch file: one Decisions a state.
+                write(f, """{"states": ["one", "two"], "questions": $TYPED_QS}""")
+                @test length(LC.decide(ts, LC.load_typed(f))) == 2 && ts.n_decided == 3
+                @test_throws LC.TypedFormatError LC.decide(ts, LC.parse_typed(TYPED_QS))        # questions, no state
+                @test_throws LC.TypedFormatError LC.decide(ts, "s", """{"q": {"type": "nope", "instructions": "x"}}""")
+                e = try LC.decide(ts, "boom", TYPED_QS); nothing catch e; e end
+                @test e isa ErrorException && occursin("JSON parse error", e.msg)   # the engine's own error, passed on
+                @test LC.decide(ts, "after", TYPED_QS) isa LC.Decisions             # and the session survives it
+                LC.close!(ts)
+                @test !ts.isopen && !process_running(ts.proc) && !isfile(ts.errlog)
+                @test LC.close!(ts) === ts
+                @test_throws ErrorException LC.decide(ts, "s", TYPED_QS)
+                # The model's own option limit, from its header.
+                t2 = LC.TypedSession("laya:typed-decisions"; log = devnull)
+                e = try LC.decide(t2, "s", TYPED_QS); nothing catch e; e end
+                @test e isa LC.TypedFormatError && e.param == "questions.frustration.criteria"
+                LC.close!(t2)
+                @test length(LC.decide("laya:english", f)) == 2                     # load, run a file, free
+                # A daemon that dies says why.
+                gb = fake_typed_gguf(joinpath(dir, "broken.gguf"), "english")
+                e = try LC.TypedSession(gb; log = devnull); nothing catch e; e end
+                @test e isa ErrorException && occursin("did not start", e.msg) && occursin("cannot load", e.msg)
+                @test_throws ErrorException LC.TypedSession(q4; log = devnull)      # a chat model
+            end
+        end
+    end
+
+    @testset "typed decisions from a language model's logits (Nimble)" begin
+        # The prompt contract, written out: context, the whole schema with a
+        # letter per option, then the one field asked for.
+        qs = LC.parse_questions(LC._parse_json("""{
+            "intent": {"type": "choice", "instructions": "What is wanted in `m`?", "criteria": {"refund": "money <back>", "other": null}},
+            "level":  {"type": "score",  "instructions": "How bad?", "criteria": ["fine", "bad"]},
+            "leave":  {"type": "noul",   "instructions": "Leaving?", "criteria": {"true": "says so"}}}"""))
+        shared, tails = LC.nimble_prompt(LC.ODict("m" => "a \"q\" <b>", "n" => Any[1, 2.5, true, nothing]), qs)
+        @test startswith(shared, "<|im_start|>system\nClassify the context using the supplied schema.")
+        @test occursin("one-letter code, without reasoning or explanation.<|im_end|>\n<|im_start|>user\n{\"context\": ", shared)
+        # The state is given as JSON TEXT inside a JSON string, Python-spaced, with < and > escaped.
+        user = LC.JSON.parse(shared[last(findfirst("<|im_start|>user\n", shared))+1:end])     # the user turn is one JSON object
+        @test user["context"] == "{\"m\": \"a \\\"q\\\" <b>\", \"n\": [1, 2.5, true, null]}" && length(user["schema"]) == 3
+        @test !occursin('<', split(shared, "<|im_start|>user\n")[2]) && occursin("\\u003cb\\u003e", shared)   # no raw < or > from data
+        @test occursin("""{"name": "intent", "description": "What is wanted in `m`?", "choices": [{"code": "A", "value": "refund", "description": "money \\u003cback\\u003e"}, {"code": "B", "value": "other"}]}""", shared)
+        @test occursin("""{"name": "level", "description": "How bad?", "choices": [{"code": "A", "value": "0", "description": "fine"}, {"code": "B", "value": "1", "description": "bad"}]}""", shared)
+        @test endswith(shared, """{"name": "leave", "description": "Leaving?", "choices": [{"code": "A", "value": false}, {"code": "B", "value": true, "description": "says so"}]}]}""")
+        @test tails == ["\n\nRequested field: \"$id\"<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n" for id in ("intent", "level", "leave")]
+        @test occursin("""{"context": "plain \\u003ctext\\u003e", "schema": [""", LC.nimble_prompt("plain <text>", qs)[1])
+        @test LC._pyjson(LC.ODict("a" => "é\n\t", "b" => 3.0, "c" => LC.ODict())) == "{\"a\": \"é\\n\\t\", \"b\": 3.0, \"c\": {}}"
+
+        # Probabilities → the typed answer, with the same confidence rules as Laya's.
+        @test LC._softmax([0.0, 0.0]) == [0.5, 0.5] && sum(LC._softmax([1000.0, 999.0, -5.0])) ≈ 1
+        a = LC._logit_answer(qs[1], [0.8, 0.2])
+        @test a.type === :choice && a.value == "refund" && a.probabilities == ["refund" => 0.8, "other" => 0.2]
+        @test a.confidence ≈ 1 + (0.8log(0.8) + 0.2log(0.2)) / log(2)
+        s = LC._logit_answer(qs[2], [0.25, 0.75])
+        @test s.type === :score && s.value ≈ 0.75 && s.probabilities == ["fine" => 0.25, "bad" => 0.75]
+        n = LC._logit_answer(qs[3], [0.1, 0.9])
+        @test n.type === :noul && n.value == 0.9 && n.confidence == 0.9 && LC.headline(n) == "yes  0.9"
+        @test LC._logit_answer(qs[1], [1.0, 0.0]).confidence == 1
+
+        # How runs are cut for the GPU: whatever the cut, every token once, in order.
+        for nb in (64, 256, 2048), k in (1, 7, 8, 9, 13, 31, 32, 40, 127, 128, 129, 159, 257, 375, 424, 1000, 2049, 5000)
+            @test sum(LC._split_run(k, nb)) == k && maximum(LC._split_run(k, nb)) <= max(nb, 8)
+            @test sum(LC._prompt_runs(k, nb)) == k && maximum(LC._prompt_runs(k, nb)) <= nb
+            @test LC._prompt_runs(k, nb, false) == [fill(nb, k ÷ nb); k % nb == 0 ? Int[] : [k % nb]]   # CPU: plain batches
+        end
+        @test LC._split_run(13, 2048) == [8, 5] && LC._split_run(130, 2048) == [128, 2]
+        @test LC._split_run(159, 2048) == [128, 8, 8, 8, 7] && LC._split_run(375, 2048) == [375]
+        @test LC._prompt_runs(20, 2048) == [8, 8, 4] && LC._prompt_runs(32, 2048) == [32]
+        @test LC._prompt_runs(129, 2048) == [128, 1] && LC._prompt_runs(144, 2048) == [128, 8, 8]
+        @test LC._prompt_runs(145, 2048) == [145] && LC._prompt_runs(2060, 2048) == [2048, 8, 4]
+
+        # The hybrid thinking switch is read from the template, not the name.
+        sw = "{%- if enable_thinking is defined and enable_thinking is false %}{{- '<think>\\n\\n</think>\\n\\n' }}{%- else %}{{- '<think>\\n' }}{%- endif %}"
+        @test LC._has_think_switch(sw) && !LC._has_think_switch("{{- '<|im_start|>assistant\\n<think>\\n' }}") && !LC._has_think_switch(nothing)
+        @test LC._system_for("Be kind.", false, sw) == "Be kind." && LC._system_for("", false, sw) == ""
+        @test LC._system_for("", false, nothing) == LC._TERSE_DIRECTIVE
+
+        nim = try LC.resolve_model("nimble") catch; nothing end
+        if nim === nothing
+            @warn "no nimble model — skipping the logits decision tests"
+        else
+            @test LC.model_kind(nim) === :typed && LC.decision_template(nim) !== nothing
+            ls = LC.open_model("nimble"; log = devnull, think = false, temp = 0.0)
+            try
+                @test ls isa LC.LogitSession && ls.chat.n_ctx == LC.NIMBLE_CTX && ls.info.max_opts == 26
+                @test length(ls.codes) == 26 && allunique(ls.codes)
+                st = LC.ODict("message" => "This is the third time the webhook failed this week. If you cannot fix it today I am moving to a competitor.")
+                q = LC._parse_json("""{
+                    "intent": {"type": "choice", "instructions": "What does the customer want in `message`?",
+                               "criteria": {"refund": "money returned", "technical_help": "a bug or outage fixed", "other": null}},
+                    "frustration": {"type": "score", "instructions": "How frustrated does `message` sound?", "criteria": ["calm", "annoyed", "very angry"]},
+                    "churn_risk": {"type": "noul", "instructions": "Does `message` say the customer may leave?"}}""")
+                d = LC.decide(ls, st, q)
+                @test [x.id for x in d] == ["intent", "frustration", "churn_risk"]
+                @test all(x -> sum(last.(x.probabilities)) ≈ 1, d.answers)
+                @test d["intent"].value == "technical_help" && d["churn_risk"].value > 0.9 && d["frustration"].value > 1
+                # The shared part was decoded once: fewer tokens evaluated than three whole prompts.
+                @test ls.reuse === :checkpoint && d.input_tokens < d.raw["usage"]["prompt_tokens"] ÷ 2
+                # Going back to the checkpoint gives what decoding every prompt from scratch gives.
+                ls.reuse = :redecode
+                d2 = LC.decide(ls, st, q)
+                @test d2.input_tokens == d2.raw["usage"]["prompt_tokens"]
+                @test all(isapprox.(last.(d["intent"].probabilities), last.(d2["intent"].probabilities); atol = 2e-3))
+                @test isapprox(d["churn_risk"].value, d2["churn_risk"].value; atol = 2e-3)
+                ls.reuse = :checkpoint
+                e = try LC.decide(ls, "s", """{"q": {"type": "nope", "instructions": "x"}}"""); nothing catch e; e end
+                @test e isa LC.TypedFormatError
+                # The same weights chat, and with the model's own switch the reply is the answer.
+                c = ls.chat
+                r = LC.chat(c, "What is 17*23? Reply with the number only."; stream = false, io = devnull, max_tokens = 64)
+                @test occursin("391", r.text) && !occursin("<think>", r.text) && r.n_gen < 16
+                r2 = LC.chat(c, "Add 9 to that. Number only."; stream = false, io = devnull, max_tokens = 64)
+                @test occursin("400", r2.text) && r2.n_prompt < 40          # the cache was extended, not rebuilt
+                @test startswith(last(c.history[2]), LC._NO_THINK_PREFILL)
+                @test LC.decide(ls, st, q)["intent"].value == "technical_help"   # and decisions after a chat
+                @test isempty(c.history) && c.n_past == 0                    # which cleared it
+            finally
+                LC.close!(ls)
+            end
+        end
+    end
+
+    @testset "places, notes and stats: the parts that need no window" begin
+        dir = mktempdir()
+        a, b = mkpath(joinpath(dir, "one")), mkpath(joinpath(dir, "two's"))
+        pf = joinpath(dir, "places")
+        write(pf, "# my folders\nFirst = $a/\n\nSecond=$b   # the other\nGone = $dir/nope\nnot a line\n")
+        pl = GM.load_places(pf)
+        @test [p.name for p in pl] == ["First", "Second"]         # in file order; a missing folder is left out
+        @test pl[1].dir == a && pl[2].dir == b
+        d = GM.load_places(joinpath(dir, "no-such-file"))         # no file: the defaults
+        @test [p.name for p in d] == [p.name for p in GM.default_places() if isdir(p.dir)]
+        @test first(GM.default_places()).name == "RepliBuild" && GM.default_places()[2].name == "Hub"
+        @test GM.default_places()[2].dir == rstrip(normpath(joinpath(@__DIR__, "..", "..", "..")), '/')
+        # A window started from $HOME opens its terminal in the first place.
+        cd(homedir()) do
+            @test GM.start_dir(nothing, pl) == a
+            @test GM.start_dir(nothing, GM.Place[]) == homedir()
+        end
+        cd(b) do
+            @test GM.start_dir(nothing, pl) == pwd()
+        end
+        @test GM.start_dir(dir, pl) == dir
+
+        @test GM.term_kind(GM.julia_cmd()) === :julia && GM.term_kind(`zsh`) === :shell
+        @test GM.term_kind(`htop`) === :other
+        @test "--project=@." in GM.julia_cmd().exec
+        @test GM.cd_line(:julia, a) == "cd($(repr(a)))\r"
+        @test GM.cd_line(:shell, b) == " cd -- '$(dir)/two'\\''s'\r"   # a quote in the name survives
+
+        @test GM.system_with_notes("", "  \n") == ""
+        @test GM.system_with_notes("Be kind.", "") == "Be kind."
+        s = GM.system_with_notes("Be kind.", "I use Arch.\n")
+        @test startswith(s, "Be kind.\n\n" * GM.NOTES_HEADER) && endswith(s, "\n\nI use Arch.")
+        @test GM.system_with_notes("", "I use Arch.") == GM.NOTES_HEADER * "\n\nI use Arch."
+        nf = joinpath(dir, "cfg", "notes.md")
+        @test GM.read_notes(nf) == ""
+        GM.write_notes("héllo", nf)
+        @test GM.read_notes(nf) == "héllo"
+
+        @test GM.cpu_jiffies("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3\n") == (850.0, 1000.0)
+        @test GM.mem_bytes("MemTotal:       1000 kB\nMemFree: 10 kB\nMemAvailable:    250 kB\n") == (750 * 1024.0, 1000 * 1024.0)
+
+        # A card as Intel's xe driver publishes it.
+        dev = mkpath(joinpath(dir, "drm", "card0", "device"))
+        mkpath(joinpath(dir, "drm", "card0-DP-1"))
+        mkpath(joinpath(dev, "driver"))
+        hw = mkpath(joinpath(dev, "hwmon", "hwmon5"))
+        idle = joinpath(mkpath(joinpath(dev, "tile0", "gt0", "gtidle")), "idle_residency_ms")
+        put(f, v) = write(joinpath(hw, f), string(v, "\n"))
+        put("name", "xe"); put("temp2_label", "pkg"); put("temp2_input", 61000)
+        put("temp3_label", "vram"); put("temp3_input", 58000)
+        put("energy1_input", 1_000_000); put("fan1_input", 1200)
+        write(idle, "5000\n")
+        g = GM.find_gpu(joinpath(dir, "drm"))
+        @test g.name == "xe" && g.idle_ms == idle && g.busy_pct === nothing
+        @test g.temp == joinpath(hw, "temp2_input") && g.temp_vram == joinpath(hw, "temp3_input")
+        @test GM.find_gpu(joinpath(dir, "nothing-here")) === nothing
+        st = GM.Stats(); st.gpu = g; st.t = 0.0
+        GM.sample!(st, 100.0; tokens = 10)
+        @test isnan(st.gpu_busy) && isnan(st.gpu_w) && st.tps == 0     # a rate needs two samples
+        @test st.gpu_temp == 61 && st.vram_temp == 58 && st.fan == 1200
+        write(idle, "5250\n"); put("energy1_input", 51_000_000)        # 1 s later: idle 250 ms, 50 J
+        GM.sample!(st, 101.0; tokens = 30)
+        @test st.gpu_busy ≈ 0.75 && st.gpu_w ≈ 50 && st.tps ≈ 20
+        @test st.hist_gpu == Float32[0, 0.75] && st.hist_tps == Float32[0, 20]
+        @test 0 <= st.cpu <= 1 && st.ram_total > st.ram_used > 0       # this machine's /proc
+        GM.sample!(st, 102.0)                                          # not generating: no rate
+        @test st.tps == 0
+        for i in 1:200; GM.sample!(st, 102.0 + i); end
+        @test length(st.hist_gpu) == GM.HIST
     end
 
     if isempty(get(ENV, "DISPLAY", ""))
@@ -1332,7 +1891,10 @@ else
         @warn "GUI window tests need julia -t 2 or more — skipping"
     else
         W, H = 900, 640
-        app = GM.App(; width = W, height = H, visible = false, vsync = false)
+        envdir = mktempdir()            # this window's notes and places, not the user's
+        PLACES = [GM.Place(n, mkpath(joinpath(envdir, n))) for n in ("Alpha", "Beta")]
+        app = GM.App(; width = W, height = H, visible = false, vsync = false, theme = "Dark",
+                     notes_file = joinpath(envdir, "notes.md"), places = PLACES, terminal_dir = PLACES[1].dir)
         key(k, down) = G.ImGuiIO_AddKeyEvent(app.io, k, down)
         type!(s) = G.ImGuiIO_AddInputCharactersUTF8(app.io, s)
         frames!(n = 1) = for _ in 1:n; GM.step!(app); end
@@ -1374,8 +1936,118 @@ else
                 x0, y0, x1, y1 = app.rects[:prompt]
                 st = unsafe_load(Ptr{G.ImGuiStyle}(G.ImGui_GetStyle()))
                 @test x1 - x0 ≈ W - 2 * st.WindowPadding.x atol = 1
-                @test y1 ≈ H - st.WindowPadding.y atol = 1
                 @test app.rects[:stop][4] < y0
+                # The stats row has the bottom line; the prompt box sits on it.
+                sy0, sy1 = app.rects[:stat_ram][2], app.rects[:stat_ram][4]
+                @test sy1 ≈ H - st.WindowPadding.y atol = 1
+                @test y1 ≈ sy0 - st.ItemSpacing.y atol = 1
+                until!(() -> haskey(app.rects, :stat_cpu); timeout = 10)   # a rate: it needs a second sample
+                words = Dict(GM.stats_text(app))
+                @test words["model"] == "none" && haskey(words, "CPU") && haskey(words, "RAM")
+                @test occursin("GiB", words["RAM"])
+                app.stats_open = false; frames!(2)
+                @test app.rects[:prompt][4] ≈ H - st.WindowPadding.y atol = 1   # without it, the old layout
+                app.stats_open = true; frames!(2)
+            end
+
+            @testset "notes: a box that saves itself, and the system prompt it becomes" begin
+                @test !app.notes_open && GM.notes_text(app) == "" && !isfile(app.notes_file)
+                top0 = app.rects[:transcript][2]
+                click!(:notes_toggle)
+                @test app.notes_open
+                frames!(2)
+                @test app.rects[:notes][2] < app.rects[:transcript][2] > top0   # above the transcript
+                click!(:notes)
+                type!("My test word is quokka."); frames!(2)
+                @test GM.notes_text(app) == "My test word is quokka."
+                @test !isfile(app.notes_file)                # not until the box is left
+                click!(:notes_toggle)                        # Hide notes: saved
+                @test !app.notes_open
+                @test read(app.notes_file, String) == "My test word is quokka."
+                @test GM.system_text(app) == GM.NOTES_HEADER * "\n\nMy test word is quokka."
+                refocused!()
+            end
+
+            @testset "markdown in colour: headings, emphasis, maths, quotes" begin
+                # Inline LaTeX becomes Unicode, in its own style and colour.
+                @test GM.tex2uni(raw"\rightarrow") == "→"
+                @test GM.tex2uni(raw"E = mc^2") == "E = mc²"
+                @test GM.tex2uni(raw"v_0 \approx 9.81 \times t") == "v₀ ≈ 9.81 × t"
+                @test GM.tex2uni(raw"\frac{GM}{r^2}") == "(GM)/(r²)"
+                @test GM.tex2uni(raw"\Delta t, \alpha \neq \beta") == "Δ t, α ≠ β"
+                @test GM.tex2uni(raw"x^{n+1}") == "xⁿ⁺¹" && GM.tex2uni(raw"x^{ab}") == "x^(ab)"
+                @test GM.tex2uni(raw"\text{mass} \to \mathrm{curve}") == "mass → curve"
+                p = only(GM.parse_md(raw"mass $\rightarrow$ motion" * "\n"))
+                @test any(s -> s.style & GM.S_MATH != 0 && join(s.pieces) == "→", p.spans)
+                # Colour by role: code, maths and links keep theirs; a heading's colour
+                # wins over bold; bold and italic have their own.
+                @test GM.color_for(GM.S_CODE | GM.S_BOLD, GM.C_H[1]) === GM.C_CODE
+                @test GM.color_for(GM.S_MATH, nothing) === GM.C_MATH
+                @test GM.color_for(GM.S_BOLD, GM.C_H[2]) === GM.C_H[2]
+                @test GM.color_for(GM.S_BOLD | GM.S_ITALIC, nothing) === GM.C_BOLD
+                @test GM.color_for(GM.S_ITALIC, nothing) === GM.C_ITALIC
+                @test GM.color_for(0x00, nothing) === nothing
+                # Each theme brings its own markdown palette.
+                k = GM.theme_named("Gruvbox"); GM.apply_theme!(app, k)
+                @test GM.C_H[1][] == GM._rgb(GM.THEMES[k].md[1]) && GM.C_BOLD[] == GM._rgb(GM.THEMES[k].md[4])
+                @test all(t -> length(unique(t.md[1:3])) == 3, GM.THEMES)     # three distinct heading colours
+                # All of it draws: headings with their rules, a quote bar, maths, a table.
+                t = GM.Turn(:assistant, 20_000, "# H1\n\n## H2\n\n### H3\n\n**b** *i* `c` [l](x) " *
+                            raw"$x^2$" * "\n\n> q\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n")
+                push!(app.turns, t); frames!(3)
+                @test length(t.segs) >= 6 && all(s -> s.h > 0, t.segs)
+                empty!(app.turns)
+                GM.apply_theme!(app, GM.theme_named("Dark")); frames!()
+            end
+
+            @testset "characters no font has are left out, not drawn as U+FFFD" begin
+                @test GM.WCHAR_BYTES in (2, 4)
+                @test GM.GLYPH_FONT[] != C_NULL
+                @test GM.display_text("plain → αβγ ⇒") == "plain → αβγ ⇒"         # Symbols/Greek are merged
+                @test GM.display_text("a✅b") == (GM._has_glyph('✅') ? "a✅b" : "ab")
+                # Emoji only with a scalable colour emoji font; Noto Color Emoji is
+                # one bitmap strike FreeType will not scale, so it is not used.
+                @test GM.display_text("hi \U1F680!") == (GM.EMOJI[] ? "hi \U1F680!" : "hi !")
+                @test GM.display_text("x️‍y") == "xy"                   # selectors and joiners
+                if GM.WCHAR_BYTES == 4 && GM.HAS_FREETYPE && GM.cjk_font_data() !== nothing
+                    @test GM.display_text("你好") == "你好"                          # beyond what stb + 16-bit drew
+                end
+            end
+
+            @testset "themes: presets, the code palette, the saved choice" begin
+                mktempdir() do cfg
+                    withenv("XDG_CONFIG_HOME" => cfg) do
+                        @test GM.load_theme_choice() == ("Dark", nothing)   # nothing saved yet
+                        k = GM.theme_named("nord")
+                        @test GM.THEMES[k].name == "Nord" && GM.theme_named("no such") == 1
+                        GM.apply_theme!(app, k); frames!(2)
+                        th = GM.THEMES[k]
+                        @test GM.style_color(G.ImGuiCol_WindowBg) == GM._rgb(th.bg)
+                        @test app.clear == GM._rgb(th.bg) && app.dim[] == GM._rgb(th.dim)
+                        # Code runs hold a class; the colour is the theme's, at draw time.
+                        @test GM.HL_RGBA[GM.HL_FUNC] == GM._u32rgb(th.hl[3])
+                        @test GM.C_USER[] == GM._rgb(th.user) && GM.indicator(app)[1] == GM.C_OFF[]
+                        GM.save_theme_choice(app)
+                        @test GM.load_theme_choice() == ("Nord", nothing)
+                        # An accent of your own overrides the theme's, and is saved with it.
+                        app.accent_custom, app.accent_rgb = true, 0x123456
+                        GM.apply_theme!(app); frames!()
+                        @test GM.style_color(G.ImGuiCol_CheckMark) == GM._rgb(0x123456)
+                        GM.save_theme_choice(app)
+                        @test GM.load_theme_choice() == ("Nord", 0x123456)
+                        # The menu sits in the status bar and opens.
+                        @test haskey(app.rects, :theme)
+                        n0 = app.frames
+                        click!(:theme); frames!(2)               # the open list, swatches and picker draw
+                        @test app.frames == n0 + 5
+                        @test app.theme_open
+                        click!(:transcript)                      # a click elsewhere closes it…
+                        frames!(2)
+                        @test !app.theme_open && app.active      # …and hands the prompt the keyboard
+                        app.accent_custom = false
+                        GM.apply_theme!(app, GM.theme_named("Dark")); frames!(2)
+                    end
+                end
             end
 
             @testset "typing: UTF-8 in, Ctrl+Enter is a newline, no model refuses Enter" begin
@@ -1411,7 +2083,7 @@ else
 
             # ── the embedded terminal: a pty, libvterm, drawn by imgui ──
             function open_terminal!(cmd)
-                app.term === nothing || (GM.close!(app.term); app.term = nothing)
+                while app.term !== nothing; GM.close_terminal!(app); end
                 app.term_open = false
                 app.term_cmd = cmd
                 GM.toggle_terminal!(app)
@@ -1481,6 +2153,40 @@ else
                 G.ImGuiIO_AddMouseButtonEvent(app.io, 0, false); frames!()
                 @test app.split < s0
                 app.split = 0.5f0
+            end
+
+            @testset "terminals: tabs, places, Go, Close" begin
+                first_ = app.term
+                @test app.terms == [first_]
+                t2 = GM.open_terminal!(app, `sh`, PLACES[2].dir)
+                frames!(3)
+                @test app.term === t2 && length(app.terms) == 2 && t2.kind === :shell
+                @test t2.title == "sh  ·  Beta"            # the place's name, not the folder's
+                @test GM.term_title(app, :julia, GM.julia_cmd(), envdir) == "julia  ·  " * basename(envdir)
+                until!(() -> (t2.cwd_t = 0; GM.term_cwd!(t2) == PLACES[2].dir); timeout = 30)
+                # Go: the terminal's own `cd`, as typed.
+                GM.send_bytes!(t2, GM.cd_line(t2.kind, PLACES[1].dir))
+                until!(() -> (t2.cwd_t = 0; GM.term_cwd!(t2) == PLACES[1].dir); timeout = 30)
+                @test GM.term_where(t2) == "a sh shell in $(PLACES[1].dir)"
+                click!(:term_tab)                           # the first tab
+                @test app.term === first_
+                before = t2.bytes_in
+                GM.send_bytes!(t2, "echo background\r")
+                until!(() -> t2.bytes_in > before; timeout = 30)   # a tab not showing is still read
+                app.term = t2; frames!(2)
+                click!(:term_close)
+                @test app.terms == [first_] && app.term === first_ && t2.fd == -1 && app.term_open
+                frames!(2)                                  # one tab fewer: the buttons moved left
+                click!(:term_close)                         # the last one: the panel goes
+                @test isempty(app.terms) && app.term === nothing && !app.term_open
+                frames!(2)
+                @test app.rects[:transcript][3] > W - 40
+                # No model: Ask says so instead of sending.
+                t = open_terminal!(`sh -c 'echo hi; exec cat'`)
+                n = length(app.turns)
+                @test !GM.ask_terminal!(app)
+                @test length(app.turns) == n + 1 && app.turns[end].role === :note
+                empty!(app.turns)
                 click!(:terminal)                       # hide for the tests below
             end
 
@@ -1535,6 +2241,10 @@ else
                     @test app.title == "LlamaChat · $MODEL · ready"
                     @test startswith(GM.prompt_hint(app), "Message $MODEL")
                     @test any(m -> GM.same_model(first(m), MODEL), app.models)   # the picker lists it
+                    # The notes went in as its system prompt, and it says so.
+                    @test occursin("My test word is quokka.", app.session.system)
+                    @test occursin("it has your notes", app.turns[end].text)
+                    @test !app.think[] && !app.session.think      # `think = false` unticked the box
                 end
 
                 @testset "Enter sends; the box comes back empty and focused" begin
@@ -1596,8 +2306,56 @@ else
                     until!(() -> app.state === :idle)   # the session is the worker's until then
                     sent = last(app.session.history[end-1])  # the user message the model got
                     @test occursin("the answer is 4217", sent) && endswith(sent, u.text)
+                end
+
+                @testset "Ask sends the terminal now; the stats row follows the reply" begin
+                    t = app.term
+                    click!(:term_ask)
+                    @test app.state === :generating
+                    u = app.turns[end-1]
+                    @test u.text == GM.ASK_DEFAULT && occursin("the answer is 4217", u.attached)
+                    seen = Float32[]
+                    until!() do
+                        push!(seen, app.stats.tps)
+                        app.state === :idle
+                    end
+                    sent = last(app.session.history[end-1])
+                    @test startswith(sent, "Here is my terminal (a sh shell in ") && endswith(sent, GM.ASK_DEFAULT)
+                    @test startswith(Dict(GM.stats_text(app))["model"], "last ")
+                    @test haskey(Dict(GM.stats_text(app)), "VRAM")     # the backend is up: the card's memory shows
+                    # With text in the box, that is the question.
+                    q = codeunits("What number is that?")
+                    copyto!(app.buf, 1, q, 1, length(q)); app.buf[length(q) + 1] = 0x00
+                    @test GM.ask_terminal!(app)
+                    @test app.turns[end-1].text == "What number is that?" && GM.prompt_text(app) == ""
+                    # Asked again while it replies: queued with the terminal attached.
+                    @test GM.ask_terminal!(app)
+                    @test app.queued && app.attach[] && GM.prompt_text(app) == GM.ASK_DEFAULT
+                    until!(() -> app.state === :idle && !app.queued)
+                    until!(() -> app.state === :idle)
+                    @test app.turns[end-1].text == GM.ASK_DEFAULT && !isempty(app.turns[end-1].attached)
                     click!(:terminal)                   # hide it again
                     @test !app.term_open
+                    refocused!()
+                end
+
+                @testset "New chat hands the model changed notes and the Think box" begin
+                    s = app.session
+                    sys0 = s.system
+                    b = codeunits("Second note.")
+                    copyto!(app.notes, 1, b, 1, length(b)); app.notes[length(b) + 1] = 0x00
+                    @test s.system == sys0                    # not mid-conversation
+                    @test GM.new_chat!(app)
+                    @test occursin("Second note.", s.system) && !occursin("quokka", s.system)
+                    @test s.n_past == 0 && isempty(s.history)
+                    @test occursin(LC._TERSE_DIRECTIVE, s.system) || LC._is_gemma4(s.template)
+                    app.think[] = true
+                    @test GM.new_chat!(app)
+                    @test s.think && !occursin(LC._TERSE_DIRECTIVE, s.system) && occursin("Second note.", s.system)
+                    app.think[] = false
+                    @test GM.new_chat!(app)
+                    @test !s.think
+                    frames!(2)
                 end
 
                 @testset "a stale Super or Alt does not eat Enter" begin
@@ -1723,6 +2481,74 @@ else
                     @test app.rects[:transcript][2] > app.rects[:model][4]
                     @test app.rects[:transcript][1] ≈ app.rects[:prompt][1]
                     @test !GM.send!(app, "hi")
+                end
+            end
+            @testset "typed mode: a decision model swaps the chat side for State, Questions, Decide" begin
+                tdir = mktempdir()
+                g = fake_typed_gguf(joinpath(tdir, "laya_english.gguf"), "english")
+                withenv("LLAMACHAT_LAYA" => fake_laya_bin(tdir)) do
+                    @test GM.model_kind(app, g) === :typed
+                    until!(() -> app.state in (:empty, :idle, :failed); timeout = 60)
+                    @test !GM.typed(app)
+                    GM.load!(app, g)
+                    until!(() -> app.state !== :loading; timeout = 60)
+                    @test app.state === :idle && GM.typed(app) && app.session isa LC.TypedSession
+                    frames!(2)
+                    # The panel took the transcript's place; the sample is ready to run.
+                    @test haskey(app.rects, :typed_decide) && app.rects[:typed_state][2] < app.rects[:typed_q][2]
+                    @test occursin("\"churn_risk\"", GM.buf_text(app.typed_q)) && app.typed_builtin
+                    @test !GM.new_chat!(app) && !GM.send!(app, "hi")      # chat verbs do nothing here
+                    click!(:typed_decide)
+                    until!(() -> app.state === :idle; timeout = 60)
+                    @test app.typed_err == "" && length(app.typed_out) == 1
+                    @test [a.id for a in app.typed_out[1]] == ["intent", "frustration", "churn_risk"]
+                    @test occursin("last decision 3 answers", GM.status_text(app))
+                    @test startswith(Dict(GM.stats_text(app))["model"], "last 12.5 ms")
+                    frames!(2)
+                    @test haskey(app.rects, :typed_out)
+                    # A batch file fills the State box; Decide answers each state.
+                    bf = joinpath(tdir, "batch.json")
+                    write(bf, """{"states": [{"l": "one"}, {"l": "two"}, "three"], "questions": $TYPED_QS}""")
+                    @test GM.typed_load!(app, bf)
+                    @test occursin("a batch of 3 states, 3 questions", app.typed_note) && !app.typed_builtin
+                    @test GM.typed_states(GM.buf_text(app.typed_state)) == Any[LC.ODict("l" => "one"), LC.ODict("l" => "two"), "three"]
+                    @test isempty(app.typed_out)                          # the old answers went with the old request
+                    @test GM.typed_decide!(app) && app.state === :deciding && GM.indicator(app)[2] == "deciding"
+                    until!(() -> app.state === :idle; timeout = 60)
+                    @test length(app.typed_out) == 3
+                    frames!(2)
+                    # A state file leaves the questions; a questions file leaves the state.
+                    sf = joinpath(tdir, "state.json"); write(sf, """{"message": "only a state"}""")
+                    qtext = GM.buf_text(app.typed_q)
+                    @test GM.typed_load!(app, sf) && GM.buf_text(app.typed_q) == qtext
+                    @test GM.typed_states(GM.buf_text(app.typed_state)) == Any[LC.ODict("message" => "only a state")]
+                    @test GM.typed_states("just text") == Any["just text"]
+                    @test GM.json_files(tdir) == [bf, sf]
+                    # What is wrong is said in the panel, and nothing is sent.
+                    GM.set_buf!(app.typed_q, """{"q": {"type": "pick", "instructions": "x"}}""")
+                    @test !GM.typed_decide!(app) && app.state === :idle
+                    @test startswith(app.typed_err, "questions.q.type: must be")
+                    GM.set_buf!(app.typed_q, "{ not json")
+                    @test !GM.typed_decide!(app) && app.typed_err == "questions: is not valid JSON"
+                    @test !GM.typed_load!(app, joinpath(tdir, "missing.json")) && startswith(app.typed_err, "no such file")
+                    frames!(2)
+                    # Ask: the terminal is the state, with questions about terminals.
+                    t = open_terminal!(`sh -c 'echo "ls: cannot access nope"; exec cat'`)
+                    until!(() -> occursin("cannot access", screen(t)); timeout = 30)
+                    app.typed_builtin = true
+                    click!(:term_ask)
+                    until!(() -> app.state === :idle; timeout = 60)
+                    st = GM.typed_states(GM.buf_text(app.typed_state))[1]
+                    @test occursin("cannot access nope", st["terminal"]) && startswith(st["where"], "a sh shell in ")
+                    @test occursin("\"failed\"", GM.buf_text(app.typed_q)) && app.typed_err != ""   # the stand-in knows three ids
+                    GM.close_terminal!(app)
+                    # Unload: the daemon ends, and the chat side is back.
+                    proc = app.session.proc
+                    @test GM.unload!(app)
+                    until!(() -> app.state === :empty; timeout = 60)
+                    @test !process_running(proc) && !GM.typed(app)
+                    frames!(2)
+                    @test app.rects[:transcript][2] > app.rects[:model][4]
                 end
             end
         finally

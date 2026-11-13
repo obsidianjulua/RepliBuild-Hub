@@ -71,6 +71,10 @@ mutable struct Term
     lh::Float32
     fsize::Float32
     bytes_in::Int
+    title::String                   # the tab's label
+    kind::Symbol                    # :julia, :shell or :other (`term_kind`)
+    cwd::String                     # where the program is now (`term_cwd!`), read once a second
+    cwd_t::Float64
 end
 
 _term(user::Ptr{Cvoid}) = unsafe_pointer_to_objref(user)::Term
@@ -146,7 +150,8 @@ _setwinsize(fd, rows, cols) =
 Start `cmd` on a new pty, behind a libvterm screen of `rows`×`cols`.
 """
 function Term(cmd::Cmd; dir::AbstractString = pwd(), rows::Integer = 24, cols::Integer = 80,
-              fg::UInt32 = 0xffdddddd, bg::UInt32 = 0xff17130f)
+              fg::UInt32 = 0xffdddddd, bg::UInt32 = 0xff17130f,
+              kind::Symbol = term_kind(cmd), title::AbstractString = basename(first(cmd.exec)))
     vt = V.vterm_new(rows, cols)
     vt == C_NULL && error("vterm_new failed")
     V.vterm_set_utf8(vt, 1)
@@ -154,7 +159,7 @@ function Term(cmd::Cmd; dir::AbstractString = pwd(), rows::Integer = 24, cols::I
     t = Term(vt, scr, Ref{V.VTermScreenCallbacks}(), Cint(-1), nothing, cmd, String(dir),
              Int(rows), Int(cols), [Run[] for _ in 1:rows], trues(rows), String[], 0,
              (0, 0), true, false, false, UInt8[], zeros(UInt8, 1 << 16), zeros(UInt8, 4096),
-             Ref(V.VTermScreenCell()), fg, bg, 0f0, 0f0, 0f0, 0)
+             Ref(V.VTermScreenCell()), fg, bg, 0f0, 0f0, 0f0, 0, String(title), kind, String(dir), 0.0)
     t.callbacks[] = V.VTermScreenCallbacks(
         @cfunction(_damage, Cint, (V.VTermRect, Ptr{Cvoid})),
         C_NULL,                                                     # moverect: damage instead
@@ -446,7 +451,9 @@ function term_keys!(app, t::Term)
     ctrl, shift, alt = _iobool(app, "KeyCtrl"), _iobool(app, "KeyShift"), _iobool(app, "KeyAlt")
     mods = V.VTermModifier((shift ? 1 : 0) | (alt ? 2 : 0) | (ctrl ? 4 : 0))
     typed = false
-    if ctrl && shift && G.ImGui_IsKeyPressed(G.ImGuiKey_V, false)
+    if ctrl && shift && G.ImGui_IsKeyPressed(G.ImGuiKey_E, false)
+        ask_terminal!(app, t)                        # "explain": this terminal, to the model
+    elseif ctrl && shift && G.ImGui_IsKeyPressed(G.ImGuiKey_V, false)
         clip = G.ImGui_GetClipboardText()
         if clip !== nothing && !isempty(clip)
             V.vterm_keyboard_start_paste(t.vt); _drain_vterm!(t)       # bracketed paste, if the child asked for it
@@ -477,15 +484,16 @@ function term_keys!(app, t::Term)
             end
         end
     end
-    # The character queue: an ImVector<ImWchar16> inside ImGuiIO.
+    # The character queue: an ImVector<ImWchar> inside ImGuiIO, 16- or 32-bit
+    # by how imgui was built (`WCHAR_BYTES`).
     q = app.io + G.member_offset("ImGuiIO", "InputQueueCharacters")
     n = unsafe_load(Ptr{Cint}(q))
     if n > 0
-        data = unsafe_load(Ptr{Ptr{UInt16}}(q + 8))
+        dp = unsafe_load(Ptr{Ptr{Cvoid}}(q + 8))
         cm = V.VTermModifier(alt ? 2 : 0)
         for i in 1:n
-            u = unsafe_load(data, i)
-            (0xd800 <= u <= 0xdfff) && continue      # no 32-bit ImWchar here: no astral planes
+            u = WCHAR_BYTES == 4 ? unsafe_load(Ptr{UInt32}(dp), i) : UInt32(unsafe_load(Ptr{UInt16}(dp), i))
+            (0xd800 <= u <= 0xdfff) && continue      # a lone surrogate half (16-bit ImWchar) is no character
             ctrl && !alt && continue                 # Ctrl+letter was handled as a key
             V.vterm_keyboard_unichar(t.vt, UInt32(u), cm); typed = true
         end
@@ -498,21 +506,97 @@ function term_keys!(app, t::Term)
     return typed
 end
 
-"""Lay the terminal out in `w`×`h`: a header line, then the grid."""
+"""
+    term_cwd!(t) -> String
+
+The directory the terminal's program is in now, so `cd` shows: the working
+directory of `setsid`'s child, from /proc, re-read at most once a second.
+The folder it started in when that cannot be read.
+"""
+function term_cwd!(t::Term, now::Float64 = time())
+    (now - t.cwd_t < 1 || t.proc === nothing || t.exited) && return t.cwd
+    t.cwd_t = now
+    try
+        pid = getpid(t.proc)
+        kids = split(read("/proc/$pid/task/$pid/children", String))
+        t.cwd = readlink("/proc/$(isempty(kids) ? pid : first(kids))/cwd")
+    catch
+    end
+    return t.cwd
+end
+
+"""What a terminal is, in the words the model is given with its text."""
+term_where(t::Term) =
+    string(t.kind === :julia ? "a Julia REPL" : t.kind === :shell ? "a $(basename(first(t.cmd.exec))) shell" :
+           "`$(basename(first(t.cmd.exec)))`", " in ", term_cwd!(t))
+
+"""One popup row per place and kind; `f(place, kind)` runs for the one picked."""
+function place_rows!(f, app, kinds)
+    isempty(app.places) && colored(() -> text!("No places: see $(places_file())"), app.dim)
+    for (i, p) in enumerate(app.places), k in kinds
+        label = (length(kinds) == 1 ? "" : k === :julia ? "Julia  ·  " : "Shell  ·  ") * p.name
+        G.ImGui_Selectable("$label###pl$(i)$(k)", false, Cint(0), ZERO) && f(p, k)
+        G.ImGui_SameLine(0f0, app.fonts.size * 1.5f0)
+        colored(() -> text!(p.dir), app.dim)
+    end
+end
+
+"""Lay the terminal out in `w`×`h`: the tabs and their buttons, a status line, then the grid."""
 function terminal_panel!(app, w::Real, h::Real)
     t = app.term
     G.ImGui_BeginChild("##termpane", Ref(vec2(w, h)), Cint(0), Cint(0))
-    head = string(basename(first(t.cmd.exec)), "  ·  ", t.cols, "×", t.rows,
-                  t.exited ? "  ·  exited" : "",
-                  t.view > 0 ? "  ·  scrolled back $(t.view) lines (Shift+PgDn, or type)" : "")
     G.ImGui_AlignTextToFramePadding()
-    colored(() -> text!(head), app.dim)
+    for (i, x) in enumerate(app.terms)
+        i > 1 && G.ImGui_SameLine(0f0, 4f0)
+        cur = x === t
+        cur && G.ImGui_PushStyleColor(Cint(G.ImGuiCol_Button), Ref(style_color(G.ImGuiCol_ButtonActive)))
+        if G.ImGui_SmallButton("$(x.title)$(x.exited ? " (exited)" : "")###tab$i")
+            app.term = x
+            app.term_focus = true
+        end
+        cur && G.ImGui_PopStyleColor(Cint(1))
+        i == 1 && rect!(app, :term_tab)
+    end
+    G.ImGui_SameLine(0f0, 4f0)
+    G.ImGui_SmallButton("+###newterm") && G.ImGui_OpenPopup("##newterm", Cint(0))
+    rect!(app, :term_new)
+    if G.ImGui_BeginItemTooltip()
+        text!("A new terminal: a Julia REPL or your shell, in one of your places.")
+        G.ImGui_EndTooltip()
+    end
+    if G.ImGui_BeginPopup("##newterm", Cint(0))
+        place_rows!((p, k) -> place_terminal!(app, p, k), app, (:julia, :shell))
+        G.ImGui_EndPopup()
+    end
     G.ImGui_SameLine(0f0, app.fonts.size)
+    G.ImGui_BeginDisabled(t.exited || t.kind === :other)
+    G.ImGui_SmallButton("Go") && G.ImGui_OpenPopup("##goplace", Cint(0))
+    rect!(app, :term_go)
+    G.ImGui_EndDisabled()
+    if G.ImGui_BeginPopup("##goplace", Cint(0))
+        place_rows!((p, _) -> (send_bytes!(t, cd_line(t.kind, p.dir)); app.term_focus = true), app, (t.kind,))
+        G.ImGui_EndPopup()
+    end
+    G.ImGui_SameLine(0f0, 4f0)
+    G.ImGui_SmallButton("Ask") && ask_terminal!(app, t)
+    rect!(app, :term_ask)
+    if G.ImGui_BeginItemTooltip()
+        text!("Send this terminal's last 120 lines to the model (Ctrl+Shift+E in the terminal).\n" *
+              "With text in the message box, that is the question; with none, it asks what went wrong.")
+        G.ImGui_EndTooltip()
+    end
+    G.ImGui_SameLine(0f0, 4f0)
     G.ImGui_SmallButton("Restart") && (restart!(t); app.term_focus = true)
     rect!(app, :term_restart)
+    G.ImGui_SameLine(0f0, 4f0)
+    closing = G.ImGui_SmallButton("Close")
+    rect!(app, :term_close)
+    head = string(t.cols, "×", t.rows, "  ·  ", term_cwd!(t),
+                  t.view > 0 ? "  ·  scrolled back $(t.view) lines (Shift+PgDn, or type)" : "")
+    colored(() -> text!(head), app.dim)
     if t.exited
         G.ImGui_SameLine(0f0, -1f0)
-        colored(() -> text!("the process exited: Restart starts it again"), C_ERR)
+        colored(() -> text!("  the process exited: Restart starts it again"), C_ERR)
     end
     _metrics!(app, t)
     if app.term_focus
@@ -540,4 +624,5 @@ function terminal_panel!(app, w::Real, h::Real)
     rect!(app, :term)
     G.ImGui_PopStyleColor(Cint(1))
     G.ImGui_EndChild()
+    closing && close_terminal!(app, t)              # after the frame is done with it
 end

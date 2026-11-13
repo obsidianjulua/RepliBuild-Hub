@@ -44,6 +44,11 @@ const LIBDIR = joinpath(dirname(@__DIR__), "lib", "gui")
 include(joinpath(LIBDIR, "Imgui.jl")); import .Imgui; const G = Imgui
 include(joinpath(LIBDIR, "Glfw.jl"));  import .Glfw;  const W = Glfw
 
+# Bytes per ImWchar in the imgui this links: 2, or 4 when it was built with
+# IMGUI_USE_WCHAR32. Read from the layout DWARF gave the wrapper — ImFont's two
+# adjacent ImWchar fields — so it cannot disagree with the library.
+const WCHAR_BYTES = G.member_offset("ImFont", "FallbackChar") - G.member_offset("ImFont", "EllipsisChar")
+
 # ── small helpers ────────────────────────────────────────────────────────────
 
 vec2(x, y) = G.ImVec2(Cfloat(x), Cfloat(y))
@@ -133,6 +138,9 @@ snapshot(io::StreamIO) = lock(() -> String(copy(io.data)), io.lk)
 
 include("gui_md.jl")
 include("gui_term.jl")
+include("gui_theme.jl")
+include("gui_env.jl")
+include("gui_typed.jl")
 
 # ── transcript ───────────────────────────────────────────────────────────────
 
@@ -149,16 +157,19 @@ reasoning and strips it from `Response.text`, but the stream still carries it.
 """
 function split_think(raw::AbstractString)
     s = lstrip(raw)
-    if !startswith(s, "<think>")
-        # Streaming delivers the opening tag a token at a time; don't flash it.
-        !isempty(s) && startswith("<think>", s) && return (nothing, "", false)
-        return (nothing, String(raw), false)
+    for (open, close) in LC._THINK_TAGS     # <think>…</think>, Gemma 4's thought channel
+        if !startswith(s, open)
+            # Streaming delivers the opening tag a token at a time; don't flash it.
+            !isempty(s) && startswith(open, s) && return (nothing, "", false)
+            continue
+        end
+        body = SubString(s, ncodeunits(open) + 1)
+        i = findfirst(close, body)
+        i === nothing && return (String(strip(body)), "", true)
+        return (String(strip(SubString(body, 1, prevind(body, first(i))))),
+                String(lstrip(SubString(body, nextind(body, last(i))))), false)
     end
-    body = SubString(s, ncodeunits("<think>") + 1)
-    i = findfirst("</think>", body)
-    i === nothing && return (String(strip(body)), "", true)
-    return (String(strip(SubString(body, 1, prevind(body, first(i))))),
-            String(lstrip(SubString(body, nextind(body, last(i))))), false)
+    return (nothing, String(raw), false)
 end
 
 mutable struct Turn
@@ -224,9 +235,9 @@ mutable struct App
     ctx::Ptr{G.ImGuiContext}
     io::Ptr{UInt8}                      # ImGuiIO*
     model::String
-    state::Symbol                       # :empty :loading :idle :generating :unloading :failed
+    state::Symbol                       # :empty :loading :idle :generating :deciding :unloading :failed
     closing::Bool
-    session::Union{Nothing,LC.ChatSession}
+    session::Union{Nothing,LC.ChatSession,LC.AnyTyped}   # a typed session puts the window in typed mode
     task::Union{Nothing,Task}
     t_start::Float64
     turns::Vector{Turn}
@@ -266,15 +277,81 @@ mutable struct App
     pull::Union{Nothing,Tuple{LC.PullProgress,Task}}   # a download in flight
     pull_open::Bool                     # the Pull row is showing
     pullbuf::Vector{UInt8}              # its name box
+    theme::Int                          # index into THEMES (gui_theme.jl)
+    accent_custom::Bool                 # an accent picked in the Theme menu…
+    accent_rgb::UInt32                  # …this one, 0xRRGGBB
+    accent_edit::Vector{Cfloat}         # the picker's float[3]
+    accent_dirty::Bool                  # picked but not yet saved
+    theme_open::Bool                    # the Theme menu was open last frame
+    term_fg::UInt32                     # the terminal's default colours, ImU32
+    term_bg::UInt32
+    terms::Vector{Term}                 # every open terminal; `term` is the one showing
+    places::Vector{Place}               # where terminals start and Go (gui_env.jl)
+    notes::Vector{UInt8}                # the Notes box's bytes, NUL-terminated
+    notes_open::Bool
+    notes_saved::String                 # what the notes file holds
+    notes_file::String
+    system_sent::String                 # the system prompt the loaded model was given
+    stats::Stats
+    stats_open::Bool
+    think::Base.RefValue{Bool}          # the Think box: off loads models with `think = false`
+    typed_path::Vector{UInt8}           # typed mode's boxes (gui_typed.jl), NUL-terminated
+    typed_state::Vector{UInt8}
+    typed_q::Vector{UInt8}
+    typed_out::Vector{LC.Decisions}     # the last Decide, one per state
+    typed_states::Vector{Any}           # the states it ran on
+    typed_err::String
+    typed_note::String
+    typed_builtin::Bool                 # the questions are a built-in set, free to swap
+    kinds::Dict{String,Symbol}          # model name => :chat | :typed, for the picker
+    dual::Union{Nothing,LC.LogitSession}    # the loaded model does both: typed, and chat through `dual.chat`
+    typed_on::Base.RefValue{Bool}       # which of the two the window is in
 end
 
 """
 The terminal's default program: this Julia's own executable, without the
 banner. It starts without a shell, so a shell alias like
 `alias julia='julia --banner=no'` never applies here; the flag has to be on
-the command (startup.jl runs too late to turn the banner off).
+the command (startup.jl runs too late to turn the banner off). `julia_cmd()`
+is this plus `--project=@.`, the project of the folder it starts in.
 """
 default_terminal() = Cmd([joinpath(Sys.BINDIR, Base.julia_exename()), "--banner=no"])
+
+"""
+Where the first terminal opens when the caller did not say: the directory the
+window was started from, unless that is just the home directory (a keybinding,
+a launcher), where the first place is the better guess.
+"""
+function start_dir(dir, places::Vector{Place})
+    dir === nothing || return String(dir)
+    here = pwd()
+    return here == homedir() && !isempty(places) ? first(places).dir : here
+end
+
+notes_text(app) = GC.@preserve app unsafe_string(pointer(app.notes))
+
+function load_notes!(app)
+    s = read_notes(app.notes_file)
+    # The box is a fixed buffer; a longer file is cut at a character boundary.
+    sizeof(s) >= NOTES_MAX && (s = s[1:prevind(s, NOTES_MAX - 4)])
+    n = sizeof(s)
+    fill!(app.notes, 0x00)
+    copyto!(app.notes, 1, codeunits(s), 1, n)
+    app.notes_saved = notes_text(app)
+    return app
+end
+
+"""Write the Notes box to its file, if it changed."""
+function save_notes!(app)
+    s = notes_text(app)
+    s == app.notes_saved && return false
+    write_notes(s, app.notes_file)
+    app.notes_saved = s
+    return true
+end
+
+"""The system prompt for the next load: the caller's `system`, then the notes."""
+system_text(app) = system_with_notes(String(get(app.sesskw, :system, "")), notes_text(app))
 
 function _glfw_error()
     d = Ref{Ptr{UInt8}}(C_NULL)
@@ -295,6 +372,47 @@ end
 _ttf(p) = isfile(p) && lowercase(splitext(p)[2]) in (".ttf", ".otf") ? p : nothing
 _fc(pattern) = _ttf(try readchomp(`fc-match -f "%{file}" $pattern`) catch; "" end)
 
+"""`ImGuiFreeTypeLoaderFlags_LoadColor | _Bitmap`: colour bitmap glyphs, for
+emoji. Noto Color Emoji is bitmaps only (CBDT); without `_Bitmap` FreeType is
+told FT_LOAD_NO_BITMAP and every emoji comes back missing."""
+const FT_LOAD_COLOR = (1 << 8) | (1 << 9)
+
+"""Font files the atlas reads from but does not own (see `load_fonts`)."""
+const FONT_DATA = Dict{String,Vector{UInt8}}()
+
+"""Noto Sans CJK (or any installed CJK font) as bytes, read once; or `nothing`."""
+function cjk_font_data()
+    out = try readchomp(`fc-list :lang=zh -f "%{file}\n"`) catch; "" end
+    files = sort!(unique(filter(f -> occursin(r"(?i)cjk", f) && occursin(r"(?i)regular", basename(f)) &&
+                                     occursin(r"(?i)\.(ttc|otf|ttf)$", f), split(out, '\n'))))
+    isempty(files) && return nothing
+    f = String(first(files))
+    return get!(() -> read(f), FONT_DATA, f)
+end
+
+"""A colour emoji font is merged into every face (see `load_fonts`)."""
+const EMOJI = Ref(false)
+
+"""An installed emoji font with outlines (scalable), or `nothing`."""
+function emoji_font()
+    out = try readchomp(`fc-list -f "%{file}\t%{outline}\n" :charset=1f600`) catch; "" end
+    for l in split(out, '\n')
+        f, ol = (parts = split(l, '\t'); length(parts) == 2 ? parts : (l, ""))
+        occursin(r"(?i)emoji", basename(f)) && ol == "True" && _ttf(String(f)) !== nothing && return String(f)
+    end
+    return nothing
+end
+
+"""imgui was built with IMGUI_ENABLE_FREETYPE, so FreeType rasterises every font
+(the atlas names its loader only once a font is in it, too late to decide on)."""
+const HAS_FREETYPE = isdefined(G, :ImGuiFreeType_GetFontLoader)
+
+"""Which rasteriser the atlas uses: "FreeType (2.x)" or "stb_truetype"."""
+function font_loader(atlas::Ptr{Cvoid})
+    p = unsafe_load(Ptr{Ptr{UInt8}}(atlas + G.member_offset("ImFontAtlas", "FontLoaderName")))
+    return p == C_NULL ? "" : unsafe_string(p)
+end
+
 """The system sans-serif via fontconfig, or `nothing` (imgui's built-in font)."""
 function default_font()
     p = get(ENV, "LLAMACHAT_FONT", "")
@@ -311,18 +429,41 @@ function load_fonts(io::Ptr{UInt8}, font, size::Real)
     atlas = unsafe_load(Ptr{Ptr{Cvoid}}(io + G.member_offset("ImGuiIO", "Fonts")))
     extras = filter(p -> p !== nothing && occursin(r"Symbols|Math", basename(p)),
                     [_fc("Noto Sans Symbols2"), _fc("Noto Sans Math")])
+    # Colour emoji need FreeType (stb_truetype cannot read the colour tables),
+    # 32-bit ImWchar to reach them, and an emoji font with OUTLINES (COLR, e.g.
+    # Twemoji). Noto Color Emoji is one 109 px bitmap strike: imgui's FreeType
+    # loader asks for the exact text size, FreeType refuses a size the strike
+    # does not have, and every emoji comes back as a blank of the right width.
+    # Without a usable font they are dropped from display (`display_text`).
+    emoji = HAS_FREETYPE && WCHAR_BYTES == 4 ? emoji_font() : nothing
+    EMOJI[] = emoji !== nothing
+    cjk = cjk_font_data()
     function add(path)
         path === nothing && return C_NULL
         # imgui 1.92 rasterises glyphs on demand, so no glyph ranges: anything
         # the font has, the window can draw.
         f = G.ImFontAtlas_AddFontFromFileTTF(atlas, String(path), Cfloat(size), C_NULL, C_NULL)
         f == C_NULL && (@warn "could not load font $path"; return C_NULL)
-        for x in extras             # MergeMode: into the font just added
+        for x in (emoji === nothing ? extras : [extras; emoji])   # MergeMode: into the font just added
             cfg = zeros(UInt8, 512)
             GC.@preserve cfg begin
                 G.ImFontConfig_ImFontConfig(pointer(cfg))
                 unsafe_store!(pointer(cfg) + G.member_offset("ImFontConfig", "MergeMode"), 0x01)
+                x == emoji && unsafe_store!(Ptr{Cuint}(pointer(cfg) + G.member_offset("ImFontConfig", "FontLoaderFlags")),
+                                            Cuint(FT_LOAD_COLOR))
                 G.ImFontAtlas_AddFontFromFileTTF(atlas, x, Cfloat(size), pointer(cfg), C_NULL)
+            end
+        end
+        # CJK last, as the final fallback. One copy of the ~20 MB file serves
+        # every face: the atlas is told it does not own the bytes, and
+        # FONT_DATA keeps them alive for the process.
+        if cjk !== nothing
+            cfg = zeros(UInt8, 512)
+            GC.@preserve cfg cjk begin
+                G.ImFontConfig_ImFontConfig(pointer(cfg))
+                unsafe_store!(pointer(cfg) + G.member_offset("ImFontConfig", "MergeMode"), 0x01)
+                unsafe_store!(pointer(cfg) + G.member_offset("ImFontConfig", "FontDataOwnedByAtlas"), 0x00)
+                G.ImFontAtlas_AddFontFromMemoryTTF(atlas, pointer(cjk), length(cjk), Cfloat(size), pointer(cfg), C_NULL)
             end
         end
         return Ptr{Cvoid}(f)
@@ -341,7 +482,10 @@ function App(; width::Integer = 960, height::Integer = 720, title::AbstractStrin
              visible::Bool = true, vsync::Bool = visible,
              font::Union{Nothing,AbstractString} = default_font(), font_size::Real = 18,
              max_tokens::Integer = 4096, markdown::Bool = true,
-             terminal::Cmd = default_terminal(), terminal_dir::AbstractString = pwd())
+             terminal::Cmd = julia_cmd(), terminal_dir::Union{Nothing,AbstractString} = nothing,
+             theme::Union{Nothing,AbstractString} = get(ENV, "LLAMACHAT_THEME", nothing),
+             places::Vector{Place} = load_places(), notes_file::AbstractString = notes_file(),
+             stats::Bool = true)
     _check_display()
     # Pick X11 outright rather than let GLFW probe for a Wayland it was not
     # built with.
@@ -372,6 +516,8 @@ function App(; width::Integer = 960, height::Integer = 720, title::AbstractStrin
 
     sp = Ptr{UInt8}(style_ptr())
     fonts = load_fonts(io, font, font_size)
+    GLYPH_FONT[] = fonts.regular            # what display_text checks characters against
+    empty!(_HAS_GLYPH)
     unsafe_store!(Ptr{Cfloat}(sp + G.member_offset("ImGuiStyle", "FontSizeBase")), Cfloat(font_size))
     # Opaque window background. The dark style's is 94% alpha, which over a
     # full-viewport window only blends in the GL clear colour.
@@ -382,15 +528,28 @@ function App(; width::Integer = 960, height::Integer = 720, title::AbstractStrin
     G.ImGui_ImplOpenGL3_Init(C_NULL)          || error("ImGui_ImplOpenGL3_Init failed")
 
     st = unsafe_load(style_ptr())
-    return App(win, ctx, io, "", :empty, false, nothing, nothing, 0.0,
+    app = App(win, ctx, io, "", :empty, false, nothing, nothing, 0.0,
                Turn[], 1, nothing, nothing, 0, 0, Int(max_tokens),
                zeros(UInt8, 32 * 1024), true, false, false,
                style_color(G.ImGuiCol_WindowBg), Ref(style_color(G.ImGuiCol_TextDisabled)),
                st.ItemSpacing.y, Ref(Cint(width)), Ref(Cint(height)), 0,
                Dict{Symbol,NTuple{4,Float32}}(), fonts, markdown,
                Dict{Symbol,Any}(), list_chat_models(), false, st.FramePadding, String(title),
-               nothing, false, false, false, terminal, String(terminal_dir), 0.5f0, Ref(false),
-               false, nothing, false, zeros(UInt8, 256))
+               nothing, false, false, false, terminal, start_dir(terminal_dir, places), 0.5f0, Ref(false),
+               false, nothing, false, zeros(UInt8, 256),
+               1, false, 0x000000, zeros(Cfloat, 3), false, false, 0xffdddddd, 0xff17130f,
+               Term[], places, zeros(UInt8, NOTES_MAX), false, "", String(notes_file), "",
+               Stats(), stats, Ref(true),
+               zeros(UInt8, 2048), zeros(UInt8, TYPED_BUF), zeros(UInt8, TYPED_BUF),
+               LC.Decisions[], Any[], "", "", false, Dict{String,Symbol}(), nothing, Ref(true))
+    load_notes!(app)
+    # The saved theme and accent, unless the caller named a theme.
+    name, acc = load_theme_choice()
+    if theme === nothing && acc !== nothing
+        app.accent_custom, app.accent_rgb = true, acc
+    end
+    apply_theme!(app, theme_named(something(theme, name)))
+    return app
 end
 
 """ollama names default to the `:latest` tag: `qwen3-coder` is `qwen3-coder:latest`."""
@@ -423,6 +582,7 @@ measures free VRAM when the load starts, and the GL context is part of that.
 """
 function load!(app::App, model::AbstractString; kwargs...)
     isempty(kwargs) || (app.sesskw = Dict{Symbol,Any}(kwargs))
+    haskey(kwargs, :think) && (app.think[] = kwargs[:think])
     switch!(app, model) || error("cannot load $model while the window is $(app.state)")
     return app
 end
@@ -442,6 +602,7 @@ function switch!(app::App, model::AbstractString)
     (app.state in (:empty, :idle, :failed) && !app.closing) || return false
     old, prev = app.session, app.model
     app.session = nothing
+    app.dual = nothing
     app.model = String(model)
     app.n_ctx = app.ctx_used = 0
     app.last = nothing
@@ -454,10 +615,12 @@ function switch!(app::App, model::AbstractString)
     app.state = :loading
     app.t_start = time()
     app.snap = true
-    name, kw = app.model, app.sesskw
+    sys = system_text(app)
+    app.system_sent = sys
+    name, kw = app.model, merge(app.sesskw, Dict{Symbol,Any}(:system => sys, :think => app.think[]))
     app.task = Threads.@spawn begin
         old === nothing || LC.close!(old)
-        LC.ChatSession(name; log = log, kw...)
+        LC.open_model(name; log = log, kw...)      # a chat model or a typed one, by its file
     end
     return true
 end
@@ -472,6 +635,7 @@ function unload!(app::App)
     (app.state === :idle && app.session !== nothing && !app.closing) || return false
     old = app.session
     app.session = nothing
+    app.dual = nothing
     app.state = :unloading
     app.t_start = time()
     app.task = Threads.@spawn LC.close!(old)
@@ -484,15 +648,17 @@ end
 Start a reply to `prompt` on a worker thread. `false` (and nothing happens)
 unless the session is idle.
 """
-function send!(app::App, prompt::AbstractString; context::AbstractString = "")
-    (app.state === :idle && !app.closing) || return false
+function send!(app::App, prompt::AbstractString; context::AbstractString = "",
+               where::AbstractString = "")
+    (app.state === :idle && !app.closing && app.session isa LC.ChatSession) || return false
     s = app.session
     s.cancel[] = false                  # idle: nothing is generating to race with
     shown = String(prompt)
     # The model gets the terminal text; the transcript shows the prompt and
     # folds the attachment under it.
     p = isempty(context) ? shown :
-        "Here is my terminal (its last $(count(==('\n'), context) + 1) lines):\n```\n$context\n```\n\n$shown"
+        "Here is my terminal ($(isempty(where) ? "" : where * "; ")its last " *
+        "$(count(==('\n'), context) + 1) lines):\n```\n$context\n```\n\n$shown"
     push_turn!(app, :user, shown).attached = String(context)
     io = StreamIO()
     app.reply = push_turn!(app, :assistant, "", app.model)
@@ -511,10 +677,48 @@ function stop!(app::App)
     return app
 end
 
+"""
+    set_typed!(app, on) -> Bool
+
+For a model that does both (`app.dual`): put the window in typed mode, or in
+chat with the same weights. The model is not reloaded. A decision overwrites
+the chat's cache, so going to chat starts a new conversation, with the notes
+and the Think box as they are now.
+"""
+function set_typed!(app::App, on::Bool)
+    d = app.dual
+    (d !== nothing && app.state === :idle && !app.closing) || (app.typed_on[] = typed(app); return false)
+    app.typed_on[] = on
+    if on
+        app.session = d
+        app.n_ctx = app.ctx_used = 0
+    else
+        sys = system_text(app)
+        LC.set_system!(d.chat, sys; think = app.think[])
+        app.system_sent = sys
+        app.session = d.chat
+        app.n_ctx, app.ctx_used = d.chat.n_ctx, 0
+        app.last = nothing
+        empty!(app.turns)
+        push_turn!(app, :ready, "$(app.model) in chat  ·  $(LC.placement(d.chat))  ·  $(d.chat.n_ctx) ctx  ·  " *
+                                "the Typed box goes back to decisions")
+        app.refocus = true
+    end
+    return true
+end
+
 """Forget the conversation, keep the model. Only while idle."""
 function new_chat!(app::App)
-    app.state === :idle || return false
-    LC.reset!(app.session)
+    (app.state === :idle && app.session isa LC.ChatSession) || return false
+    # Notes edited since the model loaded reach it here: a new conversation is
+    # the one moment the system prompt can change without rebuilding a cache.
+    sys = system_text(app)
+    if sys != app.system_sent || app.session.think != app.think[]
+        LC.set_system!(app.session, sys; think = app.think[])
+        app.system_sent = sys
+    else
+        LC.reset!(app.session)
+    end
     empty!(app.turns)
     app.last = nothing
     app.ctx_used = 0
@@ -562,8 +766,14 @@ end
 function poll!(app::App)
     # The child keeps running while the panel is hidden; reading it every frame
     # keeps a full pty buffer from blocking it.
-    app.term === nothing || pump!(app.term)
+    foreach(pump!, app.terms)
     poll_pull!(app)
+    if app.stats_open && time() - app.stats.t >= 1
+        # n_past is the worker's to write; reading an Int it is advancing is a
+        # stale number at worst, and this only draws a rate.
+        s = app.session
+        sample!(app.stats; tokens = app.state === :generating && s !== nothing ? s.n_past : -1)
+    end
     t = app.task
     t === nothing && return app
     if app.reply !== nothing
@@ -583,7 +793,18 @@ function poll!(app::App)
         log = app.turns[end]
         refresh!(log)
         log.live = nothing
-        if res isa LC.ChatSession
+        if res isa LC.AnyTyped
+            app.session = res
+            if res isa LC.LogitSession              # a language model: it can chat as well
+                app.dual = res
+                app.typed_on[] = true
+            end
+            app.state = :idle
+            pop!(app.turns)                 # the load line; the panel says what is loaded
+            typed_defaults!(app)
+            empty!(app.typed_out)
+            app.typed_err = ""
+        elseif res isa LC.ChatSession
             app.session = res
             app.n_ctx = res.n_ctx
             app.ctx_used = res.n_past
@@ -594,7 +815,8 @@ function poll!(app::App)
             rest = [l for l in split(log.text, '\n') if !isempty(strip(l)) && !startswith(l, "loading ")]
             isempty(rest) ? pop!(app.turns) : (log.text = join(rest, '\n'))
             push_turn!(app, :ready, "$(app.model) is ready  ·  $(LC.placement(res))  ·  " *
-                                    "$(res.n_ctx) ctx  ·  loaded in $(round(time() - app.t_start; digits = 1)) s")
+                                    "$(res.n_ctx) ctx  ·  loaded in $(round(time() - app.t_start; digits = 1)) s" *
+                                    (isempty(strip(notes_text(app))) ? "" : "  ·  it has your notes"))
         else
             log.text = rstrip(log.text)
             push_turn!(app, :error, "load failed: " * sprint(showerror, res))
@@ -606,6 +828,14 @@ function poll!(app::App)
         app.n_ctx = app.ctx_used = 0
         app.last = nothing
         app.state = :empty
+    elseif app.state === :deciding
+        if res isa Vector{LC.Decisions}
+            app.typed_out = res
+        else
+            empty!(app.typed_out)
+            app.typed_err = sprint(showerror, res)
+        end
+        app.state = :idle
     elseif app.state === :generating
         r = app.reply
         refresh!(r)
@@ -630,10 +860,11 @@ end
 
 # ── drawing ──────────────────────────────────────────────────────────────────
 
-const C_READY = vec4(0.40, 0.85, 0.45)
-const C_BUSY  = vec4(0.95, 0.75, 0.30)
-const C_GEN   = vec4(0.45, 0.70, 1.00)
-const C_OFF   = vec4(0.55, 0.55, 0.55)
+# The status light; set by the theme (gui_theme.jl).
+const C_READY = Ref(vec4(0.40, 0.85, 0.45))
+const C_BUSY  = Ref(vec4(0.95, 0.75, 0.30))
+const C_GEN   = Ref(vec4(0.45, 0.70, 1.00))
+const C_OFF   = Ref(vec4(0.55, 0.55, 0.55))
 
 """
     indicator(app) -> (colour, word, busy)
@@ -641,14 +872,15 @@ const C_OFF   = vec4(0.55, 0.55, 0.55)
 What the window is doing, as the status light shows it. `busy` pulses the light.
 """
 function indicator(app::App)
-    app.closing && return (C_BUSY, "closing", true)
+    app.closing && return (C_BUSY[], "closing", true)
     st = app.state
-    st === :idle       && return (C_READY, "ready", false)
-    st === :loading    && return (C_BUSY, "loading", true)
-    st === :generating && return (C_GEN, "replying", true)
-    st === :unloading  && return (C_BUSY, "unloading", true)
+    st === :idle       && return (C_READY[], "ready", false)
+    st === :loading    && return (C_BUSY[], "loading", true)
+    st === :generating && return (C_GEN[], "replying", true)
+    st === :deciding   && return (C_GEN[], "deciding", true)
+    st === :unloading  && return (C_BUSY[], "unloading", true)
     st === :failed     && return (C_ERR[], "load failed", false)
-    return (C_OFF, "no model loaded", false)
+    return (C_OFF[], "no model loaded", false)
 end
 
 """The details after the status light: time in the current step, context, last speed."""
@@ -660,7 +892,10 @@ function status_text(app::App)
     st in (:loading, :generating, :unloading) &&
         push!(parts, "$(round(time() - app.t_start; digits = 1)) s")
     app.n_ctx > 0 && push!(parts, "$(app.ctx_used) / $(app.n_ctx) ctx")
-    if st === :idle && app.last !== nothing
+    if typed(app) && !isempty(app.typed_out)
+        o = app.typed_out
+        push!(parts, "last decision $(sum(length, o)) answers · $(round(sum(x -> x.latency_ms, o); digits = 1)) ms")
+    elseif st === :idle && app.last !== nothing
         r = app.last
         tps = r.t_gen > 0 ? round(r.n_gen / r.t_gen; digits = 1) : 0.0
         push!(parts, "last reply $(r.n_gen) tok · $(tps) tok/s" *
@@ -705,7 +940,7 @@ function picker!(app::App)
             end
             here && G.ImGui_SetItemDefaultFocus()
             G.ImGui_SameLine(0f0, app.fonts.size * 2)
-            colored(() -> text!(LC._human(bytes)), app.dim)
+            colored(() -> text!(LC._human(bytes) * (model_kind(app, name) === :typed ? "  ·  typed decisions" : "")), app.dim)
             G.ImGui_PopID()
         end
         G.ImGui_EndCombo()
@@ -715,6 +950,12 @@ function picker!(app::App)
     rect!(app, :model)
     G.ImGui_EndDisabled()
 end
+
+"""`:chat` or `:typed` for a model in the list, read from its file once and remembered."""
+model_kind(app::App, name::AbstractString) =
+    get!(app.kinds, String(name)) do
+        try LC.model_kind(LC.resolve_model(name)) catch; :chat end
+    end
 
 function light!(app::App)
     col, word, busy = indicator(app)
@@ -752,7 +993,7 @@ function status_bar!(app::App)
     rect!(app, :stop)
     G.ImGui_EndDisabled()
     G.ImGui_SameLine(0f0, -1f0)
-    G.ImGui_BeginDisabled(app.state !== :idle || app.closing)
+    G.ImGui_BeginDisabled(app.state !== :idle || app.closing || typed(app))
     G.ImGui_Button("New chat", ZERO) && (new_chat!(app); app.refocus = true)
     rect!(app, :new_chat)
     G.ImGui_EndDisabled()
@@ -761,6 +1002,32 @@ function status_bar!(app::App)
         toggle_terminal!(app)
     end
     rect!(app, :terminal)
+    G.ImGui_SameLine(0f0, -1f0)
+    if G.ImGui_Button(app.notes_open ? "Hide notes" : "Notes", ZERO)
+        app.notes_open = !app.notes_open
+        app.notes_open || (save_notes!(app); app.refocus = true)
+    end
+    rect!(app, :notes_toggle)
+    if app.dual !== nothing
+        G.ImGui_SameLine(0f0, -1f0)
+        G.ImGui_BeginDisabled(app.state !== :idle || app.closing)
+        G.ImGui_Checkbox("Typed", app.typed_on) && set_typed!(app, app.typed_on[])
+        rect!(app, :typed_toggle)
+        G.ImGui_EndDisabled()
+        if G.ImGui_BeginItemTooltip()
+            text!("This model does both. Ticked: typed decisions, read from its logits.\n" *
+                  "Unticked: an ordinary chat with the same weights (a new conversation each time).")
+            G.ImGui_EndTooltip()
+        end
+    end
+    G.ImGui_SameLine(0f0, -1f0)
+    G.ImGui_Checkbox("Think", app.think) && (app.refocus = true)
+    rect!(app, :think)
+    if G.ImGui_BeginItemTooltip()
+        text!("Off: short, direct answers, with the reasoning cut down and folded away.\n" *
+              "Takes effect when a model loads, or on New chat.")
+        G.ImGui_EndTooltip()
+    end
     if app.term !== nothing
         G.ImGui_SameLine(0f0, -1f0)
         G.ImGui_Checkbox("Attach", app.attach) && (app.refocus = true)   # tick it, then type
@@ -770,6 +1037,8 @@ function status_bar!(app::App)
             G.ImGui_EndTooltip()
         end
     end
+    G.ImGui_SameLine(0f0, app.fonts.size)
+    theme_menu!(app)
     G.ImGui_SameLine(0f0, app.fonts.size)
     light!(app)
     # Only SameLine into something: an open SameLine with nothing after it
@@ -820,7 +1089,7 @@ function turn!(app::App, t::Turn, first::Bool)
     if t.role === :user
         first || (G.ImGui_Spacing(); G.ImGui_Separator(); G.ImGui_Spacing())
         colored(() -> text!("You"), C_USER)
-        text!(t.text)
+        text!(display_text(t.text))
         if !isempty(t.attached)
             colored(app.dim) do
                 n = count(==('\n'), t.attached) + 1
@@ -859,7 +1128,7 @@ function turn!(app::App, t::Turn, first::Bool)
     elseif t.role === :note
         colored(() -> text!(t.text), app.dim)
     elseif t.role === :ready
-        colored(() -> text!(t.text), Ref(C_READY))
+        colored(() -> text!(t.text), C_READY)
     else
         colored(() -> text!(t.text), C_ERR)
     end
@@ -909,8 +1178,8 @@ The box is emptied only by a send that happened; a refused one keeps the text.
 function send_box!(app::App)
     p = prompt_text(app)
     isempty(strip(p)) && return false
-    ctx = app.attach[] && app.term !== nothing ? term_text(app.term) : ""
-    send!(app, p; context = ctx) || return false
+    att = app.attach[] && app.term !== nothing
+    send!(app, p; context = att ? term_text(app.term) : "", where = att ? term_where(app.term) : "") || return false
     fill!(app.buf, 0x00)
     app.attach[] = false            # one message at a time: tick it again to resend
     return true
@@ -969,17 +1238,125 @@ function prompt!(app::App, height::Float32)
     end
 end
 
-"""Open the terminal (starting it the first time) or hide it; hiding keeps it running."""
+"""Start `cmd` in `dir` as a new terminal tab and show it."""
+function open_terminal!(app::App, cmd::Cmd, dir::AbstractString; kind::Symbol = term_kind(cmd),
+                        title::AbstractString = term_title(app, kind, cmd, dir))
+    t = Term(cmd; dir = dir, fg = app.term_fg, bg = app.term_bg, kind = kind, title = title)
+    push!(app.terms, t)
+    app.term = t
+    app.term_open = true
+    app.term_focus = true
+    return t
+end
+
+"""A tab's label: what runs and where, the place's name if the folder is one."""
+function term_title(app::App, kind::Symbol, cmd::Cmd, dir::AbstractString)
+    what = kind === :julia ? "julia" : basename(first(cmd.exec))
+    d = rstrip(String(dir), '/')
+    i = findfirst(p -> p.dir == d, app.places)
+    return what * "  ·  " * (i === nothing ? basename(d) : app.places[i].name)
+end
+
+"""A Julia REPL (`:julia`) or your shell (`:shell`) in a place, as a new tab."""
+place_terminal!(app::App, p::Place, kind::Symbol) =
+    open_terminal!(app, kind === :julia ? julia_cmd() : shell_cmd(), p.dir; kind = kind)
+
+"""Close a terminal tab (the child gets SIGHUP). The last one closing hides the panel."""
+function close_terminal!(app::App, t::Union{Nothing,Term} = app.term)
+    t === nothing && return app
+    close!(t)
+    filter!(x -> x !== t, app.terms)
+    app.term === t && (app.term = isempty(app.terms) ? nothing : app.terms[end])
+    if app.term === nothing
+        app.term_open = false
+        app.attach[] = false
+        app.refocus = true
+    else
+        app.term_focus = true
+    end
+    return app
+end
+
+"""Open the terminal (starting one the first time) or hide it; hiding keeps them running."""
 function toggle_terminal!(app::App)
     if app.term_open
         app.term_open = false
         app.refocus = true
+    elseif app.term === nothing
+        open_terminal!(app, app.term_cmd, app.term_dir)
     else
-        app.term === nothing && (app.term = Term(app.term_cmd; dir = app.term_dir))
         app.term_open = true
         app.term_focus = true
     end
     return app
+end
+
+const ASK_DEFAULT = "Look at my terminal. If it shows an error or something going wrong, " *
+                    "say what caused it and give the fix. Be brief."
+
+"""
+    ask_terminal!(app, term = app.term) -> Bool
+
+Send a terminal's text to the model now. The question is what the message box
+holds, or `ASK_DEFAULT` when it is empty. While the model is loading or
+replying the message is queued, as Enter would queue it.
+"""
+function ask_terminal!(app::App, t::Union{Nothing,Term} = app.term)
+    (t === nothing || app.closing) && return false
+    app.term = t
+    typed(app) && return typed_ask!(app, t)
+    has_text = !isempty(strip(prompt_text(app)))
+    if app.state === :idle
+        ok = send!(app, has_text ? prompt_text(app) : ASK_DEFAULT; context = term_text(t), where = term_where(t))
+        if ok && has_text
+            app.active && G.ImGui_ClearActiveID()
+            fill!(app.buf, 0x00)
+        end
+        return ok
+    elseif app.state in (:loading, :generating)
+        if !has_text
+            app.active && G.ImGui_ClearActiveID()
+            copyto!(app.buf, 1, codeunits(ASK_DEFAULT), 1, sizeof(ASK_DEFAULT))
+            app.buf[sizeof(ASK_DEFAULT) + 1] = 0x00
+        end
+        app.attach[] = true
+        app.queued = true
+        return true
+    end
+    push_turn!(app, :note, "No model is loaded: pick one above, then Ask sends this terminal to it.")
+    app.snap = true
+    return false
+end
+
+"""
+The Notes box: text every model is given as part of its system prompt when it
+loads, and again on New chat if it changed. Saved when the box loses focus.
+"""
+function notes_panel!(app::App, height::Real)
+    G.ImGui_BeginChild("##notes", Ref(vec2(0, height)), Cint(G.ImGuiChildFlags_Borders), Cint(0))
+    s = notes_text(app)
+    pending = app.session !== nothing && system_text(app) != app.system_sent
+    colored(app.dim) do
+        text!("Notes  ·  every model reads these when it loads  ·  about $(cld(sizeof(s), 4)) tokens  ·  $(app.notes_file)")
+    end
+    pending && colored(() -> text!("Changed since $(app.model) loaded: New chat gives it the new notes."), C_BUSY)
+    b = app.notes
+    GC.@preserve b G.ImGui_InputTextMultiline("##notesbox", pointer(b), length(b), Ref(vec2(-1, -1)),
+                                              Cint(G.ImGuiInputTextFlags_AllowTabInput), C_NULL, C_NULL)
+    rect!(app, :notes)
+    G.ImGui_IsItemDeactivatedAfterEdit() && save_notes!(app)
+    G.ImGui_EndChild()
+end
+
+"""The chat side: the notes when open, the transcript, the prompt box."""
+function chat_column!(app::App, input_h::Float32)
+    typed(app) && return typed_panel!(app)
+    if app.notes_open
+        avail = G.ImGui_GetContentRegionAvail()
+        notes_panel!(app, clamp(0.35f0 * avail.y, 80f0, max(80f0, avail.y - input_h - 120f0)))
+    end
+    transcript!(app, input_h + app.spacing_y)
+    prompt!(app, input_h)
 end
 
 """The bar between chat and terminal: drag to share the width differently."""
@@ -1006,22 +1383,26 @@ function ui!(app::App)
     status_bar!(app)
     (app.pull_open || app.pull !== nothing) && pull_row!(app)
     input_h = Float32(G.ImGui_GetFrameHeight() + 3 * G.ImGui_GetTextLineHeight())
+    # Everything above the stats row lives in one child, so the row keeps the
+    # bottom line whatever the panels above it do.
+    stats_h = app.stats_open ? Float32(G.ImGui_GetFrameHeight() + app.spacing_y) : 0f0
+    G.ImGui_BeginChild("##body", Ref(vec2(0, -stats_h)), Cint(0), Cint(0))
     if app.term_open && app.term !== nothing
         avail = G.ImGui_GetContentRegionAvail()
         sw = 8f0
         left = clamp(app.split * avail.x, 240f0, max(240f0, avail.x - 240f0 - sw))
         G.ImGui_BeginChild("##chat", Ref(vec2(left, avail.y)), Cint(0), Cint(0))
-        transcript!(app, input_h + app.spacing_y)
-        prompt!(app, input_h)
+        chat_column!(app, input_h)
         G.ImGui_EndChild()
         G.ImGui_SameLine(0f0, 0f0)
         splitter!(app, sw, avail)
         G.ImGui_SameLine(0f0, 0f0)
         terminal_panel!(app, avail.x - left - sw, avail.y)
     else
-        transcript!(app, input_h + app.spacing_y)
-        prompt!(app, input_h)
+        chat_column!(app, input_h)
     end
+    G.ImGui_EndChild()
+    app.stats_open && stats_bar!(app)
     G.ImGui_End()
 end
 
@@ -1115,19 +1496,19 @@ call more than once.
 function close!(app::App)
     app.closing = true
     if (t = app.task) !== nothing
-        app.session !== nothing && LC.cancel!(app.session)
+        app.session isa LC.ChatSession && LC.cancel!(app.session)
         res = try fetch(t) catch e; _unwrap(e) end
-        res isa LC.ChatSession && (app.session = res)   # a load still in flight
+        res isa Union{LC.ChatSession,LC.AnyTyped} && (app.session = res)   # a load still in flight
         app.task = nothing
     end
     if app.session !== nothing
         LC.close!(app.session)
         app.session = nothing
     end
-    if app.term !== nothing
-        close!(app.term)
-        app.term = nothing
-    end
+    foreach(close!, app.terms)
+    empty!(app.terms)
+    app.term = nothing
+    app.win == C_NULL || save_notes!(app)
     if app.pull !== nothing
         LC.cancel!(app.pull[1])          # finished ranges stay on disk; a later pull resumes
         try wait(app.pull[2]) catch end
@@ -1146,7 +1527,7 @@ function close!(app::App)
 end
 
 const _APP_KW = (:width, :height, :title, :visible, :vsync, :font, :font_size, :max_tokens, :markdown,
-                 :terminal, :terminal_dir)
+                 :terminal, :terminal_dir, :theme, :places, :notes_file, :stats)
 
 """
     run(model; kwargs...)
@@ -1165,6 +1546,10 @@ function run(model::Union{Nothing,AbstractString}; max_frames::Integer = 0, kwar
     end
     app = App(; appkw...)
     try
+        # Bring ggml's backend up now rather than at the first load, so the
+        # stats row has the card's VRAM before any model is picked.
+        app.stats_open && LC._ensure_backend(false)
+        haskey(sesskw, :think) && (app.think[] = sesskw[:think])
         if model === nothing
             app.sesskw = sesskw             # kept for whatever the picker loads
         else

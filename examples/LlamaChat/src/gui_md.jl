@@ -20,25 +20,99 @@ const MD = LC.Markdown
 
 include("gui_highlight.jl")
 
-const S_BOLD, S_ITALIC, S_CODE, S_LINK, S_BREAK = 0x01, 0x02, 0x04, 0x08, 0x10
+const S_BOLD, S_ITALIC, S_CODE, S_LINK, S_BREAK, S_MATH = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
 
 const C_CODE   = Ref(vec4(0.95, 0.74, 0.48))
 const C_CODEBG = Ref(vec4(0.11, 0.12, 0.15))
+# Markdown colours, set by the theme (`Theme.md`): headings by level, bold,
+# italic, maths, quotes, and the accent that draws bars, bullets and rules.
+const C_H      = (Ref(vec4(0.38, 0.69, 0.94)), Ref(vec4(0.34, 0.71, 0.76)), Ref(vec4(0.78, 0.47, 0.87)))
+const C_BOLD   = Ref(vec4(0.90, 0.75, 0.48))
+const C_ITALIC = Ref(vec4(0.61, 0.86, 1.00))
+const C_MATH   = Ref(vec4(0.82, 0.60, 0.40))
+const C_QUOTE  = Ref(vec4(0.60, 0.65, 0.70))
+const C_ACCENT = Ref(vec4(0.26, 0.59, 0.98))
+u32(c::Ref{G.ImVec4}, a::Real = 1) = G.ImGui_GetColorU32(Ref(vec4(c[].x, c[].y, c[].z, c[].w * a)))
 const CODE_CHILD_FLAGS = flags(G.ImGuiChildFlags_Borders, G.ImGuiChildFlags_AutoResizeY,
                                G.ImGuiChildFlags_AlwaysUseWindowPadding)
 const TABLE_FLAGS = flags(G.ImGuiTableFlags_Borders, G.ImGuiTableFlags_RowBg,
                           G.ImGuiTableFlags_SizingStretchProp)
 
 """
-Text as this build can draw it. ImWchar is 16-bit here (imconfig.h leaves
-IMGUI_USE_WCHAR32 off), so a code point above U+FFFF — most emoji — can never
-reach a glyph and draws as U+FFFD. Drop those, and the invisible selectors and
-joiners that dress emoji, rather than scatter replacement marks through a reply.
-The raw text (what **copy** puts on the clipboard) keeps them.
+Text as this build can draw it. With 16-bit ImWchar a code point above U+FFFF
+— most emoji — can never reach a glyph and draws as U+FFFD, so those are
+dropped. The Hub's imgui is built with IMGUI_USE_WCHAR32 (`WCHAR_BYTES == 4`)
+and FreeType, so other scripts beyond the BMP stay, and emoji stay when a
+scalable colour emoji font is installed (`EMOJI`, see `load_fonts`). Either way
+the invisible selectors and joiners that dress emoji go: imgui does no text
+shaping, so they would only draw as gaps. The raw text (what **copy** puts on
+the clipboard) keeps everything.
 """
+# The font text is drawn in (set by `App`), and which characters it has. A
+# character no merged font covers would draw as U+FFFD; better left out.
+const GLYPH_FONT = Ref{Ptr{Cvoid}}(C_NULL)
+const _HAS_GLYPH = Dict{Char,Bool}()
+_has_glyph(c::Char) = GLYPH_FONT[] == C_NULL ||
+    get!(() -> G.ImFont_IsGlyphInFont(GLYPH_FONT[], UInt32(c)), _HAS_GLYPH, c)
+
 display_text(s::AbstractString) =
     any(_undrawable, s) ? filter(!_undrawable, String(s)) : String(s)
-_undrawable(c::Char) = !isvalid(c) || c > '￿' || c in ('︎', '️', '‍', '⃣')
+_undrawable(c::Char) = !isvalid(c) || (c > '￿' && (WCHAR_BYTES < 4 || (_is_emoji(c) && !EMOJI[]))) ||
+                       c in ('︎', '️', '‍', '⃣') ||
+                       (!isascii(c) && !_has_glyph(c))
+# The emoji blocks: pictographs, transport, faces, supplemental symbols.
+_is_emoji(c::Char) = '\U1F000' <= c <= '\U1FAFF'
+
+# ── inline maths ─────────────────────────────────────────────────────────────
+
+const _TEX = Dict(
+    "rightarrow" => "→", "to" => "→", "leftarrow" => "←", "gets" => "←", "leftrightarrow" => "↔",
+    "Rightarrow" => "⇒", "implies" => "⇒", "Leftarrow" => "⇐", "Leftrightarrow" => "⇔", "iff" => "⇔",
+    "mapsto" => "↦", "uparrow" => "↑", "downarrow" => "↓", "longrightarrow" => "⟶",
+    "times" => "×", "cdot" => "·", "div" => "÷", "pm" => "±", "mp" => "∓", "ast" => "∗",
+    "approx" => "≈", "neq" => "≠", "ne" => "≠", "leq" => "≤", "le" => "≤", "geq" => "≥", "ge" => "≥",
+    "ll" => "≪", "gg" => "≫", "sim" => "∼", "simeq" => "≃", "equiv" => "≡", "propto" => "∝",
+    "infty" => "∞", "partial" => "∂", "nabla" => "∇", "sum" => "∑", "prod" => "∏", "int" => "∫",
+    "oint" => "∮", "sqrt" => "√", "in" => "∈", "notin" => "∉", "subset" => "⊂", "subseteq" => "⊆",
+    "cup" => "∪", "cap" => "∩", "forall" => "∀", "exists" => "∃", "emptyset" => "∅", "neg" => "¬",
+    "land" => "∧", "lor" => "∨", "circ" => "∘", "degree" => "°", "angle" => "∠", "perp" => "⊥",
+    "parallel" => "∥", "hbar" => "ħ", "ell" => "ℓ", "Re" => "ℜ", "Im" => "ℑ", "aleph" => "ℵ",
+    "ldots" => "…", "dots" => "…", "cdots" => "⋯", "quad" => "  ", "qquad" => "    ",
+    "langle" => "⟨", "rangle" => "⟩", "lfloor" => "⌊", "rfloor" => "⌋", "lceil" => "⌈", "rceil" => "⌉",
+    "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ", "epsilon" => "ε", "varepsilon" => "ε",
+    "zeta" => "ζ", "eta" => "η", "theta" => "θ", "vartheta" => "ϑ", "iota" => "ι", "kappa" => "κ",
+    "lambda" => "λ", "mu" => "μ", "nu" => "ν", "xi" => "ξ", "pi" => "π", "rho" => "ρ", "sigma" => "σ",
+    "tau" => "τ", "upsilon" => "υ", "phi" => "φ", "varphi" => "φ", "chi" => "χ", "psi" => "ψ",
+    "omega" => "ω", "Gamma" => "Γ", "Delta" => "Δ", "Theta" => "Θ", "Lambda" => "Λ", "Xi" => "Ξ",
+    "Pi" => "Π", "Sigma" => "Σ", "Phi" => "Φ", "Psi" => "Ψ", "Omega" => "Ω",
+    "left" => "", "right" => "", "displaystyle" => "", "," => " ", ";" => " ", "!" => "",
+)
+const _SUP = Dict(zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ"))
+const _SUB = Dict(zip("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"))
+
+_script(s, tbl, mark) = all(c -> haskey(tbl, c), s) ? map(c -> tbl[c], s) : string(mark, "(", s, ")")
+
+@doc raw"""
+    tex2uni(formula) -> String
+
+Inline LaTeX as plain Unicode: `\rightarrow` → `→`, `x^2` → `x²`, `v_0` → `v₀`,
+`\frac{a}{b}` → `(a)/(b)`, Greek letters, relations and operators. Models write
+`$\rightarrow$` for an arrow in prose; drawn as source it read `\rightarrow`.
+What it does not know stays as written, minus braces, in the maths colour.
+"""
+function tex2uni(f::AbstractString)
+    s = String(f)
+    s = replace(s, r"\\(?:text|mathrm|mathbf|mathit|mathsf|operatorname|textbf|textit)\s*\{([^{}]*)\}" => s"\1")
+    s = replace(s, r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}" => s"(\1)/(\2)")
+    s = replace(s, r"\\sqrt\s*\{([^{}]*)\}" => s"√(\1)")
+    s = replace(s, r"\\([A-Za-z]+|[,;!])" => m -> get(_TEX, m[2:end], m))
+    s = replace(s, r"\^\{([^{}]*)\}" => m -> _script(m[3:end-1], _SUP, '^'))
+    s = replace(s, r"\^([0-9A-Za-z+\-])" => m -> _script(m[2:end], _SUP, '^'))
+    s = replace(s, r"_\{([^{}]*)\}" => m -> _script(m[3:end-1], _SUB, '_'))
+    s = replace(s, r"_([0-9])" => m -> _script(m[2:end], _SUB, '_'))
+    s = replace(s, r"[{}]" => "")
+    return strip(replace(s, r"\s+" => " "))
+end
 
 # A run of one style, cut at word boundaries: each piece is a word plus the
 # spaces after it, so a line can break between any two pieces.
@@ -93,7 +167,7 @@ function spans!(out::Vector{Span}, x, st::UInt8)
     elseif x isa MD.LineBreak
         push!(out, Span(String[], S_BREAK, Float32[], 0f0))
     elseif x isa MD.LaTeX
-        spans!(out, MD.Code("", x.formula), st)
+        spans!(out, tex2uni(x.formula), st | S_MATH)
     else
         spans!(out, try sprint(MD.plaininline, x) catch; string(x) end, st)
     end
@@ -111,7 +185,7 @@ function blk(x)::Blk
     x isa MD.List           && return ListBlk(x.ordered, [blocks(i) for i in x.items])
     x isa MD.BlockQuote     && return Quote(blocks(x.content))
     x isa MD.HorizontalRule && return Rule()
-    x isa MD.LaTeX          && return CodeBlock("math", display_text(x.formula))
+    x isa MD.LaTeX          && return Para(spans!(Span[], tex2uni(x.formula), S_MATH))
     x isa MD.Admonition     && return Quote(vcat(Blk[Para(spans(MD.Bold(Any[x.title])))], blocks(x.content)))
     if x isa MD.Table && !isempty(x.rows)
         return TableBlk([String(plain(spans(c))) for c in x.rows[1]],
@@ -124,7 +198,7 @@ blocks(xs) = Blk[blk(x) for x in xs]
 """Parse one segment. A parser failure costs the formatting, never the text."""
 function parse_md(raw::AbstractString)
     try
-        return blocks(MD.parse(raw).content)
+        return blocks(MD.parse(LC._md_prep(raw)).content)
     catch e
         e isa InterruptException && rethrow()
         return Blk[Plain(display_text(rstrip(raw)))]
@@ -150,8 +224,20 @@ function font_for(app, st::UInt8)
     f = app.fonts
     st & S_CODE   != 0 && return f.mono
     st & S_BOLD   != 0 && return f.bold
-    st & S_ITALIC != 0 && return f.italic
+    st & (S_ITALIC | S_MATH) != 0 && return f.italic
     return f.regular
+end
+
+"""The colour a run is drawn in: code, maths and links keep theirs; inside a
+heading the heading's; otherwise bold and italic have their own."""
+function color_for(st::UInt8, heading)
+    st & S_CODE   != 0 && return C_CODE
+    st & S_MATH   != 0 && return C_MATH
+    st & S_LINK   != 0 && return C_USER
+    heading === nothing || return heading
+    st & S_BOLD   != 0 && return C_BOLD
+    st & S_ITALIC != 0 && return C_ITALIC
+    return nothing
 end
 
 function measure!(sp::Span)
@@ -171,9 +257,10 @@ Lay out inline runs, breaking lines by hand. Each piece is drawn, then
 first. A new line starts at the current indent or group, so this works inside
 list items and table cells.
 """
-function flow!(app, sps::Vector{Span}, base::UInt8 = 0x00; scale::Float32 = 1f0)
+function flow!(app, sps::Vector{Span}, base::UInt8 = 0x00; scale::Float32 = 1f0, color = nothing)
     isempty(sps) && return nothing
     size = app.fonts.size * scale
+    dl = G.ImGui_GetWindowDrawList()
     right = G.ImGui_GetCursorPosX() + G.ImGui_GetContentRegionAvail().x
     linestart = true
     for sp in sps
@@ -184,8 +271,9 @@ function flow!(app, sps::Vector{Span}, base::UInt8 = 0x00; scale::Float32 = 1f0)
             continue
         end
         G.ImGui_PushFont(font_for(app, st), size)
-        col = st & S_CODE != 0 ? C_CODE : st & S_LINK != 0 ? C_USER : nothing
+        col = color_for(st, color)
         col === nothing || G.ImGui_PushStyleColor(Cint(G.ImGuiCol_Text), col)
+        lh = G.ImGui_GetTextLineHeight()
         measure!(sp)
         for (k, p) in enumerate(sp.pieces)
             if !linestart && G.ImGui_GetCursorPosX() + sp.widths[k] > right
@@ -193,7 +281,16 @@ function flow!(app, sps::Vector{Span}, base::UInt8 = 0x00; scale::Float32 = 1f0)
                 linestart = true
             end
             linestart && isspace(p[1]) && continue    # no blanks at the start of a line
+            if st & S_CODE != 0                       # inline code sits on a pill
+                q = G.ImGui_GetCursorScreenPos()
+                G.ImDrawList_AddRectFilled(dl, Ref(vec2(q.x - 2, q.y)), Ref(vec2(q.x + sp.widths[k] + 2, q.y + lh)),
+                                           u32(C_CODEBG), 3f0, Cint(0))
+            end
             text!(p)
+            if st & S_LINK != 0                       # links are underlined
+                lo = G.ImGui_GetItemRectMin(); hi = G.ImGui_GetItemRectMax()
+                G.ImDrawList_AddLine(dl, Ref(vec2(lo.x, hi.y - 1)), Ref(vec2(hi.x, hi.y - 1)), u32(C_USER, 0.6), 1f0)
+            end
             G.ImGui_SameLine(0f0, 0f0)
             linestart = false
         end
@@ -207,12 +304,39 @@ end
 const HEADING_SCALE = (1.5f0, 1.3f0, 1.15f0)
 
 draw!(app, b::Para)  = flow!(app, b.spans)
-draw!(app, ::Rule)   = G.ImGui_Separator()
 draw!(app, b::Plain) = text!(b.text)
 
+"""A horizontal line in `c` fading to nothing: towards the right, or both ways."""
+function fade_line!(c, y, thick; both::Bool = false)
+    dl = G.ImGui_GetWindowDrawList()
+    x0 = G.ImGui_GetCursorScreenPos().x
+    w = G.ImGui_GetContentRegionAvail().x
+    on, off = u32(c, 0.9), u32(c, 0.0)
+    if both
+        m = x0 + w / 2
+        G.ImDrawList_AddRectFilledMultiColor(dl, Ref(vec2(x0, y)), Ref(vec2(m, y + thick)), off, on, on, off)
+        G.ImDrawList_AddRectFilledMultiColor(dl, Ref(vec2(m, y)), Ref(vec2(x0 + w, y + thick)), on, off, off, on)
+    else
+        G.ImDrawList_AddRectFilledMultiColor(dl, Ref(vec2(x0, y)), Ref(vec2(x0 + w, y + thick)), on, off, off, on)
+    end
+end
+
+function draw!(app, ::Rule)
+    y = G.ImGui_GetCursorScreenPos().y + app.spacing_y
+    fade_line!(C_ACCENT, y, 1.5f0; both = true)
+    G.ImGui_Dummy(Ref(vec2(0, 2 * app.spacing_y)))
+end
+
+# Headings in their level's colour; levels 1 and 2 get an underline in it that
+# fades out to the right, where a plain separator used to be.
 function draw!(app, b::Heading)
-    flow!(app, b.spans, S_BOLD; scale = get(HEADING_SCALE, b.level, 1f0))
-    b.level <= 2 && G.ImGui_Separator()
+    c = C_H[clamp(b.level, 1, 3)]
+    flow!(app, b.spans, S_BOLD; scale = get(HEADING_SCALE, b.level, 1f0), color = c)
+    if b.level <= 2
+        thick = b.level == 1 ? 2f0 : 1f0
+        fade_line!(c, G.ImGui_GetCursorScreenPos().y - app.spacing_y / 2, thick)
+        G.ImGui_Dummy(Ref(vec2(0, thick)))
+    end
 end
 
 function draw!(app, b::CodeBlock)
@@ -235,7 +359,7 @@ function draw!(app, b::CodeBlock)
             if c == 0
                 text!(s)
             else
-                G.ImGui_PushStyleColor(Cint(G.ImGuiCol_Text), c)     # the ImU32 overload
+                G.ImGui_PushStyleColor(Cint(G.ImGuiCol_Text), HL_RGBA[c])   # the ImU32 overload
                 text!(s)
                 G.ImGui_PopStyleColor(Cint(1))
             end
@@ -249,7 +373,7 @@ end
 function draw!(app, b::ListBlk)
     for (k, item) in enumerate(b.items)
         G.ImGui_PushID(Cint(k))
-        text!(b.start >= 0 ? string(b.start + k - 1, ".") : "•")
+        colored(() -> text!(b.start >= 0 ? string(b.start + k - 1, ".") : "•"), C_H[2])
         G.ImGui_SameLine(0f0, -1f0)
         G.ImGui_BeginGroup()            # wrapped lines return to here, not the margin
         draw_blocks!(app, item; tight = true)
@@ -258,10 +382,18 @@ function draw!(app, b::ListBlk)
     end
 end
 
+# A quote: indented, tinted, with a bar in the accent down its left edge.
 function draw!(app, b::Quote)
+    top = G.ImGui_GetCursorScreenPos()
     G.ImGui_Indent(app.fonts.size)
-    colored(() -> draw_blocks!(app, b.body; tight = true), app.dim)
+    G.ImGui_BeginGroup()
+    colored(() -> draw_blocks!(app, b.body; tight = true), C_QUOTE)
+    G.ImGui_EndGroup()
     G.ImGui_Unindent(app.fonts.size)
+    bot = G.ImGui_GetItemRectMax().y
+    x = top.x + app.fonts.size * 0.3f0
+    G.ImDrawList_AddRectFilled(G.ImGui_GetWindowDrawList(), Ref(vec2(x, top.y)), Ref(vec2(x + 3, bot)),
+                               u32(C_ACCENT, 0.85), 1.5f0, Cint(0))
 end
 
 function draw!(app, b::TableBlk)
@@ -271,7 +403,7 @@ function draw!(app, b::TableBlk)
     for h in b.header
         G.ImGui_TableSetupColumn(h, Cint(0), 0f0, Cuint(0))
     end
-    G.ImGui_TableHeadersRow()
+    colored(G.ImGui_TableHeadersRow, C_H[2])       # header text in the theme's heading colour
     for row in b.rows
         G.ImGui_TableNextRow(Cint(0), 0f0)
         for k in 1:n

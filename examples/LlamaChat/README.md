@@ -206,15 +206,244 @@ julia> LlamaChat.gui("qwen3:4b"; think = false, font_size = 20)
   (TOML/YAML/JSON/INI) through a small tokenizer; unlabelled or `text` blocks
   stay plain. A block is coloured once, when it is parsed, not per frame. It is the parser the
   terminal uses (`Markdown.parse`), so it has the same blind spots: italic
-  nested in bold that closes on `***` stays literal. Emoji are dropped:
-  this imgui build's `ImWchar` is 16-bit, so code points above U+FFFF have no
-  glyph to draw. Copy keeps them. `markdown = false` shows replies raw.
+  nested in bold that closes on `***` would stay literal, so `***x***` is
+  rewritten to `**_x_**` first. A `$` before a digit is money, not LaTeX
+  (`$10k–$100k` used to turn into maths); a `$…$` that looks like maths stays
+  maths. `markdown = false` shows replies raw.
+- **Markdown is coloured**, per theme: headings by level (levels 1 and 2 with
+  an underline that fades out), bold and italic in their own colours, inline
+  code on a pill, links underlined, numbered and bulleted list markers in
+  colour, table headers tinted, quotes with an accent bar, rules that fade at
+  both ends. Inline LaTeX becomes Unicode in the maths colour: `$\rightarrow$`
+  is →, `$E = mc^2$` is E = mc², `$v_0 \approx 9.81 \times t$` is
+  v₀ ≈ 9.81 × t, Greek letters and the usual relations and operators
+  (`tex2uni`); what it does not know stays as written.
+- **Text** is rasterised by FreeType (hinted, crisper than stb_truetype) with
+  32-bit characters: the Hub's imgui is built with `IMGUI_ENABLE_FREETYPE` and
+  `IMGUI_USE_WCHAR32`. Noto Sans Symbols2 and Math are merged into every face,
+  and Noto Sans CJK when installed (one ~20 MB copy shared by all four faces).
+  A character no merged font has is left out rather than drawn as U+FFFD.
+  Emoji draw in colour only with a *scalable* colour emoji font (COLR, e.g.
+  Twemoji); Noto Color Emoji is a single 109 px bitmap strike, which FreeType
+  will not scale to text size, so with only that installed emoji are left out.
+  **copy** keeps everything.
+- **Theme** (the combo in the status bar): Dark, Light, Midnight, Nord,
+  Gruvbox, Solarized, each with a swatch, plus an **Accent** colour of your own
+  under them. A theme sets imgui's colours, the role colours, the status
+  light, the markdown and code palettes and the terminal's default colours, and switching
+  recolours what is already on screen (code runs store a token class, not a
+  colour). The choice is saved in `~/.config/llamachat/theme`;
+  `gui(; theme = "Nord")` or `$LLAMACHAT_THEME` picks one for a session.
 - The transcript follows the stream only while you are at the bottom. Scroll
   up and it stays put; sending jumps back down.
 - **copy** under a reply puts its raw markdown on the clipboard (imgui text is
   drawn, not selectable).
 - Closing the window frees the model, like `/exit`. Closing it during a load
   waits for the load to land first, since a load cannot be interrupted.
+
+### A small environment: places, terminals, Ask, notes, stats
+
+The window is also somewhere to work: several terminals in the folders you use,
+a model that can be shown any of them, notes it always has, and the machine's
+numbers along the bottom. No RAG and no tools: the model gets text, and answers.
+
+**Places.** The folders terminals start in. By default RepliBuild (the checkout
+this package builds against), the Hub, and the folder that holds the Hub, in
+that order; `~/.config/llamachat/places` replaces them:
+
+```
+# name = folder, in menu order; the first is where the first terminal opens
+Work  = ~/code/work
+Notes = ~/Documents/notes
+```
+
+The first terminal opens in the first place when the window was started from
+`$HOME` (a keybinding, a launcher); started from anywhere else, it opens there.
+
+**Terminals.** As many as you like, as tabs over the terminal panel. `+` lists
+every place twice, as a Julia REPL (`julia --project=@.`, so the folder's own
+project) and as your `$SHELL`. `Go` sends the showing terminal to a place by
+typing its own `cd` (`cd("…")` in Julia, `cd -- '…'` in a shell). `Close` ends
+one; the others, and any not showing, keep running and keep being read. The
+line under the tabs is where the program is *now* (from `/proc`), not where it
+started.
+
+**Ask.** The button over a terminal, or Ctrl+Shift+E inside it, sends that
+terminal's last 120 lines to the model at once, with what it is and where
+(`a zsh shell in /path`). The question is whatever the message box holds; with
+the box empty it asks what went wrong and how to fix it. While the model is
+loading or mid-reply the question is queued, as Enter queues a message.
+`Attach` is the slower form: tick it, then write the message yourself.
+
+**Notes.** The `Notes` button opens a box above the transcript. What you write
+there is saved to `~/.config/llamachat/notes.md` when you leave the box, and
+goes to every model as its system prompt when it loads (after `system`, if you
+passed one). A model already loaded gets edited notes on `New chat`: the system
+prompt is the first thing in the KV cache, so that is the one moment it can
+change for free. The box says how many tokens the notes cost and when a loaded
+model does not have the latest.
+
+**Think.** Unticked, models load with `think = false`: short, direct answers,
+which is what a quick question about a terminal wants (qwen3:4b: 22 s of
+reasoning for a one-line answer with it on). For a model whose template has
+Qwen's hybrid switch (qwen3.8:27b and nimble here) that is a real off switch:
+the reply opens with an empty think block, as the model's own template writes
+it, and the answer is the first thing generated. For the others it is a
+directive that shortens the reasoning. Same timing as notes: at load, or on
+`New chat`.
+
+**Stats.** The bottom row, sampled once a second, read from `/sys` and `/proc`
+in Julia:
+
+| | what | from |
+|---|---|---|
+| GPU | busy %, a 90 s graph, temperature, watts, fan | xe: `gtidle/idle_residency_ms`, hwmon `energy1`, `temp` (pkg), `fan1`; amdgpu: `gpu_busy_percent`, `power1_average` |
+| VRAM | used / total for the whole card, memory temperature | ggml's device query, the figure the planner budgets with; hwmon `temp` (vram) |
+| model | tokens a second while it works (prefill and generation), a graph; the last reply's speed when idle | the session's token position |
+| CPU | busy %, temperature | `/proc/stat`; k10temp / coretemp |
+| RAM | used / total | `/proc/meminfo` |
+
+A sensor the driver does not publish leaves its part of the row out.
+`gui(...; stats = false)` leaves the whole row out. `LlamaChat.GUI.stats_text(app)`
+is the row as words.
+
+### Typed mode: decision models (Laya)
+
+A second kind of model. A chat model reads a conversation and writes text; a
+typed decision model reads a **state** and a set of **questions**, each with
+its own answer options, and returns a probability for every option. Nothing is
+generated, so an answer takes tens of milliseconds and a program branches on a
+value instead of parsing a sentence. The models are Laya's (ModernBERT-large
+plus a decision head, ~430 MiB each).
+
+**The format.** A request is JSON, and a question is one of three types:
+
+```json
+{
+  "state": {"message": "The webhook failed again. If it is not fixed today I am leaving."},
+  "questions": {
+    "intent":      {"type": "choice", "instructions": "What does the customer want in `message`?",
+                    "criteria": {"refund": "money back", "technical_help": null, "cancellation": null}},
+    "frustration": {"type": "score",  "instructions": "How frustrated does `message` sound?",
+                    "criteria": ["calm", "concerned", "annoyed", "very angry"]},
+    "churn_risk":  {"type": "noul",   "instructions": "Does `message` say the customer may leave?"}
+  }
+}
+```
+
+| type | `criteria` | the answer's `value` |
+|---|---|---|
+| `choice` | an object, `label: description` or `null`; 2–16 labels, in the order written | the winning label |
+| `score`  | a list of levels, lowest first; 2–16 | the expected level, Σ level × p |
+| `noul`   | optional, `{"false": …, "true": …}` | P(true) |
+
+In Julia these are `Choice`, `Score` and `Noul`, and an answer is an `Answer`
+(`value`, `confidence`, and `probabilities` as `option => p` in the question's
+own order) inside a `Decisions`. Objects are parsed into an ordered map, not a
+`Dict`: option order reaches the model, and a `Dict` shuffles it.
+
+Everything is checked before it is sent, and a request that is wrong is a
+`TypedFormatError` naming the field (`questions.intent.criteria: a choice takes
+2 to 16 labels; this has 1`). The engine does not do this: a question typed
+`"nope"` comes back as a confident empty choice.
+
+A JSON file can be any of four things, and `load_typed` tells them apart:
+a request (`state` + `questions`), a batch (`states` + `questions`, one
+decision per state), questions alone, or a state alone (any other JSON, or
+plain text).
+
+**The store.** `LlamaChat.bring_laya()` adds the Laya GGUFs under
+`~/ggmlc/models` (`$LLAMACHAT_LAYA_MODELS`) to LlamaChat's store as
+`laya:<family>`, the family read from each file. They then sit in
+`list_models()` and the window's model list next to the chat models, tagged
+"typed decisions". `LlamaChat.add_model(path, name)` does the same for any
+local GGUF. The blob is a hard link when it can be, so nothing is copied.
+
+**Headless.**
+
+```julia
+LlamaChat.bring_laya()                                             # once
+s = LlamaChat.TypedSession("laya:typed-decisions")
+d = LlamaChat.decide(s, Dict("message" => "…"), read("questions.json", String))
+d["intent"].value, d["intent"].probabilities, d["churn_risk"].value
+LlamaChat.decide(s, LlamaChat.load_typed("request.json"))          # a file: one Decisions per state
+LlamaChat.close!(s)
+LlamaChat.decide("laya:typed-decisions", "request.json")           # load, run, free
+```
+
+`open_model(name)` returns a `ChatSession` or a `TypedSession`, whichever the
+file is; `ChatSession` on a typed model is an error that says which to use.
+
+**In the window.** Picking a typed model is the switch: the chat side becomes
+a path box with `Load JSON` and `Files` (the `.json` files under the path, or
+under your places when it is empty), a State box, a Questions box, `Decide`,
+and the answers as a bar per option with the winner marked. A batch fills the
+State box with `{"states": […]}` and each state gets its own row. `Ask` on a
+terminal makes that terminal the state and decides at once, with three
+questions about terminals (did something fail, what kind, how serious) unless
+you loaded questions of your own. Picking a chat model switches back.
+
+**How it runs.** A Laya GGUF is a ggmlc graph, which llama.cpp does not load,
+and the runner is a C++ executable with no library behind it. So a
+`TypedSession` owns a `laya daemon` process (`laya` on PATH, or
+`$LLAMACHAT_LAYA`; device `$LLAMACHAT_LAYA_DEVICE`, default `vulkan:0`) and
+sends it one JSON line per decision. It is the one model here that is not a
+RepliBuild wrapper; that needs ggmlc built as a Hub package of its own.
+
+Measured on the B60, typed-decisions file (2026-11-13): load 0.4 s; three
+questions over a short state 53 ms; three questions over a 311-token request
+155 ms.
+
+**Nimble: the other kind of typed model.** Laya is an encoder with a decision
+head. Nimble (Bespoke-Nimble-9B fused onto Qwen3.5-9B, 8.9 GiB at Q8_0) is a
+language model trained to answer a typed question with one token, the letter
+of the option it picks. Its GGUF says so (`qwen35.decision.type = "nimble"`)
+and carries the prompt contract as a second chat template
+(`tokenizer.chat_template.systemone`). `model_kind` calls such a file typed,
+and `open_model` loads it as a `LogitSession`:
+
+- it runs **in this process**, on the RepliBuild-wrapped llama.cpp, like chat;
+- the prompt is decoded, the logits of the letters `A`, `B`, … are read off the
+  last position, and their softmax (temperature 1) is the answer. Nothing is
+  generated;
+- same request format, same `Decisions` back, same panel in the window;
+- every question's prompt carries the context and the whole schema and differs
+  only in its last line, so the shared part is decoded once and each further
+  question costs about 75 ms. Going back to the shared point is a checkpoint of
+  the recurrent state plus dropping the attention cells after it (Qwen3.5 is a
+  hybrid: most layers keep a running state that cannot be rewound by position);
+- up to 26 options a question, 8192 tokens of prompt (what it was trained and
+  served at).
+
+Because it is a chat model underneath, the window shows a **Typed** box while
+it is loaded: unticked, the same weights chat (a new conversation each time,
+since a decision overwrites the chat's cache).
+
+Measured on the B60, nimble, model loaded (2026-11-13):
+
+| | Laya typed-decisions | nimble, typed | nimble, chat (`think = false`) |
+|---|---|---|---|
+| load | 0.4 s | 3.1 s + 1.2 s warm-up | same session |
+| one short question | ~30 ms | 343 ms | ~0.5 s for a one-sentence answer |
+| three questions, support ticket (437-token prompts) | 53 ms | 761 ms | – |
+| three questions, agent step (311 / 414 tokens) | 155 ms | 565 ms | – |
+| batch of 8 lines, one question each | ~20 ms each | 323 ms each | – |
+| generation | none | none | 39.7 tok/s; prefill 1105 tok/s at 8k |
+
+Nimble is 5–15× slower than Laya and far more decisive on the same examples:
+the ticket's intent is `technical_help` at 0.95 (Laya 0.55), the journal lines
+come back at 0.99–1.0 or 0.0–0.02 (Laya 0.23–0.75), and a failed `ls` in a
+terminal is `failed: yes 1.0, kind: missing 1.0`. Its time is the prompt:
+about 1.2 ms a token to read it, then one short tail per question.
+
+**Prompt batching.** Both of those, and every chat turn, go through the same
+finding about this backend: a llama_decode of up to 8 tokens takes ggml's
+matrix-vector path, 9 or more its dequantise-and-multiply path, which has a
+floor a small batch never gets under and is only efficient at a multiple of
+128 tokens. So prompts are cut to fit (`_prompt_runs`, with the table): a run
+of up to 31 tokens goes in chunks of 8, and a few tokens past a multiple of
+128 are split off. A 20-token chat turn on qwen3.8:27b is read in 327 ms
+instead of 682; 129 tokens in 574 ms instead of 1270.
 
 ### Startup: the sysimage
 
@@ -370,6 +599,13 @@ library next to their own `.jl`, and `libimgui.so`'s RUNPATH starts with
 `$ORIGIN`, so the vendored pair binds one copy. The test suite checks
 `/proc/self/maps` for exactly one. `HUB=/other/checkout vendor_gui.sh` copies
 from another Hub checkout.
+
+The Hub's imgui is built with `IMGUI_ENABLE_FREETYPE` and `IMGUI_USE_WCHAR32`
+(`packages/imgui/replibuild.toml`), so `libimgui.so` also needs the system
+`libfreetype.so.6`. Neither define is something the GUI has to be told about:
+`HAS_FREETYPE` is whether the wrapper has `ImGuiFreeType_*`, and `WCHAR_BYTES`
+is read from the struct layout DWARF gave it (ImFont's two adjacent ImWchar
+fields), so a 16-bit build still works, minus text beyond U+FFFF.
 
 ### Measured
 
@@ -539,6 +775,88 @@ block, so a low `max_tokens` returns an empty-looking answer because generation
 never escaped the thinking. Budget a few hundred tokens before concluding
 anything is broken.
 
+### The sweet spot: flash attention, batch, KV cache
+
+Generation speed is set by what each token reads: the weights, and the KV cache
+of everything in context. So a chat slows as it grows, and on this card the
+attention kernels make it slow faster than bandwidth explains. qwen3:4b,
+`LlamaChat.bench`, f16 KV:
+
+| flash attention | n_batch | gen, fresh | prefill 8k | gen at 8k | prefill 24k | gen at 24k |
+|---|---|---|---|---|---|---|
+| on  | 2048 |  93.1 |  551 | 43.5 | 247 | **10.6** |
+| off | 2048 |  86.0 |  975 | 50.1 | **35.5** | 27.6 |
+| off |  512 |  87.5 |    – |    – | 532 | 23.5 |
+
+Without flash attention llama.cpp materialises the attention scores,
+n_ubatch × n_ctx × n_head × f32 of compute buffer: one copy while that is up
+to 768 MiB, two from 1 GiB (4194 MiB at 512/32k for qwen3:4b, to the MiB). At
+2048 that is 16 GiB, more than the card: the run did not abort, it crawled.
+The planner counts it (`attn_scores_bytes`), so `n_batch` and the window
+shrink to fit instead, and with flash attention off `n_batch` may go down to
+256 to stay in the one-copy case: that is what gives qwen3.8:27b its whole
+window (0.83 GiB of buffer at 256/32768, against two copies of 1.5 GiB at 512).
+
+`flash_attn = :auto` (the default) turns it off when that keeps the context
+window it would have had with it on — context first, then speed, the same rule
+as `n_batch`. The four models here, 8k paste then 256 tokens:
+
+| model | chosen | window | gen | prefill 8k | gen at 8k | the other setting |
+|---|---|---|---|---|---|---|
+| qwen3:4b    | off | 32768 | 86.8 | 1051 | 50.2 | on: 93.1 / 551 / 43.5 |
+| gemma4:26b  | off | 32768 | 60.9 | 1062 | 50.8 | on: 57.7 / 267 / 29.7 |
+| qwen3-coder | on  | 30720 | 83.4 |  299 | 28.5 | off: 22528 window (n_batch 256), 77.5 / 504 / 42.9 |
+| qwen3.8:27b | off | 32768 | 17.4 |  290 | 16.1 | on: 17.9 / 254 / 13.5 |
+
+For qwen3-coder on long code, `flash_attn = :off` trades a quarter of the
+window for 1.5–1.7× speed; it is a choice, so it is not the default.
+
+qwen3.8:27b is a dense 27B: every token reads its 15 GiB of weights, and the
+Vulkan timings (`GGML_VK_PERF_LOGGER=1`) put the q4_K matrix-vector products
+at about 370 GB/s, the card's memory bandwidth. So ~18 tok/s on a fresh context
+is the ceiling for this quantisation, and none of ggml-vulkan's switches
+(`GGML_VK_FORCE_MMVQ`, `…_DISABLE_FUSION`, `…_ALLOW_GRAPHICS_QUEUE`,
+`…_MAX_NODES_PER_SUBMIT`, thread count) moves it. What flash attention decides
+is how fast that falls as the chat grows (n_batch 256, 2026-11-12):
+
+| flash attention | gen, fresh | prefill 8k | gen at 8k | prefill 24k | gen at 24k |
+|---|---|---|---|---|---|
+| on  | 17.9 | 254 | 13.5 | 141 | **4.0** |
+| off | 16.9 | 290 | 15.7 | 259 | **12.8** |
+
+- **`kv_type`** (`:f16`, `:q8_0`, `:q4_0`; `$LLAMACHAT_KV`). q8_0 halves the
+  cache, which buys window (qwen3-coder: 32k with n_batch 1024), but on this
+  card it is *slower*: 24.5 against 42.5 tok/s at 8k for qwen3:4b, since the
+  flash-attention path dequantises as it goes. Memory, not speed.
+- **Sliding-window layers** (Gemma 4: 25 of 30) cache only their window plus
+  a ubatch. LlamaChat opens contexts with `swa_full = false`; llama.cpp's
+  default keeps a full-length cache for them too (3.2 GiB of gemma4's 16k
+  window), needed only to roll a cache back, which LlamaChat never does. The
+  planner counts them the same way, which is what moved gemma4:26b from a
+  10240 window to 32768.
+
+- **Load time.** A model going wholly to the card is read, not memory-mapped
+  (`load_mode = NONE`): the upload out of a mapping page-faults its way through
+  the file, 4.6 s against 2.1 s for qwen3.8:27b from the page cache. A model
+  with layers on the CPU keeps the mapping. The planner also parses each GGUF
+  header once per file now instead of some thirty times a load (1 s for a
+  248k-token vocabulary). `ChatSession("qwen3.8:27b")`, warm: 7.1 s → 2.1 s;
+  qwen3-coder 2.2 s, qwen3:4b 0.55 s (2026-11-12).
+
+### Headless: `reply`, `bench`, `sweep`
+
+```julia
+r = LlamaChat.reply("qwen3:4b", "Name three moons of Jupiter."; think = false)
+LlamaChat.bench("gemma4:26b"; depth = 8192)          # one line: load, VRAM, gen, prefill, gen at depth
+LlamaChat.sweep("qwen3:4b"; n_batch = (512, 2048), kv_type = (:f16, :q8_0), flash_attn = :off)
+```
+
+No window, no markdown redraw, plain text out: for scripts, for comparing
+settings, and for an agent that reads output rather than looks at it. `bench`
+loads, measures at `temp = 0` with thinking off (a fresh-context run, then a
+`depth`-token paste of this package's own source), frees, and returns every
+number as a NamedTuple.
+
 ### Terse mode
 
 `think = false` shortens the reasoning and folds the block out of the reply:
@@ -551,7 +869,16 @@ Measured on qwen3:4b, `temp = 0`, two prompts: **662 → 201 generated tokens,
 11.8 s → 3.9 s**, and "Say hello." answers `Hello!` instead of 280 tokens of
 deliberation.
 
-It **shortens** reasoning; it cannot disable it, and nothing in this build can:
+That is the directive, for models whose template has no switch. Where the
+template has Qwen's hybrid switch (`enable_thinking`; qwen3.8:27b and nimble of
+the models here) `think = false` uses it instead: the reply is prefilled with
+the closed, empty think block the template itself writes, and nothing is added
+to the system prompt. "Say hello in three words.", temp 0, nimble: 300+ tokens
+of reasoning with the directive, `Hello there, friend!` in 5 tokens with the
+switch; qwen3.8:27b: 3 tokens. Which a model gets is read from its template,
+not its name.
+
+For the rest the directive **shortens** reasoning; it cannot disable it:
 
 - Qwen3's documented `/no_think` switch does nothing here. It is implemented in
   the model's Jinja template, which strips the token — `llama_chat_apply_template`
@@ -755,6 +1082,22 @@ cache is rebuilt from scratch rather than extended onto a transcript the model
 never saw. `test/runtests.jl` asserts both the prefix invariant and that turn 2
 costs far fewer prompt tokens than a full re-decode would — that assertion is
 what catches a regression in the reuse path.
+
+### Templates llama.cpp does not know: Gemma 4
+
+`llama_chat_apply_template` matches a model's Jinja template against formats it
+knows; it is not a Jinja engine. For anything else it returns -1, and LlamaChat
+falls back to ChatML. Gemma 4's `<|turn>user … <turn|>` is one it does not know
+(b10286), and ChatML is text Gemma 4 never trained on: gemma4:26b answered with
+a stray `<|channel>thought` tag and then garbage. `_format_gemma4` writes the
+format out (text chat, no tools), and `think` maps to the template's own
+`enable_thinking`: on, `<|think|>` opens a system turn and the reasoning
+arrives in a thought channel, which folds like `<think>`. Off, the generation
+prompt closes an empty channel, so Gemma 4 gets no terse directive. One
+difference from the Jinja: earlier replies keep their reasoning
+(`preserve_thinking`), because stripping it would change cached bytes and
+re-decode the conversation every turn. Measured on the B60: 55–57 tok/s, a
+second turn feeding 18–22 prompt tokens.
 
 ## Building the wrapper
 

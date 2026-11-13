@@ -142,6 +142,21 @@ function _env_ngl()
     return n
 end
 
+"""`kv_type` → llama.cpp's cache element type (`type_k`/`type_v`)."""
+const _KV_GGML = Dict(:f16 => L.GGML_TYPE_F16, :q8_0 => L.GGML_TYPE_Q8_0, :q4_0 => L.GGML_TYPE_Q4_0)
+
+"""`flash_attn` → llama.cpp's `flash_attn_type`. `:auto` lets llama.cpp decide per device."""
+const _FA = Dict(:auto => L.LLAMA_FLASH_ATTN_TYPE_AUTO, :on => L.LLAMA_FLASH_ATTN_TYPE_ENABLED,
+                 :off => L.LLAMA_FLASH_ATTN_TYPE_DISABLED)
+
+"""`\$LLAMACHAT_KV` (`f16`, `q8_0`, `q4_0`), read at call time like `_env_ngl`."""
+function _env_kv()
+    v = Symbol(lowercase(strip(get(ENV, "LLAMACHAT_KV", "f16"))))
+    haskey(_KV_GGML, v) && return v
+    @warn "LLAMACHAT_KV=$(repr(ENV["LLAMACHAT_KV"])) is not f16, q8_0 or q4_0 — using f16"
+    return :f16
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model resolution — ollama's blob store, so you can say "qwen3-coder" instead
 # of "/var/lib/ollama/blobs/sha256-1194192cf2a1...".
@@ -509,13 +524,65 @@ _restyle(x) = x
 _restyle(h::Markdown.Header{1}) = h
 _restyle(h::Markdown.Header) = Markdown.Paragraph(Any[Markdown.Bold(h.text)])
 
+"""
+    _md_prep(text) -> String
+
+Fix up a reply before `Markdown.parse`, outside code (fences and inline
+backticks are left alone):
+
+* **Dollar signs.** Julia's markdown reads `\$…\$` as LaTeX and a bare `\$10`
+  or `\$name` as an interpolation, so "costs \$10k–\$100k/kg" lost its dollar
+  signs and turned the middle into maths. A `\$…\$` pair whose inside looks
+  like maths (a `\\command`, `^`, `_` or `=`) stays maths, so
+  `\$9.81 \\times 2\$` and `\$x^2\$` render as formulas; any other pair is
+  money and is escaped, as is a `\$` before a digit, and a lone `\$NAME`.
+* **`***bold italic***`**, which the parser leaves as literal asterisks, is
+  rewritten to `**_bold italic_**`, which it reads.
+"""
+function _md_prep(text::AbstractString)
+    (occursin('$', text) || occursin("***", text) || occursin("___", text)) || return String(text)
+    out = IOBuffer()
+    fence = false
+    for (k, line) in enumerate(split(text, '\n'))
+        k > 1 && write(out, '\n')
+        if startswith(lstrip(line), "```") || startswith(lstrip(line), "~~~")
+            fence = !fence
+            write(out, line); continue
+        end
+        if fence
+            write(out, line); continue
+        end
+        parts = split(line, '`')                 # odd-numbered parts are inline code
+        for (i, p) in enumerate(parts)
+            i > 1 && write(out, '`')
+            write(out, iseven(i) ? p : _prose_fixups(p))
+        end
+    end
+    return String(take!(out))
+end
+_escape_dollars(text) = _md_prep(text)
+
+function _prose_fixups(p::AbstractString)
+    p = replace(p, r"\*\*\*(\S(?:[^*]*?\S)?)\*\*\*" => s"**_\1_**", r"___(\S(?:[^_]*?\S)?)___" => s"__*\1*__")
+    occursin('$', p) || return String(p)
+    maths = String[]                             # set aside, so the rules below cannot touch them
+    p = replace(p, r"(?<!\\)\$([^$]+)(?<!\\)\$" => function (m)
+        occursin(r"[\\^_=]", m) || return "\\\$" * chop(m; head = 1, tail = 1) * "\\\$"   # money: $10k–$
+        push!(maths, m); return "\0M$(length(maths))\0"
+    end)
+    p = replace(p, r"(?<!\\)\$(?=\d)" => s"\\$")
+    count(==('$'), replace(p, "\\\$" => "")) == 1 &&
+        (p = replace(p, r"(?<!\\)\$(?=[A-Za-z_])" => s"\\$"))
+    return replace(p, r"\0M(\d+)\0" => m -> maths[parse(Int, m[3:end-1])])
+end
+
 # Julia's markdown backend can throw on pathological input (and a reply cut off
 # at max_tokens is pathological by construction — an unterminated fence, a
 # half-written table). Falling back to the raw text is always acceptable;
 # throwing away a finished generation is not.
 function _show_markdown(io::IO, text::AbstractString)
     try
-        parsed = Markdown.parse(text)
+        parsed = Markdown.parse(_md_prep(text))
         map!(_restyle, parsed.content, parsed.content)
         show(io, MIME"text/plain"(), parsed)
     catch e
@@ -807,6 +874,8 @@ mutable struct ChatSession
     # on the GPU (0 when no GPU device is registered). See `placement`.
     n_layer::Int
     gpu_layers::Int
+    kv_type::Symbol                        # the KV cache's element type (`ChatSession`)
+    flash_attn::Symbol                     # :on or :off, as decided at load
 end
 
 """
@@ -819,6 +888,23 @@ Load a model and open a context. `model` is an ollama name or a path.
                  the whole model on the GPU, see `auto_ctx`; model trains to
                  262144). qwen3:4b opens at ~26k, on the card, with no flags
   `n_threads`    default = physical cores (SMT threads / 2)
+  `n_batch`      prefill chunk, also n_ubatch. Default `:auto` (`auto_batch`):
+                 the largest of 2048/1024/512 that costs no context window and
+                 keeps the model on the GPU — context first, then speed; with
+                 flash attention off also 256, where the attention scores take
+                 half the buffer (`attn_scores_bytes`). 512 when
+                 `n_gpu_layers` is forced. Larger is faster prefill and a
+                 bigger compute buffer (`compute_reserve`)
+  `kv_type`      KV cache element type: `:f16` (llama.cpp's default), `:q8_0`
+                 or `:q4_0`. Default from `\$LLAMACHAT_KV`, else `:f16`. q8_0
+                 halves the cache: more context on the card, and less to read per
+                 generated token once a chat is long. Needs flash attention for
+                 V, which the Vulkan backend has
+  `flash_attn`   `:auto` (default): off when that keeps the context window
+                 it would have with it on, which on the B60 is 1.7–4× faster
+                 prefill and generation once a chat is a few thousand tokens
+                 long (`auto_flash_attn` has the numbers); else on. `:on`/`:off`
+                 force it
   `n_gpu_layers` default `:auto` (from `\$LLAMACHAT_NGL`) — `plan_offload`
                  reads the model's GGUF shape and places it inside the VRAM
                  budget, so a model that fits runs on the GPU and one that does
@@ -833,14 +919,15 @@ Load a model and open a context. `model` is an ollama name or a path.
   `temp`         default 0.7; `temp <= 0` selects greedy sampling
   `top_k`/`top_p`/`min_p`  default 40 / 0.95 / 0.05
   `seed`         default random
-  `think`        default true. `false` appends a terse directive to the system
-                 prompt and folds the `<think>…</think>` block out of the reply.
-                 Measured on qwen3:4b: 662 → 201 generated tokens, 11.8s → 3.9s.
-                 It SHORTENS reasoning, it does not disable it — nothing in this
-                 build can. Qwen3's `/no_think` switch and `enable_thinking` both
-                 live in the Jinja template this build does not run; see
-                 `_TERSE_DIRECTIVE` for the measurements. Session-level, because
-                 it changes the system prompt
+  `think`        default true. `false` is the model's own off switch where its
+                 template has one (`_has_think_switch`: qwen3.8:27b, nimble;
+                 and Gemma 4's): the reply opens with an empty think block and
+                 the answer is the first thing generated. Elsewhere it appends
+                 a terse directive to the system prompt and folds the
+                 `<think>…</think>` block out of the reply, which SHORTENS
+                 reasoning (qwen3:4b: 662 → 201 generated tokens, 11.8s → 3.9s)
+                 but cannot disable it; see `_TERSE_DIRECTIVE` for why.
+                 Session-level, because it changes the system prompt
   `verbose`      let llama.cpp's loader log to stderr (default false)
   `log`          where the one-line load progress goes (default stderr)
 
@@ -853,7 +940,9 @@ function ChatSession(model::AbstractString = default_model();
                      system::AbstractString = "",
                      log::IO = stderr,
                      n_ctx = :auto,
-                     n_batch::Integer = 512,
+                     n_batch = :auto,
+                     kv_type::Symbol = _env_kv(),
+                     flash_attn::Symbol = :auto,
                      n_threads::Integer = max(1, Sys.CPU_THREADS ÷ 2),
                      n_gpu_layers = _env_ngl(),
                      temp::Real = 0.7,
@@ -865,13 +954,35 @@ function ChatSession(model::AbstractString = default_model();
                      verbose::Bool = false)
 
     path = resolve_model(model)
+    _is_laya(path) &&
+        error("$model is a typed decision model, not a chat model: " *
+              "LlamaChat.TypedSession(\"$model\") loads it, LlamaChat.decide runs a request file")
     _ensure_backend(verbose)
+    haskey(_FA, flash_attn) || throw(ArgumentError("flash_attn must be :auto, :on or :off; got :$flash_attn"))
+    haskey(_KV_ELT_BYTES, kv_type) ||
+        throw(ArgumentError("kv_type must be one of $(join(sort!(collect(keys(_KV_ELT_BYTES))), ", ")); got :$kv_type"))
+
+    # Flash attention: off where that costs no context window, on elsewhere
+    # (`auto_flash_attn`). Decided first: without it the attention scores
+    # take VRAM, which changes the batch and window that fit.
+    if flash_attn === :auto
+        flash_attn = n_gpu_layers === :auto ?
+            auto_flash_attn(path; n_ctx = n_ctx, n_batch = n_batch, kv_type = kv_type) : :on
+    end
+
+    # An unchosen batch is the largest that costs no context (`auto_batch`). It
+    # is decided first because the compute buffer it implies is what `auto_ctx`
+    # then sizes the window around.
+    if n_batch === :auto
+        n_batch = n_gpu_layers === :auto ? auto_batch(path; n_ctx = n_ctx, kv_type = kv_type, flash_attn = flash_attn) : _BATCH_BASE
+    end
+    n_batch = Int(n_batch)
 
     # An unchosen context is sized to keep the model on the GPU (`auto_ctx`),
     # but only when placement is also automatic: a forced `n_gpu_layers`
     # already says where the model goes, and 32768 is the window to give it.
     if n_ctx === :auto
-        n_ctx = n_gpu_layers === :auto ? auto_ctx(path) : _CTX_CEILING
+        n_ctx = n_gpu_layers === :auto ? auto_ctx(path; n_batch = n_batch, kv_type = kv_type, flash_attn = flash_attn) : _CTX_CEILING
     end
     n_ctx = Int(n_ctx)
 
@@ -882,7 +993,7 @@ function ChatSession(model::AbstractString = default_model();
     #
     # `n_gpu_layers === :auto` (the default, from $LLAMACHAT_NGL) lets the
     # planner choose; an explicit integer is honoured but checked.
-    plan = plan_offload(path; n_ctx = n_ctx,
+    plan = plan_offload(path; n_ctx = n_ctx, n_batch = n_batch, kv_type = kv_type, flash_attn = flash_attn,
                         requested = n_gpu_layers === :auto ? nothing : Int(n_gpu_layers))
     check_request(plan, path, n_ctx)
     ngl = plan.ngl
@@ -901,7 +1012,16 @@ function ChatSession(model::AbstractString = default_model();
 
     # 72-byte MEMORY-class struct, returned by value then passed by value into
     # a Tier-2 JIT thunk.
-    mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = Int32(ngl))
+    #
+    # `load_mode`: llama.cpp's default maps the file and uploads out of the
+    # mapping. With the whole model going to the card nothing stays mapped
+    # afterwards, and the page-fault path is the slow one: qwen3.8:27b, file in
+    # the page cache, 4.6 s mapped against 2.1 s read (qwen3:4b 0.78 / 0.46).
+    # A model with layers left on the CPU keeps the mapping: those weights are
+    # then the page cache itself rather than a second copy in RAM.
+    whole_gpu = on_gpu == plan.shape.n_layer && on_gpu > 0
+    mp = L.setproperties(L.llama_model_default_params(); n_gpu_layers = Int32(ngl),
+                         load_mode = whole_gpu ? L.LLAMA_LOAD_MODE_NONE : L.LLAMA_LOAD_MODE_MMAP)
     m = _quiet(verbose) do
         L.llama_model_load_from_file(path, mp)
     end
@@ -912,6 +1032,16 @@ function ChatSession(model::AbstractString = default_model();
                          n_ctx           = UInt32(n_ctx),
                          n_batch         = UInt32(n_batch),
                          n_ubatch        = UInt32(n_batch),
+                         flash_attn_type = _FA[flash_attn],
+                         # Sliding-window layers (Gemma 4) keep only their window
+                         # (+ a ubatch), not the whole context: llama.cpp's
+                         # default full-size SWA cache was 3.2 GiB of gemma4:26b's
+                         # 16k window, and is only needed to roll a cache back or
+                         # shift it. LlamaChat only appends (or rebuilds from
+                         # scratch, `_invalidate!`), so the small cache is exact.
+                         swa_full        = false,
+                         type_k          = _KV_GGML[kv_type],
+                         type_v          = _KV_GGML[kv_type],
                          n_threads       = Int32(n_threads),
                          n_threads_batch = Int32(n_threads))
     ctx = _quiet(verbose) do
@@ -946,17 +1076,17 @@ function ChatSession(model::AbstractString = default_model();
     # earlier turn and invalidates the KV cache (which is why `/system` clears
     # the history). A per-call override would have to either silently drop the
     # directive or silently rebuild the cache; neither is worth the convenience.
-    sys_eff = think ? String(system) :
-              isempty(system) ? _TERSE_DIRECTIVE : rstrip(String(system)) * "\n\n" * _TERSE_DIRECTIVE
+    # Gemma 4 has a real switch (`_format_gemma4`), so it needs no directive.
+    sys_eff = _system_for(system, think, tmpl)
 
     s = ChatSession(String(model), path, m, ctx, vocab, chain, tmpl, sys_eff,
                     Pair{String,String}[], UInt8[], 0, Int(n_ctx), Int(n_batch),
                     verbose, think, true, Threads.Atomic{Bool}(false),
-                    plan.shape.n_layer, on_gpu)
+                    plan.shape.n_layer, on_gpu, kv_type, flash_attn)
 
     verbose || (println(log, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
                              "n_ctx=$n_ctx, $n_threads threads, " *
-                             "template=$(tmpl === nothing ? "chatml (fallback)" : "built-in"))");
+                             "template=$(tmpl === nothing ? "chatml (fallback)" : _is_gemma4(tmpl) ? "gemma4 (LlamaChat's)" : "built-in"))");
                 flush(log))
     return s
 end
@@ -1023,6 +1153,25 @@ function reset!(s::ChatSession)
     return s
 end
 
+"""The system prompt as the model gets it: `think = false` adds its directive (not for Gemma 4)."""
+_system_for(system::AbstractString, think::Bool, tmpl) =
+    think || _is_gemma4(tmpl) || _has_think_switch(tmpl) ? String(system) :
+    isempty(system) ? _TERSE_DIRECTIVE : rstrip(String(system)) * "\n\n" * _TERSE_DIRECTIVE
+
+"""
+    set_system!(session, system; think = session.think) -> session
+
+Replace the system prompt, and optionally `think`, and start a new
+conversation. They go together: the system prompt is the first thing in the KV
+cache and `think = false` is a directive inside it, so changing either
+re-renders every turn after it.
+"""
+function set_system!(s::ChatSession, system::AbstractString; think::Bool = s.think)
+    s.think = think
+    s.system = _system_for(system, think, s.template)
+    return reset!(s)
+end
+
 function Base.show(io::IO, s::ChatSession)
     st = s.isopen ? "$(s.n_past)/$(s.n_ctx) tok, $(length(s.history)) msgs" : "closed"
     print(io, "ChatSession(\"$(s.name)\", $st)")
@@ -1064,22 +1213,31 @@ const _TERSE_DIRECTIVE = "Answer immediately and concisely. Do not deliberate, \
 reason step by step, or explain your thinking. Give only the final answer."
 
 """
+How a reasoning block opens and closes: Qwen3's `<think>…</think>`, and Gemma
+4's thought channel `<|channel>thought…<channel|>`.
+"""
+const _THINK_TAGS = (("<think>", "</think>"), ("<|channel>thought", "<channel|>"))
+
+"""
     _strip_think(text) -> String
 
-Drop a leading `<think>…</think>` block for DISPLAY. Callers must keep the raw
-text for `history` and `s.decoded`: those two are the byte image of the KV cache,
-and storing a stripped version breaks `_format`'s prefix check on the next turn —
-every subsequent message would silently rebuild the whole cache.
+Drop a leading reasoning block (see `_THINK_TAGS`) for DISPLAY. Callers must
+keep the raw text for `history` and `s.decoded`: those two are the byte image of
+the KV cache, and storing a stripped version breaks `_format`'s prefix check on
+the next turn — every subsequent message would silently rebuild the whole cache.
 """
 function _strip_think(text::AbstractString)
-    i = findfirst("</think>", text)
-    i === nothing && return String(text)
-    # Only fold when the block actually opens the reply; a bare closing tag in
-    # the middle of a normal answer is content, not reasoning.
-    j = findfirst("<think>", text)
-    (j === nothing || first(j) > first(i)) && return String(text)
-    isempty(strip(text[1:first(j)-1])) || return String(text)
-    return String(lstrip(text[last(i)+1:end]))
+    for (open, close) in _THINK_TAGS
+        i = findfirst(close, text)
+        i === nothing && continue
+        # Only fold when the block actually opens the reply; a bare closing tag
+        # in the middle of a normal answer is content, not reasoning.
+        j = findfirst(open, text)
+        (j === nothing || first(j) > first(i)) && continue
+        isempty(strip(text[1:first(j)-1])) || continue
+        return String(lstrip(text[last(i)+1:end]))
+    end
+    return String(text)
 end
 
 function _messages(s::ChatSession)
@@ -1090,12 +1248,90 @@ function _messages(s::ChatSession)
 end
 
 """
+    _has_think_switch(template) -> Bool
+
+The template has Qwen's hybrid switch: with `enable_thinking` false it opens
+the reply with a closed, empty think block, and the model, trained with both
+forms, answers directly. Then `think = false` is that prefill, a real off
+switch, and needs no directive.
+
+Not every Qwen has it. qwen3:4b is the Thinking variant: its template opens
+`<think>` unconditionally, and prefilling a closed block there only moves the
+reasoning into the answer (`_TERSE_DIRECTIVE` has the measurements). So this
+looks for the switch in the model's own template rather than at its name.
+Measured, "Say hello in three words.", temp 0 (2026-11-13): nimble (Qwen3.5-9B)
+300+ tokens of reasoning with the directive, a direct answer with the prefill.
+"""
+_has_think_switch(tmpl) = tmpl !== nothing && occursin("enable_thinking", tmpl) &&
+                          occursin("<think>\\n\\n</think>\\n\\n", tmpl)
+
+"""What the switch writes after the assistant header."""
+const _NO_THINK_PREFILL = "<think>\n\n</think>\n\n"
+
+"""
+Gemma 4's template (`<|turn>user … <turn|>`), which `llama_chat_apply_template`
+does not know: it returns -1 for it. Detected by its turn markers.
+"""
+_is_gemma4(tmpl) = tmpl !== nothing && occursin("<|turn>", tmpl) && occursin("<turn|>", tmpl)
+
+"""
+    _format_gemma4(think, msgs, add_ass) -> Vector{UInt8}
+
+The Gemma 4 chat format, written out, for text-only chat without tools:
+
+    <|turn>system\\n[<|think|>\\n]SYSTEM<turn|>\\n
+    <|turn>user\\nPROMPT<turn|>\\n
+    <|turn>model\\nREPLY<turn|>\\n
+    <|turn>model\\n                         (add_ass; think = false adds
+                                           <|channel>thought\\n<channel|>)
+
+Thinking is the template's own switch, `enable_thinking`: `<|think|>` opens
+the system turn (which then exists even with no system prompt) and the model
+writes its reasoning in a thought channel. With it off, the generation prompt
+closes an empty channel so the model answers directly. BOS is not written; the
+tokenizer adds it to the first chunk, as for every other template.
+
+One deliberate difference from the Jinja: earlier replies are rendered as they
+were generated, reasoning included, where the template strips it
+(`preserve_thinking` keeps it). Stripping would change bytes already in the KV
+cache, and every turn would re-decode the whole conversation.
+
+Without this, Gemma 4 got ChatML (`<|im_start|>user`), text it was never
+trained on: gemma4:26b replied with a thought-channel tag and then garbage.
+"""
+function _format_gemma4(think::Bool, msgs::Vector{Pair{String,String}}, add_ass::Bool)
+    io = IOBuffer()
+    rest = msgs
+    sys = !isempty(msgs) && first(msgs[1]) in ("system", "developer") ? last(msgs[1]) : nothing
+    sys === nothing || (rest = msgs[2:end])
+    if think || sys !== nothing
+        print(io, "<|turn>system\n")
+        think && print(io, "<|think|>\n")
+        sys === nothing || print(io, strip(sys))
+        print(io, "<turn|>\n")
+    end
+    # With thinking off, every model turn began after the empty channel the
+    # generation prompt closed, so it is part of what that turn decoded.
+    noth = think ? "" : "<|channel>thought\n<channel|>"
+    for (role, content) in rest
+        if role == "assistant"
+            print(io, "<|turn>model\n", noth, content, "<turn|>\n")
+        else
+            print(io, "<|turn>", role, "\n", strip(content), "<turn|>\n")
+        end
+    end
+    add_ass && print(io, "<|turn>model\n", noth)
+    return take!(io)
+end
+
+"""
 Render `msgs` through the model's chat template. Returns the formatted
 transcript as bytes (the byte level is what matters — the delta we feed to the
 tokenizer has to be a byte-exact suffix).
 """
 function _format(s::ChatSession, msgs::Vector{Pair{String,String}}, add_ass::Bool)
     isempty(msgs) && return UInt8[]
+    _is_gemma4(s.template) && return _format_gemma4(s.think, msgs, add_ass)
     n = length(msgs)
 
     roles = [_cstr(first(m)) for m in msgs]
@@ -1155,21 +1391,70 @@ function _tokenize(s::ChatSession, text::AbstractString, add_special::Bool)
     return toks
 end
 
-# Feed tokens through llama_decode in n_batch-sized chunks. llama_batch_get_one
-# tracks positions itself, so this just has to not exceed the batch size.
+# How a prompt is cut into llama_decode calls. On the Vulkan backend the cost
+# of a call is far from linear in its size: up to 8 tokens ggml multiplies
+# matrix by vector, from 9 it dequantises and multiplies matrices, which has a
+# floor that a small batch never gets under, and which is only efficient at a
+# multiple of 128 tokens. One decode and a logits read, ms, B60, b10286,
+# flash attention off (2026-11-13):
+#
+#   tokens         1    8  |    9    16   8+8    31  8+8+8+7 |  128    129  128+1 |  256    257  256+1
+#   qwen3:4b      11   25  |  122   117    49   120      98  |   88    219    110 |  144    293    163
+#   nimble (9B)   25   41  |  217   197    82   196     162  |  144    407    171 |  252    533    277
+#   qwen3-coder   12   40  |  195   226    81   257     160  |  236    280    253 |  294    376    316
+#   qwen3.8:27b   56  123  |  727   682   248   655     481  |  500   1270    574 |  837   1654    917
+#
+# Two cuts are a win on every one of them, so those are the rule:
+#   * a run of up to 31 tokens goes in chunks of 8 (a short chat turn: 248 ms
+#     instead of 682 for qwen3.8, before the first token of the reply);
+#   * up to 16 tokens past a multiple of 128 are split off and chunked.
+# Larger leftovers are left in the batch: splitting them helps the dense models
+# and costs the MoE one. A model with layers on the CPU keeps plain n_batch
+# chunks; this is the GPU backend's shape, not the CPU's.
+const _VEC_CHUNK  = 8
+const _SHORT_RUN  = 31
+const _ALIGN      = 128
+const _SPLIT_REST = 16
+
+"""The sizes a prompt of `n` tokens is decoded in. `gpu` is false with layers on the CPU."""
+function _prompt_runs(n::Integer, n_batch::Integer, gpu::Bool = true)
+    out = Int[]
+    n = Int(n); cap = max(1, Int(n_batch))
+    while n > cap
+        push!(out, cap); n -= cap
+    end
+    n == 0 && return out
+    gpu || (push!(out, n); return out)
+    chunks!(k) = while k > 0
+        m = min(k, _VEC_CHUNK); push!(out, m); k -= m
+    end
+    if n <= _SHORT_RUN
+        chunks!(n)
+    else
+        r = n % _ALIGN
+        if n > _ALIGN && 0 < r <= _SPLIT_REST
+            push!(out, n - r); chunks!(r)
+        else
+            push!(out, n)
+        end
+    end
+    return out
+end
+
+# Feed tokens through llama_decode. llama_batch_get_one tracks positions
+# itself, so this just has to not exceed the batch size (`_prompt_runs`).
 function _decode!(s::ChatSession, toks::Vector{Int32})
     isempty(toks) && return 0
     i = 1
-    while i <= length(toks)
-        j = min(i + s.n_batch - 1, length(toks))
-        chunk = toks[i:j]                       # a plain Vector; ccall needs contiguous memory
+    for m in _prompt_runs(length(toks), s.n_batch, s.gpu_layers == s.n_layer && s.gpu_layers > 0)
+        chunk = toks[i:i+m-1]                   # a plain Vector; ccall needs contiguous memory
         rc = GC.@preserve chunk begin
-            batch = L.llama_batch_get_one(chunk, Int32(length(chunk)))
+            batch = L.llama_batch_get_one(chunk, Int32(m))
             L.llama_decode(s.ctx, batch)
         end
         rc != 0 && return rc
-        s.n_past += length(chunk)
-        i = j + 1
+        s.n_past += m
+        i += m
     end
     return 0
 end
@@ -1297,6 +1582,10 @@ function chat(s::ChatSession, prompt::AbstractString;
 
     push!(s.history, "user" => String(prompt))
     formatted = _format(s, _messages(s), true)   # add_ass: end with the assistant header
+    # The hybrid switch (`_has_think_switch`): the reply opens with an empty
+    # think block, so the model goes straight to the answer.
+    prefill = !s.think && _has_think_switch(s.template)
+    prefill && append!(formatted, codeunits(_NO_THINK_PREFILL))
 
     # `s.decoded` is exactly what the KV cache holds. Normally the new transcript
     # extends it and we only tokenize the tail. If a template re-renders earlier
@@ -1323,6 +1612,9 @@ function chat(s::ChatSession, prompt::AbstractString;
         error("llama_decode returned $rc while evaluating the prompt")
     end
     append!(s.decoded, deltab)
+    # llama_decode returns before the GPU has finished; without this the
+    # prompt's last batch is timed as part of the reply.
+    L.llama_synchronize(s.ctx)
     t_prompt = (time_ns() - t0) / 1e9
 
     t1 = time_ns()
@@ -1347,7 +1639,10 @@ function chat(s::ChatSession, prompt::AbstractString;
     # Renders the block still open and leaves the cursor at column 0.
     stream && _finish!(sink)
 
-    push!(s.history, "assistant" => text)
+    # With the switch the cache holds the prefill before the reply; keeping it
+    # in the history makes the next turn render the same bytes and extend the
+    # cache instead of rebuilding it.
+    push!(s.history, "assistant" => (prefill ? _NO_THINK_PREFILL : "") * text)
     # The generated bytes sit immediately after the assistant header, so the KV
     # cache now corresponds to exactly this many transcript bytes. The closing
     # <|im_end|> was sampled but deliberately not decoded — it arrives as part
@@ -1426,10 +1721,12 @@ function _repl!(s::ChatSession)
                     # directive lives IN the system prompt, so changing it
                     # re-renders every earlier turn. Clearing is honest; silently
                     # rebuilding the whole KV cache on the next message is not.
-                    s.system = want ?
+                    # A model with the hybrid switch needs no directive: the
+                    # reply's prefill is the switch (`_has_think_switch`).
+                    _has_think_switch(s.template) || (s.system = want ?
                         strip(replace(s.system, _TERSE_DIRECTIVE => "")) |> String :
                         (isempty(s.system) ? _TERSE_DIRECTIVE :
-                         rstrip(s.system) * "\n\n" * _TERSE_DIRECTIVE)
+                         rstrip(s.system) * "\n\n" * _TERSE_DIRECTIVE))
                     s.think = want
                     reset!(s)
                     _note(want ? "thinking on, conversation cleared" :
@@ -1509,6 +1806,9 @@ include("window.jl")
 
 # `pull` — download a model from ollama's public registry, no ollama needed.
 include("pull.jl")
+include("typed.jl")
+include("typed_llm.jl")
+include("bench.jl")
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
 # `gui.jl` is NOT included here. It pulls in two more generated wrappers (imgui,
@@ -1560,7 +1860,9 @@ X11-only, so under Wayland point `\$DISPLAY` at Xwayland. The first call
 loads the GUI wrappers (`vendor_gui.sh` puts them in `lib/gui/`).
 
 Window keywords: `width`, `height`, `font` (a .ttf; default the fontconfig
-sans), `font_size` (18), `max_tokens` per reply (4096), `visible`, `vsync`.
+sans), `font_size` (18), `max_tokens` per reply (4096), `visible`, `vsync`,
+`theme` (Dark, Light, Midnight, Nord, Gruvbox, Solarized; default the one last
+picked in the window, saved in `~/.config/llamachat/theme`).
 Every other keyword is `ChatSession`'s — `system`, `n_ctx`, `think`, `temp`, …
 
 ```julia

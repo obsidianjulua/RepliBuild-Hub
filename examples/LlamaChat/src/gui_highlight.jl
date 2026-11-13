@@ -15,20 +15,18 @@
 
 import JuliaSyntaxHighlighting
 
-# A Dark+-style palette, as ImU32 (0xAABBGGRR). 0 means "the text colour".
-_col(rgb::UInt32) = 0xff000000 | ((rgb & 0xff) << 16) | (rgb & 0x00ff00) | ((rgb >> 16) & 0xff)
-const HL_KEYWORD  = _col(0xC586C0)
-const HL_CONST    = _col(0x569CD6)
-const HL_FUNC     = _col(0xDCDCAA)
-const HL_TYPE     = _col(0x4EC9B0)
-const HL_NUMBER   = _col(0xB5CEA8)
-const HL_STRING   = _col(0xCE9178)
-const HL_COMMENT  = _col(0x6A9955)
-const HL_MACRO    = _col(0x9CDCFE)
-const HL_SYMBOL   = _col(0x4FC1FF)
-const HL_PARENS   = (_col(0xFFD700), _col(0xDA70D6), _col(0x179FFF))
+# Token classes. A run stores its class, and the colour is looked up in
+# `HL_RGBA` when it is drawn: the theme fills that (gui_theme.jl), so a theme
+# change recolours code already on screen. 0 means "the text colour".
+const HL_KEYWORD, HL_CONST, HL_FUNC, HL_TYPE, HL_NUMBER, HL_STRING, HL_COMMENT,
+      HL_MACRO, HL_SYMBOL = UInt32.(1:9)
+const HL_PARENS   = (UInt32(10), UInt32(11), UInt32(12))
+"""ImU32 colour per class, written by `apply_theme!`. Starts as Dark+."""
+const HL_RGBA = UInt32[0xffc086c5, 0xffd69c56, 0xffaadcdc, 0xffb0c94e, 0xffa8ceb5,
+                       0xff7891ce, 0xff55996a, 0xfffedc9c, 0xffffc14f,
+                       0xff00d7ff, 0xffd670da, 0xffff9f17]
 
-"""Lines of (text, colour) runs; colour 0 is the default text colour."""
+"""Lines of (text, class) runs; class 0 is the default text colour."""
 const Runs = Vector{Vector{Tuple{String,UInt32}}}
 
 # ── Julia: Julia's own highlighter ───────────────────────────────────────────

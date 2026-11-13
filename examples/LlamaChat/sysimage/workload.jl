@@ -13,7 +13,10 @@
 # with no backend behind it, and every later load would skip the init it needs.
 
 using LlamaChat
-const GM = LlamaChat._gui_module()
+
+# Everything below is inside `let`: a global here (a `const GM`, say) would be
+# baked into the image's Main and taken in every session started with it.
+let GM = LlamaChat._gui_module()
 
 # Writing a sysimage defers every module's __init__ to image load (that is where
 # handles and addresses exist), so the wrappers just included have not run
@@ -27,7 +30,10 @@ end
 Base.invokelatest() do
     LlamaChat.list_models()
     LlamaChat.pull_status(LlamaChat.PullProgress("warmup"))
-    app = GM.App(; visible = false, vsync = false)
+    # Its own notes and places: an image build should not read yours.
+    tmp = mktempdir()
+    app = GM.App(; visible = false, vsync = false, notes_file = joinpath(tmp, "notes.md"),
+                 places = [GM.Place("warmup", tmp)], terminal_dir = tmp)
     try
         md = """
         # A heading
@@ -78,6 +84,25 @@ Base.invokelatest() do
             GM.step!(app)
         end
         GM.term_text(app.term)
+        # A second tab, Ask with no model (a note), the notes box, the stats row.
+        GM.open_terminal!(app, `sh -c 'sleep 0.3'`, tmp)
+        app.notes_open = true
+        for _ in 1:4
+            GM.step!(app)
+        end
+        GM.term_where(app.term); GM.cd_line(:julia, tmp); GM.cd_line(:shell, tmp)
+        GM.ask_terminal!(app)
+        GM.sample!(app.stats); GM.stats_text(app); GM.system_text(app)
+        GM.step!(app)
+        GM.close_terminal!(app)
+        app.notes_open = false
+        GM.load_places(joinpath(tmp, "places")); GM.default_places()
+        # Typed mode's own code, without a model: the format and the boxes.
+        tf = LlamaChat.parse_typed("""{"state": {"m": "hi"}, "questions": $(GM.TYPED_SAMPLE_QUESTIONS)}""")
+        LlamaChat.questions_json(tf.questions); LlamaChat.parse_typed(GM.TYPED_TERMINAL_QUESTIONS)
+        try LlamaChat.parse_questions(LlamaChat._parse_json("{\"q\": 1}")) catch end
+        GM.typed_defaults!(app); GM.typed_states(GM.buf_text(app.typed_state)); GM.json_files(tmp)
+        GM.typed_load!(app, joinpath(tmp, "missing.json")); GM.typed_decide!(app)
         GM.toggle_terminal!(app)
         # The Pull row, the status line, a pixel readback.
         app.pull_open = true
@@ -86,7 +111,15 @@ Base.invokelatest() do
         end
         GM.capture!(app)
         GM.status_text(app); GM.prompt_hint(app); GM.indicator(app)
+        # Themes: apply each once (the menu's draw ran above), then back.
+        k0 = app.theme
+        for k in eachindex(GM.THEMES)
+            GM.apply_theme!(app, k); GM.step!(app)
+        end
+        GM.apply_theme!(app, k0)
+        LlamaChat._md_prep("costs \$10, \$x^2\$ and ***this***")
     finally
         GM.close!(app)
     end
+end
 end
