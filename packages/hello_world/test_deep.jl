@@ -54,10 +54,11 @@ end
     @test W.Vec2 === H.Vec2
     @test W.Mood === H.Mood
     @test W.Greeter === H.Greeter
-    # The import brings the enum TYPE only; its values stay with the owner, so
-    # World callers spell them Hello.Happy. Pinned as current behaviour — if
-    # the generator starts importing enum values too, flip this to ===.
-    @test !isdefined(W, :Happy) && H.Happy isa W.Mood
+    # An imported enum brings its enumerators too (RepliBuild.jl #88): World
+    # aliases Hello's values, so World.Happy IS Hello.Happy.
+    @test W.Happy === H.Happy
+    @test W.Happy isa W.Mood
+    @test :Happy in names(W)
     # World's layout table lists its own records only.
     @test !haskey(W.STRUCT_SIZES, :Vec2) && haskey(H.STRUCT_SIZES, :Vec2)
     @test haskey(W.STRUCT_SIZES, :Entity)

@@ -1,14 +1,15 @@
 # Generator gap: an imported enum brings its type but not its values
 
-> **STATUS:** OPEN
+> **STATUS:** FIXED — RepliBuild.jl #88 (`9669564` "Graph mode: an imported
+> enum brings its enumerators"), verified on the v4.5.0 rebuild (`0be8ced`,
+> 2026-11-14): World emits `const Happy = …Hello.Happy` for each value and
+> exports them, and `World.Happy === Hello.Happy`.
 > **PACKAGE:** hello_world (local graph fixture: `hello` → `world`)
 > **STAGE:** wrap (graph mode, cross-library type imports, RepliBuild.jl #80)
 > **BLOCKS:** nothing — ergonomics. Values cross correctly; only their names
 > are missing on the importer's side.
-> **HUB PIN:** `test_deep.jl:57-60` pins the current behaviour
-> (`!isdefined(W, :Happy) && H.Happy isa W.Mood`). Flip it to
-> `W.Happy === H.Happy` when this is fixed.
-> **ENGINE AT:** RepliBuild.jl `ae611f0` (main, after #85)
+> **HUB PIN:** removed. `test_deep.jl` now asserts `W.Happy === H.Happy`.
+> **ENGINE AT:** RepliBuild.jl `ae611f0` (main, after #85) when reported
 
 ## Symptom
 

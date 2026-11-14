@@ -26,10 +26,20 @@ using Test
 const PKG_DIR = @__DIR__
 const WRAPPER = joinpath(PKG_DIR, "julia", "Llamacpp.jl")
 
-# nomic-embed-text v1.5 as managed by ollama — 274 MB, nomic-bert arch, an
-# EMBEDDING model (no generation head). Override with ARGS[1].
+# nomic-embed-text v1.5 — 274 MB, nomic-bert arch, an EMBEDDING model (no
+# generation head). The native reference values below are for THIS blob, so
+# it is looked up by digest: LlamaChat's model store first, then ollama's.
+# Override with ARGS[1].
+const MODEL_BLOB = "sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6"
+const MODEL_CANDIDATES = [
+    joinpath(homedir(), ".local", "share", "llamachat", "models", "blobs", MODEL_BLOB),
+    joinpath("/var/lib/ollama/blobs", MODEL_BLOB),
+]
 const MODEL = length(ARGS) >= 1 ? ARGS[1] :
-    "/var/lib/ollama/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6"
+    first(vcat(filter(isfile, MODEL_CANDIDATES), MODEL_CANDIDATES))
+# A missing model makes llama_model_load_from_file return NULL, and the tests
+# that follow then dereference it and segfault — fail with the path instead.
+@assert isfile(MODEL) "model not found: $MODEL — pass the nomic-embed-text v1.5 GGUF as ARGS[1]"
 
 # Native reference values — see native_reference.c
 const NATIVE_GGML_VERSION = "0.18.1"

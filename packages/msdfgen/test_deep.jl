@@ -243,7 +243,7 @@ end
         @test unsafe_load(Ptr{Cuint}(e + 8)) == Cuint(WHITE)
 
         # Rvalue references (fixed 2026-09-26, was pinned here): typed, and one Ref.
-        meta = JSON.parsefile(joinpath(PKG, "julia", "compilation_metadata.json"); use_mmap=false)
+        meta = JSON.parsefile(joinpath(PKG, "julia", "compilation_metadata.json"))
         rv = only(f for f in meta["functions"] if f["mangled"] == "_ZN7msdfgen7Contour7addEdgeEONS_10EdgeHolderE")
         @test rv["parameters"][2]["c_type"] == "EdgeHolder&&"
         @test rv["parameters"][2]["julia_type"] == "Ref{EdgeHolder}"
