@@ -10,13 +10,13 @@ tag = "v1.92.9b"
 commit = "f1cc2ae15e53a861a874c3034aae6798fde194ab"
 # Core + GLFW platform backend + OpenGL3 renderer. The other 17 backend TUs
 # each need an SDK that is not on this box (DX, Vulkan, SDL, Metal, …).
-# examples/ is also a walkdir skip; misc/freetype needs freetype headers.
+# examples/ is also a walkdir skip. misc/freetype is BUILT (system FreeType,
+# /usr/include/freetype2): hinted glyphs, and colour emoji with LoadColor.
 # Matching is file== / startswith / endswith / occursin against the path
 # relative to the clone root — a bare filename is enough, and a blanket
 # "backends" would drop the two TUs we now want.
 exclude = [
     "examples",
-    "misc/freetype",
     "imgui_impl_allegro5.cpp",
     "imgui_impl_android.cpp",
     "imgui_impl_dx9.cpp",
@@ -41,13 +41,19 @@ exclude = [
 # A handful of TUs, not hundreds, so -fstandalone-debug stays inside Clang's
 # source-location budget. Ctor homing off alone still leaves limited-debug
 # declaration stubs for those structs.
-flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug",
+         # FreeType as the font loader (imgui_draw.cpp picks it up from this
+         # define), and 32-bit ImWchar so text beyond the BMP — most emoji —
+         # reaches the atlas instead of being dropped. Both are imconfig.h
+         # switches, so every TU must see them: they live here, not per file.
+         "-DIMGUI_ENABLE_FREETYPE", "-DIMGUI_USE_WCHAR32"]
 parallel = true
 # Resolver auto-adds <clone>, <clone>/include, <clone>/src only. The two
 # backend TUs #include "imgui_impl_glfw.h" / "imgui_impl_opengl3.h" from
 # backends/. Relative to the package dir because build() cds there first.
 include_dirs = [
     ".replibuild_cache/deps/imgui/backends",
+    "/usr/include/freetype2",
 ]
 
 # Compile the Tier-2 thunks at BUILD time into libimgui_thunks.so.
@@ -76,7 +82,7 @@ optimization_level = "2"
 # GLFW platform backend → libglfw; OpenGL3 renderer → libGL. libimgui.so
 # therefore DT_NEEDs both at runtime. The OpenGL3 backend ships its own
 # loader (imgui_impl_opengl3_loader.h); do not add glad/GLEW/glbinding.
-link_libraries = ["glfw", "GL"]
+link_libraries = ["glfw", "GL", "freetype"]
 
 # Link against the HUB glfw package, not the distro copy.
 #
