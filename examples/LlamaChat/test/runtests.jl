@@ -1580,6 +1580,90 @@ else
                          "frustration": {"type": "score", "instructions": "How much?", "criteria": ["lo", "mid", "hi"]},
                          "churn_risk": {"type": "noul", "instructions": "Leaving?"}}"""
 
+    # A stand-in for llama-server: a script of that name that does nothing until told to stop.
+    function fake_llama_server(dir)
+        bin = joinpath(dir, "llama-server")
+        write(bin, "#!/bin/sh\ntrap 'kill \$! 2>/dev/null; exit 0' TERM INT\nsleep 300 &\nwait\n")
+        chmod(bin, 0o755)
+        return bin
+    end
+
+    @testset "model servers: found in /proc, stopped, started" begin
+        dir = mktempdir()
+        # What /proc says about a llama-server and two laya processes.
+        proc = joinpath(dir, "proc")
+        function fakeproc(pid, comm, argv; ppid = 1, fdinfo = String[])
+            d = mkpath(joinpath(proc, string(pid)))
+            write(joinpath(d, "comm"), comm * "\n")
+            write(joinpath(d, "cmdline"), join(argv, '\0') * "\0")
+            write(joinpath(d, "stat"), "$pid ($comm) S $ppid 1 1 0")
+            for (k, text) in enumerate(fdinfo)
+                write(joinpath(mkpath(joinpath(d, "fdinfo")), string(k)), text)
+            end
+        end
+        drm(id, kib) = "pos:\t0\ndrm-driver:\txe\ndrm-client-id:\t$id\ndrm-total-vram0:\t$(2kib) KiB\ndrm-resident-system:\t512 KiB\ndrm-resident-vram0:\t$kib KiB\n"
+        fakeproc(300, "llama-server", ["/usr/bin/llama-server", "-m", "/models/blobs/sha256-abc", "--alias", "coder", "--port", "8090", "-c", "24576", "--jinja"];
+                 fdinfo = [drm(7, 1024), drm(7, 1024), drm(9, 2048), "pos:\t0\nflags:\t02\n"])
+        fakeproc(200, "laya", ["/bin/laya", "serve", "/m/laya_english_q8_0.gguf", "--port=8080", "--device", "vulkan:0"])
+        fakeproc(250, "laya", ["/bin/laya", "daemon", "/m/laya_typed.gguf"]; ppid = getpid())
+        fakeproc(260, "laya", ["/bin/laya", "decide", "/m/laya_typed.gguf"])        # a one-shot: not a server
+        fakeproc(270, "zsh", ["zsh"])
+        mkpath(joinpath(proc, "self")); write(joinpath(proc, "uptime"), "1 1")
+        ss = LC.list_servers(; proc = proc, names = Dict("/m/laya_typed.gguf" => "laya:typed-decisions"))
+        @test sort([s.pid for s in ss]) == [200, 250, 300]
+        by = Dict(s.pid => s for s in ss)
+        ll = by[300]
+        @test ll.kind === :llama && ll.model == "coder" && ll.path == "/models/blobs/sha256-abc"    # the alias, when the store does not know the file
+        @test ll.port == 8090 && ll.ctx == 24576 && !ll.own
+        @test ll.vram == (1024 + 2048) * 1024           # one DRM client counted once, system memory left out
+        @test by[200].kind === :laya && by[200].port == 8080 && by[200].model == "laya_english_q8_0.gguf" && by[200].vram == -1
+        @test by[250].port == 0 && by[250].own && by[250].model == "laya:typed-decisions"     # this process's own daemon
+        @test LC._argval(["x", "--port=9", "-c", "5"], "--port") == "9" && LC._argval(["x", "-c", "5"], "-c", "--ctx-size") == "5"
+        @test LC._argval(["x", "-c"], "-c") === nothing
+        @test !LC.stop_server(270; proc = proc) && !LC.stop_server(99999; proc = proc)   # not a server: never signalled
+
+        # A real process: found by name, stopped by a signal, and nothing else is.
+        bin = fake_llama_server(dir)
+        p = run(`$bin -m $dir/some-model.gguf --alias fake --port 18123 -c 4096`; wait = false)
+        try
+            @test timedwait(() -> any(s -> s.pid == getpid(p), LC.list_servers()), 10) === :ok
+            s = only(filter(s -> s.pid == getpid(p), LC.list_servers()))
+            @test s.kind === :llama && s.model == "fake" && s.port == 18123 && s.ctx == 4096
+            @test s.own                                 # a direct child of this process; `serve` detaches, so its are not
+            @test !LC.port_open(18123)                  # the stand-in listens on nothing
+            @test LC.free_port(18123; servers = [s]) == 18124
+            @test LC.stop_server(s.pid)
+            @test timedwait(() -> !process_running(p), 10) === :ok
+            @test !any(x -> x.pid == s.pid, LC.list_servers()) && !LC.stop_server(s.pid)
+        finally
+            process_running(p) && kill(p)
+        end
+        @test_throws ErrorException withenv(() -> LC.llama_server_bin(), "LLAMACHAT_SERVER" => nothing, "PATH" => dir * "/none")
+
+        if MODEL !== nothing
+            # `serve` sizes the server with the planner and starts it detached.
+            withenv("LLAMACHAT_SERVER" => bin, "XDG_CACHE_HOME" => dir) do
+                pl = LC.serve_plan(MODEL; n_ctx = 2048)
+                @test pl.fits && pl.n_ctx == 2048 && pl.n_batch in LC._BATCH_STEPS && pl.flash_attn in (:on, :off)
+                port = LC.free_port(18200)
+                s = LC.serve(MODEL; port = port, n_ctx = 2048, wait = 1)
+                try
+                    @test s.kind === :llama && s.port == port && s.ctx == 2048 && s.model == MODEL && !s.own
+                    argv = split(String(read("/proc/$(s.pid)/cmdline")), '\0'; keepempty = false)
+                    @test "--jinja" in argv && LC._argval(String.(argv), "-b") == string(pl.n_batch) &&
+                          LC._argval(String.(argv), "-fa") == String(pl.flash_attn) && LC._argval(String.(argv), "--host") == "127.0.0.1"
+                    @test isfile(LC.server_log())
+                    @test LC.free_port(port) == port + 1
+                finally
+                    LC.stop_server(s.pid)
+                end
+                @test timedwait(() -> !any(x -> x.pid == s.pid, LC.list_servers()), 10) === :ok
+                e = try LC.serve("laya-no-such-model"; port = port, wait = 1); nothing catch e; e end
+                @test e isa ErrorException
+            end
+        end
+    end
+
     @testset "typed decisions: the format, the engine, the store" begin
         dir = mktempdir()
         # A chat model's header, for telling the two kinds apart.
@@ -2483,6 +2567,27 @@ else
                     @test !GM.send!(app, "hi")
                 end
             end
+            @testset "Servers: the window lists them, says what holds the card, and stops them" begin
+                sdir = mktempdir()
+                p = run(`$(fake_llama_server(sdir)) -m $sdir/m.gguf --alias windowtest --port 18321 -c 8192`; wait = false)
+                try
+                    until!(() -> any(s -> s.model == "windowtest", app.servers); timeout = 20)   # re-read every 2 s
+                    s = only(filter(s -> s.model == "windowtest", app.servers))
+                    @test s.port == 18321 && GM.server_what(s) == "llama-server"
+                    click!(:servers)                                    # the menu opens and draws it
+                    frames!(3)
+                    @test GM.stop_server!(app, s) && startswith(app.serve_msg, "Stopping windowtest")
+                    until!(() -> !any(x -> x.model == "windowtest", app.servers); timeout = 20)
+                    @test !process_running(p)
+                    @test !GM.stop_server!(app, s) && occursin("already gone", app.serve_msg)
+                    G.ImGuiIO_AddMousePosEvent(app.io, 5f0, H - 5f0); frames!()
+                    G.ImGuiIO_AddMouseButtonEvent(app.io, 0, true); frames!()      # a click elsewhere closes the menu
+                    G.ImGuiIO_AddMouseButtonEvent(app.io, 0, false); frames!(2)
+                finally
+                    process_running(p) && kill(p)
+                end
+            end
+
             @testset "typed mode: a decision model swaps the chat side for State, Questions, Decide" begin
                 tdir = mktempdir()
                 g = fake_typed_gguf(joinpath(tdir, "laya_english.gguf"), "english")

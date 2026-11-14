@@ -1808,6 +1808,7 @@ include("window.jl")
 include("pull.jl")
 include("typed.jl")
 include("typed_llm.jl")
+include("servers.jl")
 include("bench.jl")
 
 # ── GUI ──────────────────────────────────────────────────────────────────────

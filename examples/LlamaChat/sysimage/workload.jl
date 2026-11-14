@@ -103,6 +103,9 @@ Base.invokelatest() do
         try LlamaChat.parse_questions(LlamaChat._parse_json("{\"q\": 1}")) catch end
         GM.typed_defaults!(app); GM.typed_states(GM.buf_text(app.typed_state)); GM.json_files(tmp)
         GM.typed_load!(app, joinpath(tmp, "missing.json")); GM.typed_decide!(app)
+        # The Servers view: reading /proc, with whatever is or is not running.
+        LlamaChat.list_servers(); GM.refresh_servers!(app); GM.poll_servers!(app)
+        GM._uptime(time() - 100.0); LlamaChat.port_open(1); LlamaChat.stop_server(0)
         GM.toggle_terminal!(app)
         # The Pull row, the status line, a pixel readback.
         app.pull_open = true

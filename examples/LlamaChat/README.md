@@ -303,6 +303,38 @@ in Julia:
 | CPU | busy %, temperature | `/proc/stat`; k10temp / coretemp |
 | RAM | used / total | `/proc/meminfo` |
 
+**Servers.** LlamaChat runs models in its own process and frees them when you
+say. A server is the other arrangement: `llama-server` (llama.cpp's
+OpenAI-compatible HTTP endpoint, what opencode and other tools talk to) or
+`laya serve` loads a model and keeps it on the card until its *process* ends.
+Nothing unloads it. The `Servers` button counts the ones running and opens a
+list read from `/proc`, every two seconds: what each serves, its address,
+context, the VRAM it holds (from its DRM file descriptors), how long it has
+been up, and `Stop`, which ends it and frees the card. A typed session's own
+`laya daemon` shows there too, marked as this window's.
+
+`Start` in the same menu serves a model from the store: `llama-server` on
+127.0.0.1, from port 8090 (8080 is `laya serve`'s), one slot, `--jinja` (the
+model's own template, which is what gives a client tool calls), with the
+context, batch and flash attention the planner picks for the VRAM free at that
+moment. It runs detached, so it outlives the window; its output is in
+`~/.cache/llamachat/llama-server.log`. A server does not fit itself to the
+card, so a model that would not go wholly on the GPU is refused, with what is
+holding the memory. And when a model you load in the window lands on the CPU
+because a server has the card, the transcript says which one.
+
+```julia
+LlamaChat.list_servers()                 # what is running
+s = LlamaChat.serve("qwen3-coder")       # http://127.0.0.1:8090/v1, planner-sized
+LlamaChat.stop_server(s.pid)
+```
+
+`llama-server` is not part of the Hub's llama.cpp package (which wraps the
+library, not its tools); it has to be on PATH, or named in `$LLAMACHAT_SERVER`.
+`llama-serve.sh` does the same start from a shell. Measured through opencode,
+qwen3-coder (2026-11-14): 87 tok/s on a bare request, about 31 tok/s inside a
+session, which starts some 8.5k tokens deep with opencode's own prompt.
+
 A sensor the driver does not publish leaves its part of the row out.
 `gui(...; stats = false)` leaves the whole row out. `LlamaChat.GUI.stats_text(app)`
 is the row as words.
