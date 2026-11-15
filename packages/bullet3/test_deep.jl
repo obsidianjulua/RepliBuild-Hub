@@ -20,13 +20,15 @@
 #     must land and come to rest on the plane at its half-extent, 0.5.
 #
 # btDefaultMotionState, btSphereShape and btRigidBodyConstructionInfo's
-# constructors are header inlines with no symbol of their own; the package
-# compiles them in (shims/inline_ctors.cpp: bt_new_SphereShape,
-# bt_new_DefaultMotionState, bt_new_RigidBodyConstructionInfo, each building in
-# place). The box scenario still fills its construction info by hand, which
-# checks a Julia-built record crossing into a constructor; the sphere scenario
-# uses the real constructors throughout, as upstream's HelloWorld does, and
-# checks the hand-written defaults against the real ones.
+# constructors are header inlines that no library .cpp defines. Since
+# RepliBuild.jl #105 the build defines them itself and they wrap like any
+# constructor (btSphereShape_btSphereShape, btDefaultMotionState_btDefaultMotionState,
+# btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo).
+# btDefaultMotionState also needs shims/visible_records.cpp to be seen at all
+# (no library .cpp mentions it). The box scenario still fills its construction
+# info by hand, which checks a Julia-built record crossing into a constructor;
+# the sphere scenario uses the real constructors throughout, as upstream's
+# HelloWorld does, and checks the hand-written defaults against the real ones.
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/bullet3/test_deep.jl
 
@@ -214,10 +216,10 @@ end
     B.btRigidBody_btRigidBody(ground, 0.0f0, C_NULL, plane, Ref(v3(0, 0, 0)))
     B.btDiscreteDynamicsWorld_addRigidBody(world, ground)
 
-    # ── btSphereShape(1.0): its inline constructor, compiled in ──────────
+    # ── btSphereShape(1.0): its inline constructor, forced by the build ──
     @test B.struct_size(:btSphereShape) == 72
     sphere = new_storage(:btSphereShape)
-    @test B.bt_new_SphereShape(sphere, 1.0f0) == sphere              # built in place
+    B.btSphereShape_btSphereShape(sphere, 1.0f0)                     # C2, built in place
     @test unsafe_load(Ptr{Ptr{Cvoid}}(sphere)) == Libdl.dlsym(lib, :_ZTV13btSphereShape) + 16
     @test B.btSphereShape_getName(sphere) == "SPHERE"
     inertia = Ref(v3(0, 0, 0))
@@ -227,7 +229,9 @@ end
     # ── btDefaultMotionState(start at y = 20) ─────────────────────────────
     ms = new_storage(:btDefaultMotionState)
     start = Ref(B.btTransform(IDENTITY, v3(0, 20, 0)))
-    @test B.bt_new_DefaultMotionState(ms, start) == ms
+    # (const btTransform& startTrans, const btTransform& centerOfMassOffset):
+    # the default argument spelled out, as the C++ signature has it.
+    B.btDefaultMotionState_btDefaultMotionState(ms, start, Ref(B.btTransform(IDENTITY, v3(0, 0, 0))))
     @test unsafe_load(Ptr{Ptr{Cvoid}}(ms)) == Libdl.dlsym(lib, :_ZTV20btDefaultMotionState) + 16
     got = Ref(B.btTransform(IDENTITY, v3(0, 0, 0)))
     B.btDefaultMotionState_getWorldTransform(ms, got)
@@ -235,7 +239,7 @@ end
 
     # ── btRigidBodyConstructionInfo(1, ms, sphere, inertia): the REAL defaults
     ci = new_storage(:btRigidBodyConstructionInfo)
-    @test B.bt_new_RigidBodyConstructionInfo(ci, 1.0f0, ms, sphere, inertia) == ci
+    B.btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo(ci, 1.0f0, ms, sphere, inertia)
     c = unsafe_load(Ptr{B.btRigidBodyConstructionInfo}(ci))
     @test c.m_mass == 1 && c.m_motionState == Ptr{B.btMotionState}(ms)
     @test c.m_collisionShape == Ptr{B.btCollisionShape}(sphere)

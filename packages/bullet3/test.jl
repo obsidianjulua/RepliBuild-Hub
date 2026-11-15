@@ -30,14 +30,28 @@ end
 
 @testset "what was compiled and wrapped" begin
     meta = JSON.parsefile(joinpath(JULIA_DIR, "compilation_metadata.json"))
-    # LinearMath + BulletCollision + BulletDynamics (153), plus the package's
-    # header-only constructors (shims/inline_ctors.cpp), nothing else
+    # LinearMath + BulletCollision + BulletDynamics (153), the package's
+    # shims/visible_records.cpp (makes btDefaultMotionState visible to the
+    # build), and the build's own replibuild_ctors.cpp (RepliBuild.jl #105:
+    # the header-only constructors no library .cpp defines). Nothing else.
     srcs = meta["source_files"]
-    @test length(srcs) == 154
-    @test any(s -> endswith(s, "shims/inline_ctors.cpp"), srcs)
+    @test length(srcs) == 155
+    @test any(s -> endswith(s, "shims/visible_records.cpp"), srcs)
+    @test any(s -> endswith(s, "replibuild_ctors.cpp"), srcs)
+    @test !any(s -> occursin("inline_ctors", s), srcs)      # the retired hand-written shim
+    # The three HelloWorld needs, now the build's: real C2 constructors.
     syms = read(`nm -D --defined-only $(joinpath(JULIA_DIR, "libbullet3.so"))`, String)
-    for s in ("bt_new_SphereShape", "bt_new_DefaultMotionState", "bt_new_RigidBodyConstructionInfo")
+    for s in ("_ZN13btSphereShapeC2Ef",
+              "_ZN20btDefaultMotionStateC2ERK11btTransformS2_",
+              "_ZN11btRigidBody27btRigidBodyConstructionInfoC2EfP13btMotionStateP16btCollisionShapeRK9btVector3")
         @test occursin(" $s\n", syms)
+    end
+    @test !occursin("bt_new_", syms)
+    forced = meta["inline_constructors"]["forced"]          # every planned row
+    emitted = filter(r -> r["emitted"] == true, forced)
+    @test length(emitted) > 400                             # 496 of 502 at 3.25 / RepliBuild f7e843f
+    for cls in ("btSphereShape", "btDefaultMotionState", "btRigidBodyConstructionInfo")
+        @test any(r -> r["class"] == cls, emitted)
     end
     @test !any(s -> occursin("/Bullet3", s) || occursin("BulletSoftBody", s) ||
                     occursin("Extras/", s) || occursin("All.cpp", s), srcs)

@@ -45,17 +45,21 @@ exclude = [
 # stubs, which wrap to empty Julia structs. DWARF is the input — load-bearing.
 flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
 
-# Header-only constructors. btSphereShape(btScalar), btDefaultMotionState(const
-# btTransform&, …) and btRigidBody::btRigidBodyConstructionInfo(mass,
-# motionState, shape, inertia) are defined inline in Bullet's headers, so the
-# library has no symbol for them. shims/inline_ctors.cpp compiles one function
-# per constructor that builds the object in place, in storage the caller
-# supplies; they become ordinary library symbols with DWARF signatures. (A
-# [wrap.macros] entry cannot do this: a constructor needs placement new, and
-# [wrap] shim_defines accepts only NAME / NAME=VALUE, not a function-like
-# macro — ConfigurationManager.jl:732.) Merged with the resolver's sources;
-# the path is relative to this directory.
-source_files = ["shims/inline_ctors.cpp"]
+# Header-only constructors (btSphereShape(btScalar), btDefaultMotionState(const
+# btTransform&, …), btRigidBody::btRigidBodyConstructionInfo(…) and hundreds
+# more) are defined inline in Bullet's headers and used by no .cpp, so the
+# library had no symbol for them. Since RepliBuild.jl #105 the build defines
+# them itself (a generated replibuild_ctors.cpp, relinked), and they wrap as
+# `Class_Class(this, args…)`. That pass reads the declarations from the class
+# DIE, which -fstandalone-debug above is what puts there. This replaced the
+# package's own shims/inline_ctors.cpp.
+#
+# Except for a class no library .cpp mentions at all: it has no DWARF
+# definition, so the pass cannot see it. btDefaultMotionState is one (an
+# application convenience class). shims/visible_records.cpp declares one global
+# pointer to it, which makes its definition appear, and the pass then forces
+# its constructor like the rest. HUB PIN: GENERATOR-unreferenced-record-invisible.md.
+source_files = ["shims/visible_records.cpp"]
 
 [link]
 enable_lto = false

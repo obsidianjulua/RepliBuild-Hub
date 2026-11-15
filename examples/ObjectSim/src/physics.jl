@@ -8,11 +8,12 @@
 # from btCollisionShape, btCollisionObject or btStridingMeshInterface.
 #
 # btSphereShape, btDefaultMotionState and btRigidBodyConstructionInfo have
-# header-inline constructors only; the bullet3 package compiles them in as
-# bt_new_SphereShape / bt_new_DefaultMotionState / bt_new_RigidBodyConstructionInfo
-# (packages/bullet3/shims/inline_ctors.cpp), each building in place in storage
-# from btAlignedAllocInternal. The construction info therefore starts from
-# upstream's real defaults, and ObjectSim overrides only what a scene sets.
+# header-inline constructors only. Since RepliBuild.jl #105 the build defines
+# them (btSphereShape_btSphereShape, btDefaultMotionState_btDefaultMotionState,
+# btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo), and
+# they construct in place in storage from btAlignedAllocInternal like any other
+# constructor here. The construction info therefore starts from upstream's real
+# defaults, and ObjectSim overrides only what a scene sets.
 #
 # Two transforms per moving body:
 # - the body's own world transform: the physics state after the last fixed
@@ -26,6 +27,12 @@
 #   display rate is not a multiple of the physics rate, one fixed step behind.
 
 const _OFF_XFORM  = B.member_offset(:btCollisionObject, :m_worldTransform)
+# btDefaultMotionState's second argument (centerOfMassOffset) defaults to the
+# identity in C++; the wrapper takes it explicitly.
+const _IDENTITY_XF = B.btTransform(
+    B.btMatrix3x3((B.btVector3((1f0, 0f0, 0f0, 0f0)), B.btVector3((0f0, 1f0, 0f0, 0f0)),
+                   B.btVector3((0f0, 0f0, 1f0, 0f0)))),
+    B.btVector3((0f0, 0f0, 0f0, 0f0)))
 const _OFF_GFX    = B.member_offset(:btDefaultMotionState, :m_graphicsWorldTrans)
 const _OFF_ACTIVE = B.member_offset(:btCollisionObject, :m_activationState1)
 const _OFF_LINVEL = B.member_offset(:btRigidBody, :m_linearVelocity)
@@ -140,7 +147,7 @@ function _shape(s::ObjectSpec)
         mesh = box_mesh(h)
     elseif s.shape == :sphere
         cls = :btSphereShape; p = _alloc(cls)
-        B.bt_new_SphereShape(p, s.radius)
+        B.btSphereShape_btSphereShape(p, s.radius)
         mesh = sphere_mesh(s.radius)
     elseif s.shape == :capsule
         straight = s.height - 2s.radius           # bullet3: distance between sphere centres
@@ -206,7 +213,7 @@ function add!(w::World, s::ObjectSpec)
     ms = C_NULL
     if s.mass > 0
         ms = _alloc(:btDefaultMotionState)
-        B.bt_new_DefaultMotionState(ms, Ref(xf))
+        B.btDefaultMotionState_btDefaultMotionState(ms, Ref(xf), Ref(_IDENTITY_XF))
     end
 
     # The real btRigidBodyConstructionInfo constructor fills upstream's
@@ -214,7 +221,7 @@ function add!(w::World, s::ObjectSpec)
     cip = _alloc(:btRigidBodyConstructionInfo)
     body = _alloc(:btRigidBody)
     try
-        B.bt_new_RigidBodyConstructionInfo(cip, s.mass, ms, p, Ref(_inertia(cls, p, s.mass)))
+        B.btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo(cip, s.mass, ms, p, Ref(_inertia(cls, p, s.mass)))
         ptr = Ptr{B.btRigidBodyConstructionInfo}(cip)
         unsafe_store!(ptr, _with(unsafe_load(ptr);
             m_startWorldTransform = xf,

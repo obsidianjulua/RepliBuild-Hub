@@ -95,9 +95,9 @@ ObjectSim/
 ## Notes on the wrappers
 
 - **Header-only constructors.** `btSphereShape`, `btDefaultMotionState` and
-  `btRigidBodyConstructionInfo` are defined only in Bullet's headers. The bullet3
-  package compiles them in as `bt_new_*` functions
-  (`packages/bullet3/shims/inline_ctors.cpp`), each building its object in place.
+  `btRigidBodyConstructionInfo` are defined only in Bullet's headers. Since
+  RepliBuild.jl #105 the build defines them, and they wrap like any constructor
+  (`btSphereShape_btSphereShape`, …), each building its object in place.
   So spheres are real `btSphereShape`s, and the construction info starts from
   upstream's own defaults; ObjectSim overrides only what a scene sets.
 - **Two transforms per moving body.** `transform` / `position` give the physics
@@ -129,7 +129,7 @@ julia --project=examples/ObjectSim -e 'using Pkg; Pkg.test()'
 
 94 tests:
 - free fall against the integrator's closed form;
-- the `bt_new_*` constructors: a real sphere, scene values over the real
+- the header-only constructors: a real sphere, scene values over the real
   defaults, and motion-state interpolation for whole and fractional steps;
 - every primitive comes to rest at its own size;
 - hull placement and resting contact;
