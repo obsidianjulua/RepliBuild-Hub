@@ -509,6 +509,83 @@ of up to 31 tokens goes in chunks of 8, and a few tokens past a multiple of
 128 are split off. A 20-token chat turn on qwen3.8:27b is read in 327 ms
 instead of 682; 129 tokens in 574 ms instead of 1270.
 
+### Chat templates: the model's own, run
+
+A GGUF carries its chat template as a Jinja program. llama.cpp's C API does
+not run it: `llama_chat_apply_template` matches the formats it knows, so
+whatever a template says beyond the turn markers never reached the prompt here
+(tool definitions, a thinking switch, a default system line), and a template
+it did not know became ChatML with a warning. llama-server runs templates with
+its own C++ engine, in the part of llama.cpp the Hub does not wrap.
+
+LlamaChat now runs them too, by another road: `@huggingface/jinja` 0.5.13
+(MIT, one dependency-free file, `js/jinja-0.5.13.cjs`) inside QuickJS, through
+the Hub's RepliBuild wrapper (`lib/js/`, copied by `vendor_js.sh`). The engine
+is loaded the first time a template is rendered, has no `std` or `os` module
+(a template can compute and nothing else), and is capped in memory and stack.
+
+```julia
+LlamaChat.apply_template(session, ["user" => "hi"]; tools = tools)   # the prompt llama-server would make
+LlamaChat.render_template("{{ a }}-{{ b | length }}", Dict("a" => 1, "b" => [1, 2, 3]))
+LlamaChat.ChatSession("qwen3.8:27b"; template = :jinja)               # chat on the model's own template
+```
+
+**It is the same text.** Each model's template from its GGUF, five
+conversations, compared byte for byte with llama-server's `/apply-template`
+(b10286, 2026-11-15):
+
+| | qwen3-coder | gemma4:26b | qwen3.8:27b | nimble | qwen3:4b |
+|---|---|---|---|---|---|
+| user message only | same | same | same | same | same |
+| system prompt and two turns | same | same | same | same | same |
+| thinking switched off | same | same | same | same | same |
+| tools offered | same | same | same | same | same |
+| a tool call and its result | same | same | same | same | same |
+
+Three things a caller owes a template, all done by `apply_template`: a tool
+call's arguments as an object (the API carries them as JSON text),
+`enable_thinking` on unless switched off, and no BOS in the text (the
+tokenizer adds it). One thing was missing from the library: the `reject` and
+`select` filters with a test, which qwen3-coder's template uses on tool
+schemas; LlamaChat adds them when it loads the file. A template that formats
+dates may not run: the library asks for `Intl.DateTimeFormat`, which QuickJS
+does not have. None of the five does.
+
+Cost: the engine and library load in 50 ms (about 2 s the first time outside
+the sysimage); a template takes 3–21 ms the first time and 0.2–1.2 ms after.
+
+**Nimble's prompt is now checked, not assumed.** Its decision prompt is written
+out in Julia (`nimble_prompt`), and loading the model used to look for a few
+sentences in the file's template. It now runs the file's template on a probe
+request and requires every prompt to equal the hand-written one byte for byte.
+
+**`template = :auto` is not `:jinja`, on purpose.** `:auto` (the default,
+`$LLAMACHAT_TEMPLATE`) keeps llama.cpp's matcher where it knows the template,
+and runs the template itself only where it does not. A template may render an
+earlier reply differently from how it was generated, and Qwen's do: they drop
+the reasoning of every turn but the last. That keeps the context small, and it
+means the new prompt no longer extends what is in the KV cache, so the whole
+conversation is decoded again each turn. Three turns of arithmetic, temp 0:
+
+| | formatter | tokens read per turn | context after |
+|---|---|---|---|
+| qwen3:4b, thinking | built-in | 21, 20, 19 | 1049 |
+| | `:jinja` | 23, 46, 68 | 204 |
+| qwen3.8:27b, thinking | built-in | 21, 20, 19 | 156 |
+| | `:jinja` | 65, 124, 193 | 235 |
+| qwen3.8:27b, `think = false` | either | 25, 24, 23 | 81 |
+| nimble, thinking | built-in | 21, 20, 19 (and it does not think: 3–7 tokens a reply) | 77 |
+| | `:jinja` | 23, 46, 68 (it does: 92–248) | 173 |
+
+The answers were the same in every row. So `:jinja` is the faithful prompt and
+the smaller context, at a re-read per turn; the built-in formatter reads only
+what is new and carries every turn's reasoning forward. With `think = false`
+on a model that has the switch the two are the same thing.
+
+What this does not do yet: read a model's tool calls back out of its reply.
+The prompt side of tools is here; parsing the reply is llama-server's other
+half.
+
 ### Startup: the sysimage
 
 `sysimage/build.jl` builds `LlamaChat.so`, a PackageCompiler sysimage holding

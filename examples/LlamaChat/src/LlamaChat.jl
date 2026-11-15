@@ -876,6 +876,7 @@ mutable struct ChatSession
     gpu_layers::Int
     kv_type::Symbol                        # the KV cache's element type (`ChatSession`)
     flash_attn::Symbol                     # :on or :off, as decided at load
+    jinja::Bool                            # the template is run by the Jinja engine (template.jl)
 end
 
 """
@@ -928,6 +929,13 @@ Load a model and open a context. `model` is an ollama name or a path.
                  reasoning (qwen3:4b: 662 → 201 generated tokens, 11.8s → 3.9s)
                  but cannot disable it; see `_TERSE_DIRECTIVE` for why.
                  Session-level, because it changes the system prompt
+  `template`     who formats the prompt. `:auto` (default, `\$LLAMACHAT_TEMPLATE`):
+                 llama.cpp's matcher where it knows the model's template, and
+                 the template itself, run by the Jinja engine, where it does
+                 not (that used to be a ChatML guess). `:jinja` always runs the
+                 model's own template, the text llama-server would make;
+                 `:builtin` never does. See `_use_jinja` for why `:auto` is
+                 not `:jinja`
   `verbose`      let llama.cpp's loader log to stderr (default false)
   `log`          where the one-line load progress goes (default stderr)
 
@@ -951,6 +959,7 @@ function ChatSession(model::AbstractString = default_model();
                      min_p::Real = 0.05,
                      seed::Integer = rand(UInt32),
                      think::Bool = true,
+                     template::Symbol = _env_template(),
                      verbose::Bool = false)
 
     path = resolve_model(model)
@@ -1079,14 +1088,24 @@ function ChatSession(model::AbstractString = default_model();
     # Gemma 4 has a real switch (`_format_gemma4`), so it needs no directive.
     sys_eff = _system_for(system, think, tmpl)
 
+    # Who formats the prompt: llama.cpp's matcher, or the model's own template
+    # run by the Jinja engine (`_use_jinja` says when, and why not always).
+    jinja = try
+        _use_jinja(template, tmpl)
+    catch
+        L.llama_sampler_free(chain); L.llama_free(ctx); L.llama_model_free(m)
+        rethrow()
+    end
+
     s = ChatSession(String(model), path, m, ctx, vocab, chain, tmpl, sys_eff,
                     Pair{String,String}[], UInt8[], 0, Int(n_ctx), Int(n_batch),
                     verbose, think, true, Threads.Atomic{Bool}(false),
-                    plan.shape.n_layer, on_gpu, kv_type, flash_attn)
+                    plan.shape.n_layer, on_gpu, kv_type, flash_attn, jinja)
 
     verbose || (println(log, "ok  ($(round((time_ns()-t0)/1e9, digits=1))s, " *
                              "n_ctx=$n_ctx, $n_threads threads, " *
-                             "template=$(tmpl === nothing ? "chatml (fallback)" : _is_gemma4(tmpl) ? "gemma4 (LlamaChat's)" : "built-in"))");
+                             "template=$(tmpl === nothing ? "chatml (fallback)" : jinja ? "the model's own (jinja)" :
+                                         _is_gemma4(tmpl) ? "gemma4 (LlamaChat's)" : "built-in"))");
                 flush(log))
     return s
 end
@@ -1331,6 +1350,7 @@ tokenizer has to be a byte-exact suffix).
 """
 function _format(s::ChatSession, msgs::Vector{Pair{String,String}}, add_ass::Bool)
     isempty(msgs) && return UInt8[]
+    s.jinja && return Vector{UInt8}(codeunits(apply_template(s, msgs; add_generation_prompt = add_ass)))
     _is_gemma4(s.template) && return _format_gemma4(s.think, msgs, add_ass)
     n = length(msgs)
 
@@ -1584,8 +1604,15 @@ function chat(s::ChatSession, prompt::AbstractString;
     formatted = _format(s, _messages(s), true)   # add_ass: end with the assistant header
     # The hybrid switch (`_has_think_switch`): the reply opens with an empty
     # think block, so the model goes straight to the answer.
-    prefill = !s.think && _has_think_switch(s.template)
+    # A template run by the Jinja engine writes the switch itself.
+    prefill = !s.think && !s.jinja && _has_think_switch(s.template)
     prefill && append!(formatted, codeunits(_NO_THINK_PREFILL))
+    # And it may open the reasoning block in the prompt (`…assistant\n<think>\n`),
+    # so the model's first token is already inside it. The tag is then the
+    # prompt's, not the reply's: put it back in front of the reply, for the
+    # stream and for the history, so the block is tagged for whoever folds it
+    # and for the template when it reads this turn back.
+    lead = s.jinja && length(formatted) >= 8 && @views(formatted[end-7:end]) == codeunits("<think>\n") ? "<think>\n" : ""
 
     # `s.decoded` is exactly what the KV cache holds. Normally the new transcript
     # extends it and we only tokenize the tail. If a template re-renders earlier
@@ -1621,6 +1648,7 @@ function chat(s::ChatSession, prompt::AbstractString;
     # Blocks are rendered as they close, so the reply formats progressively and
     # its height never matters — see `_MDSink`.
     sink = _MDSink(io; render = stream && _istty(io))
+    stream && !isempty(lead) && _emit!(sink, lead)
     text, ngen, stop = try
         _generate!(s, Int(max_tokens), stream, sink)
     catch
@@ -1642,7 +1670,7 @@ function chat(s::ChatSession, prompt::AbstractString;
     # With the switch the cache holds the prefill before the reply; keeping it
     # in the history makes the next turn render the same bytes and extend the
     # cache instead of rebuilding it.
-    push!(s.history, "assistant" => (prefill ? _NO_THINK_PREFILL : "") * text)
+    push!(s.history, "assistant" => (prefill ? _NO_THINK_PREFILL : "") * lead * text)
     # The generated bytes sit immediately after the assistant header, so the KV
     # cache now corresponds to exactly this many transcript bytes. The closing
     # <|im_end|> was sampled but deliberately not decoded — it arrives as part
@@ -1652,7 +1680,7 @@ function chat(s::ChatSession, prompt::AbstractString;
     # RAW above, folded here. `history` and `decoded` must keep the reasoning
     # block because they are the byte image of the KV cache; only what the caller
     # sees is trimmed.
-    visible = s.think ? text : _strip_think(text)
+    visible = s.think ? lead * text : _strip_think(lead * text)
     return Response(visible, length(toks), ngen, t_prompt, t_gen, stop, stream)
 end
 
@@ -1809,6 +1837,7 @@ include("pull.jl")
 include("typed.jl")
 include("typed_llm.jl")
 include("servers.jl")
+include("template.jl")
 include("bench.jl")
 
 # ── GUI ──────────────────────────────────────────────────────────────────────

@@ -1679,6 +1679,10 @@ else
         write(pc, """{"sha256-aaa": true, "sha256-bbb": false}""")
         @test LC.tool_capable(ms, 1; cache = pc) == Dict("a-model" => true, "small" => false)
 
+        # The router proxies replies in chunked encoding: lengths in hex, an extension allowed, UTF-8 intact.
+        @test LC._dechunk("5\r\nhello\r\n6; x=1\r\n wörl\r\n1\r\nd\r\n0\r\n\r\n") == "hello wörld"
+        @test LC._dechunk("0\r\n\r\n") == "" && LC._dechunk("") == ""
+
         # Nothing listening: no answer, not an exception; and the same from a worker thread.
         @test LC.http_post(1, "/models/unload", "{}"; timeout = 2) == (0, "")
         @test fetch(Threads.@spawn LC.unload_served(1, "x")) === false
@@ -1944,6 +1948,106 @@ else
                 @test isempty(c.history) && c.n_past == 0                    # which cleared it
             finally
                 LC.close!(ls)
+            end
+        end
+    end
+
+    @testset "chat templates: Jinja, run in the JavaScript engine" begin
+        if !LC.jinja_available()
+            @warn "no QuickJS wrapper in lib/js (vendor_js.sh) — skipping the chat template tests"
+        else
+            O = LC.ODict
+            @test LC.render_template("{{ a }}-{{ b | length }}", O("a" => 1, "b" => [1, 2, 3])) == "1-3"
+            @test LC.render_template("{{ a }}", "{\"a\": \"from JSON text\"}") == "from JSON text"
+            @test LC.render_template("{% for k, v in d | items %}{{ k }}={{ v }};{% endfor %}", O("d" => O("z" => 1, "a" => 2))) == "z=1;a=2;"   # key order kept
+            @test LC.render_template("{{ s | upper }} {{ 'é ✓' }}", O("s" => "ünï")) == "ÜNÏ é ✓"
+            @test LC.render_template("", O()) == ""
+            # The one filter LlamaChat adds to the library, in the form qwen3-coder's template uses.
+            @test LC.render_template("{{ ks | reject('in', skip) | join(',') }}|{{ ks | select('in', skip) | join(',') }}",
+                                     O("ks" => ["type", "enum", "x"], "skip" => ["type", "x"])) == "enum|type,x"
+            # A template that is wrong says so, and the engine is fine afterwards.
+            e = try LC.render_template("{% for %}", O()); nothing catch e; e end
+            @test e isa ErrorException && startswith(e.msg, "JavaScript: SyntaxError")
+            e = try LC.render_template("{{ x | nosuchfilter }}", O("x" => 1)); nothing catch e; e end
+            @test e isa ErrorException && occursin("nosuchfilter", e.msg)
+            @test LC.render_template("{{ 1 + 1 }}", O()) == "2"
+            # One engine, callers from any task and thread, one at a time.
+            rs = fetch.([Threads.@spawn LC.render_template("{{ n * 2 }}", O("n" => k)) for k in 1:40])
+            @test rs == string.(2 .* (1:40))
+            # A sandbox: it computes, and has no way to a file, a process or the network.
+            JSE = LC._js_module()
+            js = Base.invokelatest(() -> JSE.Engine(; memory_mb = 32))
+            ev(src) = Base.invokelatest(() -> JSE.evaljs(js, src))
+            @test ev("typeof std + typeof os + typeof require + typeof process + typeof fetch") == "undefined"^5
+            @test ev("[1,2,3].map(x => x * 2).join() + (2n ** 70n)") == "2,4,61180591620717411303424"
+            @test ev("undefined") === nothing
+            e = try ev("let a = []; while (true) a.push(new Array(1e6).fill(1))"); nothing catch e; e end
+            @test e isa ErrorException && occursin("out of memory", e.msg)
+            e = try ev("function f() { return f() + 1 } f()"); nothing catch e; e end
+            @test e isa ErrorException && occursin("stack", lowercase(e.msg))
+            @test ev("1 + 1") == "2"                          # and it survives both
+            Base.invokelatest(() -> JSE.close!(js))
+            @test_throws ErrorException ev("1")
+
+            # A conversation as a template gets it.
+            tmpl = "{{ bos_token }}{% for m in messages %}<{{ m.role }}>{{ m.content }}" *
+                   "{% if m.tool_calls %}{% for c in m.tool_calls %}[{{ c.function.name }}:{% for k, v in c.function.arguments | items %}{{ k }}={{ v }}{% endfor %}]{% endfor %}{% endif %}" *
+                   "{% endfor %}{% if tools %}T{{ tools | length }}{% endif %}{% if enable_thinking %}think{% endif %}{% if add_generation_prompt %}>{% endif %}{{ flag }}"
+            @test LC.apply_template(tmpl, ["user" => "hi", "assistant" => "yo"]; bos_token = "<s>") == "<user>hi<assistant>yothink>"   # BOS not left in
+            @test LC.apply_template(tmpl, ["user" => "hi"]; think = false, add_generation_prompt = false, flag = "!") == "<user>hi!"
+            call = O("role" => "assistant", "content" => "", "tool_calls" => [O("id" => "c1", "type" => "function",
+                     "function" => O("name" => "ls", "arguments" => "{\"path\": \"/tmp\", \"n\": 2}"))])
+            # A tool call's arguments arrive as JSON text and are given to the template as a mapping.
+            @test LC.apply_template(tmpl, [O("role" => "user", "content" => "q"), call]; tools = [O("type" => "function")], think = false) ==
+                  "<user>q<assistant>[ls:path=/tmpn=2]T1>"
+            @test call["tool_calls"][1]["function"]["arguments"] isa String      # the caller's message is not changed
+
+            # Who formats a session's prompt.
+            chatml = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+            odd = "{% for m in messages %}[[{{ m.role }}]] {{ m.content }}\n{% endfor %}"
+            @test LC._builtin_knows(chatml) && !LC._builtin_knows(odd)
+            @test !LC._use_jinja(:builtin, odd) && LC._use_jinja(:jinja, chatml)
+            @test !LC._use_jinja(:auto, chatml)            # the matcher knows it: its rendering extends the cache
+            @test LC._use_jinja(:auto, odd)                # it does not: run the template, not a ChatML guess
+            @test !LC._use_jinja(:auto, nothing) && !LC._use_jinja(:auto, "<|turn>user\n<turn|>")   # no template; Gemma 4 has its own formatter
+            @test_throws ErrorException LC._use_jinja(:jinja, nothing)
+            @test_throws ArgumentError LC._use_jinja(:minja, chatml)
+            withenv("LLAMACHAT_TEMPLATE" => "jinja") do; @test LC._env_template() === :jinja; end
+            withenv("LLAMACHAT_TEMPLATE" => nothing) do; @test LC._env_template() === :auto; end
+
+            if MODEL !== nothing
+                # A session run on the model's own template: the prompt is the template's,
+                # and what the template opened in the prompt is put back on the reply.
+                c = LC.ChatSession(MODEL; log = devnull, temp = 0.0, n_ctx = 4096, template = :jinja)
+                try
+                    @test c.jinja
+                    p = LC.apply_template(c, ["user" => "hi"])
+                    @test startswith(p, "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n")
+                    @test String(LC._format(c, ["user" => "hi"], true)) == p
+                    tools = [O("type" => "function", "function" => O("name" => "list_dir", "description" => "List files",
+                             "parameters" => O("type" => "object", "properties" => O("path" => O("type" => "string")))))]
+                    @test occursin("list_dir", LC.apply_template(c, ["user" => "hi"]; tools = tools))    # tool definitions reach the prompt
+                    r = LC.chat(c, "What is 17*23? Reply with the number only."; stream = false, io = devnull, max_tokens = 900)
+                    @test occursin("391", LC._strip_think(r.text))
+                    if endswith(p, "<think>\n")             # the template opened the reasoning block
+                        @test startswith(r.text, "<think>\n") && startswith(last(c.history[2]), "<think>\n")
+                        io = IOBuffer()
+                        c2 = LC.ChatSession(MODEL; log = devnull, temp = 0.0, n_ctx = 4096, template = :jinja)
+                        LC.chat(c2, "Say hi."; stream = true, io = io, max_tokens = 300)
+                        @test startswith(String(take!(io)), "<think>\n")       # in the stream too, for whoever folds it
+                        LC.close!(c2)
+                    end
+                    n1 = c.n_past
+                    r2 = LC.chat(c, "Add 9 to that. Number only."; stream = false, io = devnull, max_tokens = 900)
+                    @test occursin("400", LC._strip_think(r2.text)) && length(c.history) == 4
+                    # Cache and transcript agree after a turn, whichever way the template re-rendered the first.
+                    @test c.n_past == length(LC._tokenize(c, String(copy(c.decoded)), false))
+                finally
+                    LC.close!(c)
+                end
+                b = LC.ChatSession(MODEL; log = devnull, n_ctx = 2048)
+                @test !b.jinja                                # the default has not changed for a model the matcher knows
+                LC.close!(b)
             end
         end
     end

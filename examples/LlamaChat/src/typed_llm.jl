@@ -121,6 +121,59 @@ function nimble_prompt(state, questions::Vector{<:Question})
     return shared, [_NIMBLE_FIELD * _safe_json(q.id) * _NIMBLE_ANSWER for q in questions]
 end
 
+# ── is the file's template the one written out above? ───────────────────────
+
+# The variables the file's decision template reads, for one question: the
+# state, every question with its options as `label` (the code), `key` (the
+# value) and `description`, and the id of the field asked for.
+function _decision_context(state, questions::Vector{<:Question}, id::AbstractString)
+    opts(q::Choice) = [ODict("label" => string(_NIMBLE_CODES[k]), "key" => l, "description" => d) for (k, (l, d)) in enumerate(q.criteria)]
+    opts(q::Score)  = [ODict("label" => string(_NIMBLE_CODES[k]), "key" => string(k - 1), "description" => c) for (k, c) in enumerate(q.criteria)]
+    opts(q::Noul)   = [ODict("label" => "A", "key" => false, "description" => q.no), ODict("label" => "B", "key" => true, "description" => q.yes)]
+    return ODict("state" => state, "id" => String(id),
+                 "questions" => [ODict("id" => q.id, "type" => String(question_type(q)), "instructions" => q.instructions,
+                                       "options" => opts(q)) for q in questions])
+end
+
+const _DECISION_PROBE_QS = """{
+    "intent": {"type": "choice", "instructions": "What is wanted in `m`?", "criteria": {"refund": "money <back>", "other": null}},
+    "level":  {"type": "score",  "instructions": "How \\"bad\\"?", "criteria": ["fine", "bad", "worse"]},
+    "leave":  {"type": "noul",   "instructions": "Leaving?", "criteria": {"true": "says so"}}}"""
+
+"""
+Refuse a decision template that is not the one `nimble_prompt` writes.
+
+With the Jinja engine installed this is a real check: the file's own template
+is run on a request that exercises every question type, quoting and escaping,
+and each of its prompts must equal `nimble_prompt`'s, byte for byte. Without
+the engine it falls back to looking for the sentences the prompt depends on,
+which catches a different template but not a subtly different one.
+"""
+function _check_decision_template(model, tmpl::AbstractString)
+    if jinja_available()
+        qs = parse_questions(_parse_json(_DECISION_PROBE_QS))
+        state = ODict("m" => "a \"q\" <b> é", "n" => Any[1, 2.5, true, nothing])
+        shared, tails = nimble_prompt(state, qs)
+        for (k, q) in enumerate(qs)
+            got = try
+                render_template(tmpl, _decision_context(state, qs, q.id))
+            catch e
+                error("$model's decision template does not run: " * first(sprint(showerror, e), 200))
+            end
+            got == shared * tails[k] ||
+                error("$model's decision template makes a different prompt from the one LlamaChat writes " *
+                      "(question type $(question_type(q))); its decisions would not be the model's")
+        end
+        return nothing
+    end
+    for need in ("Classify the context using the supplied schema.", "one-letter", "\"context\": ",
+                 "\"schema\": [", "Requested field: ", "<think>\\n\\n</think>\\n\\n")
+        occursin(need, tmpl) ||
+            error("$model's decision template is not the one LlamaChat knows how to write (it has no $(repr(need)))")
+    end
+    return nothing
+end
+
 # ── the session ──────────────────────────────────────────────────────────────
 
 """
@@ -169,11 +222,7 @@ function LogitSession(model::AbstractString; n_ctx = NIMBLE_CTX, log::IO = stder
     path = resolve_model(model)
     tmpl = decision_template(path)
     tmpl === nothing && error("$model carries no decision template (tokenizer.chat_template.systemone)")
-    for need in ("Classify the context using the supplied schema.", "one-letter", "\"context\": ",
-                 "\"schema\": [", "Requested field: ", "<think>\\n\\n</think>\\n\\n")
-        occursin(need, tmpl) ||
-            error("$model's decision template is not the one LlamaChat knows how to write (it has no $(repr(need)))")
-    end
+    _check_decision_template(model, tmpl)
     # Sampling and `think` do not matter (nothing is sampled); the system prompt
     # does, for the chat the same session can go back to.
     c = ChatSession(model; n_ctx = n_ctx, log = log, kwargs...)

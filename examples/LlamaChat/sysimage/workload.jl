@@ -107,6 +107,13 @@ Base.invokelatest() do
         LlamaChat.list_servers(); GM.refresh_servers!(app); GM.poll_servers!(app)
         GM._uptime(time() - 100.0); LlamaChat.port_open(1); LlamaChat.stop_server(0)
         LlamaChat.served_id("a:b"); LlamaChat.write_preset(NamedTuple[], joinpath(tmp, "p.ini"))
+        # Chat templates: the JavaScript engine, defined in the image like the GUI module.
+        if LlamaChat.jinja_available()
+            LlamaChat.apply_template("{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}{% if enable_thinking %}t{% endif %}",
+                                     ["user" => "hi", "assistant" => "yo"]; tools = [LlamaChat.ODict("type" => "function")])
+            LlamaChat._builtin_knows("<|im_start|>{{ x }}"); LlamaChat._use_jinja(:auto, "{{ odd }}")
+            Base.invokelatest(() -> LlamaChat._js_module().shutdown())   # no live engine in the image
+        end
         LlamaChat.opencode_sync(NamedTuple[], 1; file = joinpath(tmp, "none", "opencode.json"))
         GM.toggle_terminal!(app)
         # The Pull row, the status line, a pixel readback.

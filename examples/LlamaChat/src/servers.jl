@@ -465,10 +465,32 @@ function http_post(port::Integer, path::AbstractString, body::AbstractString; ti
         m = match(r"^HTTP/\d\.\d (\d{3})", text)
         m === nothing && return (0, "")
         i = findfirst("\r\n\r\n", text)
-        return (parse(Int, m[1]), i === nothing ? "" : text[last(i)+1:end])
+        i === nothing && return (parse(Int, m[1]), "")
+        head, rest = text[1:first(i)], text[last(i)+1:end]
+        chunked = occursin(r"^transfer-encoding:\s*chunked"im, head)
+        return (parse(Int, m[1]), chunked ? _dechunk(rest) : rest)
     finally
         ccall(:close, Cint, (Cint,), fd)
     end
+end
+
+# A chunked body: `<hex length>\r\n<bytes>\r\n` repeated, ended by a zero length.
+# The router proxies its models' replies this way.
+function _dechunk(s::AbstractString)
+    b = codeunits(s)
+    out = UInt8[]
+    i = 1
+    while i <= length(b)
+        j = findnext(==(UInt8('\r')), b, i)
+        j === nothing && break
+        n = tryparse(Int, first(split(String(b[i:j-1]), ';')); base = 16)
+        (n === nothing || n == 0) && break
+        lo = j + 2
+        hi = min(lo + n - 1, length(b))
+        append!(out, view(b, lo:hi))
+        i = hi + 3
+    end
+    return String(out)
 end
 
 """Ask a router to unload a model (it stays listed, and loads again when asked for)."""
