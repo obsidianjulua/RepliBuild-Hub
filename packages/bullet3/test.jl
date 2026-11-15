@@ -30,9 +30,15 @@ end
 
 @testset "what was compiled and wrapped" begin
     meta = JSON.parsefile(joinpath(JULIA_DIR, "compilation_metadata.json"))
-    # LinearMath + BulletCollision + BulletDynamics, nothing else
+    # LinearMath + BulletCollision + BulletDynamics (153), plus the package's
+    # header-only constructors (shims/inline_ctors.cpp), nothing else
     srcs = meta["source_files"]
-    @test length(srcs) == 153
+    @test length(srcs) == 154
+    @test any(s -> endswith(s, "shims/inline_ctors.cpp"), srcs)
+    syms = read(`nm -D --defined-only $(joinpath(JULIA_DIR, "libbullet3.so"))`, String)
+    for s in ("bt_new_SphereShape", "bt_new_DefaultMotionState", "bt_new_RigidBodyConstructionInfo")
+        @test occursin(" $s\n", syms)
+    end
     @test !any(s -> occursin("/Bullet3", s) || occursin("BulletSoftBody", s) ||
                     occursin("Extras/", s) || occursin("All.cpp", s), srcs)
     # Real signatures, not zero-arg inference (the Bucket B smell). 33 entries
