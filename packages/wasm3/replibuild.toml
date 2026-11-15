@@ -1,0 +1,117 @@
+[project]
+name = "wasm3"
+version = "0.9.0"
+root = "."
+
+# wasm3 (MIT): a WebAssembly interpreter in plain C. Julia loads any .wasm at
+# run time, calls its exports, links Julia functions in as its imports, and
+# reads and writes its linear memory directly.
+#
+# The library is source/CMakeLists.txt's `m3` target: the 16 source/*.c. Left
+# out: platforms/ (per-platform apps and examples, each with its own main()),
+# and source/extensions/ (an optional module-editing API upstream's CMake does
+# not build). test/ and docs/ are skipped by the resolver itself.
+[dependencies.wasm3]
+type = "git"
+url = "https://github.com/wasm3/wasm3.git"
+tag = "v0.9.0"
+commit = "0cd38327f0c721e75172f4f1eeb55854dc0517af"
+exclude = ["platforms", "source/extensions"]
+
+[compile]
+# Upstream's Linux Release flags (CMakeLists.txt, non-MSVC branch):
+#   -O3 -fomit-frame-pointer -fno-stack-check -fno-stack-protector
+#   -Dd_m3HasTracer  (m3_LinkTracer; the tracer compiles only under it)
+# minus -march=native (BUILD_NATIVE): a Hub library must not be tied to the
+# CPU it was built on. gnu99 is what CMake's c_std_99 gives with extensions on.
+#
+# WASI: upstream's Linux default is uvwasi, which needs libuv. This uses
+# wasm3's own "simple" WASI (BUILD_WASI=simple → d_m3HasWASI, m3_api_wasi.c,
+# plain POSIX), so the library has no extra dependency. m3_api_uvwasi.c and
+# m3_api_meta_wasi.c compile to nothing without their macros.
+#
+# Tail calls: the interpreter dispatches op to op by tail call. v0.9.0 marks
+# every dispatch __attribute__((musttail)) when the compiler has it
+# (m3_config_platforms.h:89-91), and clang does, so it is guaranteed at any -O,
+# not left to the optimizer.
+flags = ["-O3", "-fPIC", "-std=gnu99", "-fomit-frame-pointer", "-fno-stack-check",
+         "-fno-stack-protector", "-Dd_m3HasTracer", "-Dd_m3HasWASI"]
+# The headers live in source/, which the resolver does not add on its own (it
+# adds the clone root, include/ and src/). The library's own .c files find
+# them by quote-relative includes; the [wrap.macros] shim needs the path.
+include_dirs = [".replibuild_cache/deps/wasm3/source"]
+
+[link]
+# Hub pin: the monolithic LTO module (Tier 1 llvmcall) is parked; every
+# call is a plain ccall.
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["wasm3.h"]
+
+# Errors are values: every call returns M3Result, NULL on success, else a
+# constant error string (the m3Err_* globals, wasm3.h:171-228) — traps
+# included ("[trap] integer divide by zero"). Nothing longjmps, so every
+# function here is safe to call from Julia, and a Julia host function reports
+# failure by RETURNING a C string, which surfaces as the call's M3Result.
+#
+# Not shimmed, deliberately: m3ApiReturnType, m3ApiGetArg, m3ApiReturn,
+# m3ApiTrap, m3ApiOffsetToPtr … (wasm3.h:383-401) are helpers for writing host
+# functions IN C; they expand against the `_sp`/`_mem` parameters in scope.
+# From Julia, a host function (M3RawCall) reads its stack directly: one 8-byte
+# slot per value, the return slot at sp[0] and the arguments from sp[1].
+
+# ── Variadic functions ──
+# M3Result m3_CallV(IM3Function i_function, ...)                      wasm3.h:352
+# m3_CallVL reads each argument by the wasm signature (m3_env.c:1028-1034):
+#   i32 → va_arg(i32), i64 → va_arg(i64), and f32 AND f64 → va_arg(f64)
+#   (C promotes a variadic float to double). So the overloads are by shape;
+#   for any other shape, or zero arguments, use m3_Call with an argptrs array.
+# M3Result m3_GetResultsV(IM3Function i_function, ...)                wasm3.h:356
+#   one pointer per result, written through.
+# Left out: m3Error(…, const char *fmt, ...) — internal error builder, not API.
+# proven_at = the dependency commit these were checked against.
+[wrap.varargs]
+proven_at = "0cd38327f0c721e75172f4f1eeb55854dc0517af"
+m3_CallV = [
+    ["Cint"],
+    ["Cint", "Cint"],
+    ["Cint", "Cint", "Cint"],
+    ["Clonglong"],
+    ["Clonglong", "Clonglong"],
+    ["Cdouble"],
+    ["Cdouble", "Cdouble"],
+    ["Cint", "Cdouble"],
+]
+m3_GetResultsV = [
+    ["Ptr{Cvoid}"],
+    ["Ptr{Cvoid}", "Ptr{Cvoid}"],
+]
+
+# ── Value macros                                                       wasm3.h:11-14 ──
+
+[wrap.macros.M3_VERSION_MAJOR]
+ret = "int"
+
+[wrap.macros.M3_VERSION_MINOR]
+ret = "int"
+
+[wrap.macros.M3_VERSION_REV]
+ret = "int"
+
+[wrap.macros.M3_VERSION]
+ret = "const char*"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
