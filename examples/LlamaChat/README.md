@@ -520,7 +520,10 @@ its own C++ engine, in the part of llama.cpp the Hub does not wrap.
 
 LlamaChat now runs them too, by another road: `@huggingface/jinja` 0.5.13
 (MIT, one dependency-free file, `js/jinja-0.5.13.cjs`) inside QuickJS, through
-the Hub's RepliBuild wrapper (`lib/js/`, copied by `vendor_js.sh`). The engine
+the Hub's RepliBuild wrapper (`lib/js/`). Neither folder is tracked:
+`vendor_js.sh` copies the wrapper from the Hub's quickjs package and fetches
+the library file, checked against its published sha256. Without them
+everything else works as before and the template features are off. The engine
 is loaded the first time a template is rendered, has no `std` or `os` module
 (a template can compute and nothing else), and is capped in memory and stack.
 

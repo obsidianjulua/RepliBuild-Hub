@@ -7,9 +7,11 @@
 #   examples/LlamaChat/vendor_js.sh            # from anywhere
 #   HUB=/path/to/RepliBuild-Hub vendor_js.sh   # take packages/ from another checkout
 #
-# The Jinja library is not vendored from anywhere: js/jinja-0.5.13.cjs is in
-# this repository (MIT, js/jinja-LICENSE), as published in the npm package
-# @huggingface/jinja 0.5.13, file dist/index.cjs.
+# It also puts the Jinja library in js/ when it is not there. js/ is not
+# tracked (the Hub's .gitignore keeps the JavaScript side out of the
+# repository), so on a fresh checkout js/jinja-0.5.13.cjs is fetched: the npm
+# package @huggingface/jinja 0.5.13 (MIT), file dist/index.cjs, with its
+# LICENSE, checked against the sha256 of the published file.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +31,16 @@ have="$(sha256sum "$dst/libquickjs.so" | cut -d' ' -f1)"
 [[ "$want" == "$have" ]] || { echo "lib/js/libquickjs.so is not the build Quickjs.jl was generated from" >&2; exit 1; }
 
 jinja="$here/js/jinja-0.5.13.cjs"
+if [[ ! -f "$jinja" ]]; then
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL -o "$tmp/jinja.tgz" https://registry.npmjs.org/@huggingface/jinja/-/jinja-0.5.13.tgz
+    tar -xzf "$tmp/jinja.tgz" -C "$tmp" package/dist/index.cjs package/LICENSE
+    mkdir -p "$here/js"
+    cp "$tmp/package/dist/index.cjs" "$jinja"
+    cp "$tmp/package/LICENSE" "$here/js/jinja-LICENSE"
+    echo "fetched @huggingface/jinja 0.5.13 into $here/js"
+fi
 [[ "$(sha256sum "$jinja" | cut -d' ' -f1)" == "e491328e32c9bb0a1f13f2d20ad6d07c91604814e47dde9b818f9ab44bab8dcf" ]] ||
     { echo "$jinja is not the published @huggingface/jinja 0.5.13 dist/index.cjs" >&2; exit 1; }
 
