@@ -203,14 +203,70 @@ end
         shape = "sphere"
         radius = 0.3
         position = [2.0, 3, 1.0]
-        rolling_friction = 0.02
+        rolling_friction = 0.1
         """)) do w
         b = body(w, "ball")
-        simulate!(w, 10)
+        simulate!(w, 12)
         p = position(b)
+        @test vnorm(velocity(b)) < 0.05             # stopped, not mid-swing
         @test hypot(p[1], p[3]) < 0.5
         @test 0.25 < p[2] < 0.45
         @test isstatic(body(w, "bowl")) && length(body(w, "bowl").keep) == 2   # buffers held
+    end
+end
+
+@testset "header-only constructors (bullet3 shims)" begin
+    with_world(toml(floor_toml * """
+        [world]
+        hz = 60
+        [[object]]
+        name = "ball"
+        shape = "sphere"
+        radius = 0.5
+        position = [0, 5, 0]
+        friction = 0.9
+        restitution = 0.25
+        damping = [0.1, 0.2]
+        """)) do w
+        b = body(w, "ball")
+        B = ObjectSim.B
+        @test b.shape_class == :btSphereShape
+        @test B.btSphereShape_getName(b.shape) == "SPHERE"
+        @test b.motion != C_NULL && body(w, "floor").motion == C_NULL
+        # The construction info came from the real constructor, with the
+        # scene's values over upstream's defaults.
+        off(f) = B.member_offset(:btCollisionObject, f)
+        @test unsafe_load(Ptr{Float32}(b.ptr + off(:m_friction))) == 0.9f0
+        @test unsafe_load(Ptr{Float32}(b.ptr + off(:m_restitution))) == 0.25f0
+        @test unsafe_load(Ptr{Float32}(b.ptr + B.member_offset(:btRigidBody, :m_linearDamping))) == 0.1f0
+        # The body started where the motion state said.
+        @test position(b) == (0f0, 5f0, 0f0) == render_transform(b)[2]
+
+        # bullet3's latency interpolation (btDiscreteDynamicsWorld's default):
+        # the drawn pose is at (last step − dt + leftover), between the
+        # previous fixed step and the current one. After whole steps the
+        # leftover is 0, so it is the previous step's pose.
+        step!(w, 10)
+        y_prev = position(b)[2]
+        step!(w, 1)
+        @test render_transform(b)[2][2] ≈ y_prev atol = 2e-4
+        @test render_transform(b)[2][2] > position(b)[2]       # falling: behind is higher
+
+        # A variable timestep of 1.5 steps: one fixed step runs and half a step
+        # is left over, so the drawn pose is half a step behind the body.
+        y_prev = position(b)[2]
+        before = w.steps
+        @test advance!(w, 1.5 * w.dt) == 1
+        @test w.steps == before + 1
+        drawn, now = render_transform(b)[2][2], position(b)[2]
+        @test now < drawn < y_prev
+        @test drawn ≈ (y_prev + now) / 2 atol = 2e-3
+        # The leftover half step completes on the next call.
+        @test advance!(w, 0.5 * w.dt) == 1
+        @test render_transform(b)[2][2] ≈ now atol = 2e-4
+
+        simulate!(w, 6)
+        @test 0.49 < position(b)[2] < 0.53          # a true sphere rests at its radius
     end
 end
 

@@ -48,8 +48,8 @@ include("headless.jl")
 
 export TriMesh, load_mesh, save_obj, centroid, aabb,
        SceneSpec, ObjectSpec, load_scene, parse_scene,
-       World, Body, add!, step!, simulate!, destroy!, with_world, sim_time,
-       transform, velocity, spin, sleeping, isstatic, body, snapshot,
+       World, Body, add!, step!, advance!, simulate!, destroy!, with_world, sim_time,
+       transform, render_transform, velocity, spin, sleeping, isstatic, body, snapshot,
        run_headless, run_window
 
 end

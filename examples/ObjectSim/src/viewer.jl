@@ -1,9 +1,10 @@
 # The raylib side: a window that draws a World while it runs.
 #
-# raylib never owns the simulation. Each frame the viewer steps the World a
-# fixed number of physics steps, reads every body's transform out of bullet3,
-# and draws the body's TriMesh with it. The meshes are the same TriMesh the
-# collision shapes were built from, uploaded once.
+# raylib never owns the simulation. Each frame the viewer hands bullet3 the
+# frame time (or a fixed number of steps, for --frames), reads every body's
+# interpolated pose from its motion state, and draws the body's TriMesh with
+# it. The meshes are the same TriMesh the collision shapes were built from,
+# uploaded once.
 #
 # Matrix layout: raylib's Matrix struct is declared m0, m4, m8, m12, m1, …,
 # i.e. its fields in declaration order are the matrix ROW by row (m12, m13,
@@ -56,9 +57,6 @@ const _BG = (0x1b, 0x1d, 0x23)
 
 _rl_color(c, a = 0xff) = R.Color(UInt8(c[1]), UInt8(c[2]), UInt8(c[3]), UInt8(a))
 _rl_v3(v) = R.Vector3(Float32(v[1]), Float32(v[2]), Float32(v[3]))
-
-# Rebuild an immutable wrapper struct with some fields replaced.
-_with(x::T; kw...) where {T} = T((get(kw, f, getfield(x, f)) for f in fieldnames(T))...)
 
 function _matrix(rows, o)
     r1, r2, r3 = rows
@@ -162,7 +160,6 @@ function run_window(scene; width::Integer = 1280, height::Integer = 720, frames:
         orbit = _orbit(w)
         setv("fogFar", Float32[orbit.distance * 4], 0)            # SHADER_UNIFORM_FLOAT
         per_frame = max(1, round(Int, spec.world.hz / 60))
-        acc = 0.0
         frame = 0
         while !R.WindowShouldClose()
             frame += 1
@@ -172,7 +169,7 @@ function run_window(scene; width::Integer = 1280, height::Integer = 720, frames:
             R.IsKeyPressed(Cint(32)) && (paused = !paused)          # SPACE
             R.IsKeyPressed(Cint(79)) && (orbit.auto = !orbit.auto)  # O
             if R.IsKeyPressed(Cint(82))                             # R
-                destroy!(w); w = World(spec); acc = 0.0
+                destroy!(w); w = World(spec)
             end
             if R.IsMouseButtonDown(Cint(0))
                 d = R.GetMouseDelta()
@@ -188,10 +185,7 @@ function run_window(scene; width::Integer = 1280, height::Integer = 720, frames:
                 if frames > 0
                     step!(w, per_frame)
                 else
-                    acc = min(acc + dt_wall, 0.25)
-                    n = floor(Int, acc / w.dt)
-                    n > 0 && step!(w, n)
-                    acc -= n * w.dt
+                    advance!(w, dt_wall)       # fixed steps + interpolated poses
                 end
             end
 
@@ -206,7 +200,7 @@ function run_window(scene; width::Integer = 1280, height::Integer = 720, frames:
             for b in w.bodies
                 mesh = get!(() -> _upload(b.mesh), meshes, _mesh_key(b.spec))
                 unsafe_store!(Ptr{R.Color}(mat.maps + color_off), _rl_color(b.spec.color))
-                rows, o = transform(b)
+                rows, o = render_transform(b)
                 R.DrawMesh(mesh, mat, _matrix(rows, o))
                 isstatic(b) || sleeping(b) || (awake += 1)
             end

@@ -24,6 +24,10 @@ TriMesh(v, f) = TriMesh(v, f, nothing)
 Base.show(io::IO, m::TriMesh) =
     print(io, "TriMesh(", length(m.vertices), " vertices, ", length(m.faces), " triangles)")
 
+# Rebuild an immutable struct (a scene spec, a wrapper record) with some fields
+# replaced: `_with(x; field = value, …)`.
+_with(x::T; kw...) where {T} = T((get(kw, f, getfield(x, f)) for f in fieldnames(T))...)
+
 # ── small vector helpers (tuples: no allocation, no dependency) ──────────────
 @inline v3(x, y, z) = (Float32(x), Float32(y), Float32(z))
 @inline vadd(a, b) = (a[1] + b[1], a[2] + b[2], a[3] + b[3])

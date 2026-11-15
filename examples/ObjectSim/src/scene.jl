@@ -211,6 +211,3 @@ function _extent(s::ObjectSpec)
     lo, hi = aabb(transform_mesh(load_mesh(s.asset); scale = s.scale))
     return vsub(hi, lo)
 end
-
-_with(s::ObjectSpec; kw...) =
-    ObjectSpec(; (f => get(kw, f, getfield(s, f)) for f in fieldnames(ObjectSpec))...)

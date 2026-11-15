@@ -2,8 +2,8 @@
 
 A rigid-body object simulator: **bullet3** runs the physics and **raylib** draws
 it, both through the Hub's generated wrappers. Scenes are TOML files, and objects
-are either primitives or mesh files (`.obj`, `.stl`). Without a window it runs
-about 30× faster than real time with 45 bodies.
+are either primitives or mesh files (`.obj`, `.stl`). Without a window, the
+45-body sample scene runs 30–75× faster than real time, depending on the run.
 
 ```sh
 examples/ObjectSim/vendor.sh                       # once, and after rebuilding bullet3 or raylib
@@ -12,7 +12,7 @@ julia --project=examples/ObjectSim examples/ObjectSim/sim.jl examples/ObjectSim/
 
 | Command (after `sim.jl SCENE`) | What it does |
 |---|---|
-| *(nothing)* | window, real time. SPACE pause, R restart, O auto-orbit, drag/wheel camera, ESC quit |
+| *(nothing)* | window, real time: bullet3 gets each frame's time and the drawn poses are interpolated. SPACE pause, R restart, O auto-orbit, drag/wheel camera, ESC quit |
 | `--headless --seconds 8 --verbose` | no window: progress every simulated second, final positions |
 | `--frames 200 --screenshot out.png` | window for exactly 200 frames (fixed stepping, same every run), save the last one |
 | `--presim 3` | simulate 3 s before the first frame |
@@ -94,12 +94,21 @@ ObjectSim/
 
 ## Notes on the wrappers
 
-- **Constructors that exist only in headers have no symbol.** That covers
-  `btDefaultMotionState`, `btSphereShape` and `btRigidBodyConstructionInfo`, so
-  ObjectSim works around them:
-  - bodies have no motion state, and transforms are read straight from the body;
-  - spheres are a one-sphere `btMultiSphereShape`;
-  - the construction info is filled field by field with upstream's defaults.
+- **Header-only constructors.** `btSphereShape`, `btDefaultMotionState` and
+  `btRigidBodyConstructionInfo` are defined only in Bullet's headers. The bullet3
+  package compiles them in as `bt_new_*` functions
+  (`packages/bullet3/shims/inline_ctors.cpp`), each building its object in place.
+  So spheres are real `btSphereShape`s, and the construction info starts from
+  upstream's own defaults; ObjectSim overrides only what a scene sets.
+- **Two transforms per moving body.** `transform` / `position` give the physics
+  state after the last fixed step. `render_transform` reads the body's
+  `btDefaultMotionState`, which the viewer draws with. bullet3 defaults to
+  *latency* interpolation: the drawn pose sits between the previous step and the
+  current one, at (last step − dt + leftover time). It is never projected past the
+  current step, so nothing is drawn inside a floor it is about to hit. Drawn poses
+  run up to one fixed step behind the physics (1/120 s in the sample scene).
+  `advance!(w, seconds)` is the variable-timestep call the real-time viewer uses;
+  `step!` and `--frames` take whole steps.
 - **Freeing.** Every C++ object is allocated with `btAlignedAllocInternal` and
   freed with `<Class>_delete_<Class>`, which runs the destructor and then
   `btAlignedFree`. Nothing relies on the garbage collector, so call `destroy!`
@@ -118,8 +127,10 @@ ObjectSim/
 julia --project=examples/ObjectSim -e 'using Pkg; Pkg.test()'
 ```
 
-77 tests:
+94 tests:
 - free fall against the integrator's closed form;
+- the `bt_new_*` constructors: a real sphere, scene values over the real
+  defaults, and motion-state interpolation for whole and fractional steps;
 - every primitive comes to rest at its own size;
 - hull placement and resting contact;
 - a ball settles into the concave bowl mesh;

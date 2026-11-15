@@ -7,13 +7,26 @@
 # and mesh interfaces: every class used here inherits BT_DECLARE_ALIGNED_ALLOCATOR
 # from btCollisionShape, btCollisionObject or btStridingMeshInterface.
 #
-# Header-inline constructors have no symbol in the library (btDefaultMotionState,
-# btSphereShape, btRigidBodyConstructionInfo), so: no motion states (a body's
-# world transform is read straight from the object), spheres are a one-sphere
-# btMultiSphereShape, and the construction info is filled field by field with
-# upstream's defaults, as packages/bullet3/test_deep.jl does.
+# btSphereShape, btDefaultMotionState and btRigidBodyConstructionInfo have
+# header-inline constructors only; the bullet3 package compiles them in as
+# bt_new_SphereShape / bt_new_DefaultMotionState / bt_new_RigidBodyConstructionInfo
+# (packages/bullet3/shims/inline_ctors.cpp), each building in place in storage
+# from btAlignedAllocInternal. The construction info therefore starts from
+# upstream's real defaults, and ObjectSim overrides only what a scene sets.
+#
+# Two transforms per moving body:
+# - the body's own world transform: the physics state after the last fixed
+#   step. `transform`, `position`, tests and snapshots read this.
+# - its btDefaultMotionState's graphics transform: what bullet3 writes back
+#   after each stepSimulation. btDiscreteDynamicsWorld defaults to *latency*
+#   interpolation: the pose at (last step - dt + time left over), i.e. between
+#   the previous fixed step and the current one, never extrapolated past it
+#   (so nothing is drawn inside a floor it is about to hit). `render_transform`
+#   reads this and the viewer draws with it: motion stays smooth when the
+#   display rate is not a multiple of the physics rate, one fixed step behind.
 
 const _OFF_XFORM  = B.member_offset(:btCollisionObject, :m_worldTransform)
+const _OFF_GFX    = B.member_offset(:btDefaultMotionState, :m_graphicsWorldTrans)
 const _OFF_ACTIVE = B.member_offset(:btCollisionObject, :m_activationState1)
 const _OFF_LINVEL = B.member_offset(:btRigidBody, :m_linearVelocity)
 const _OFF_ANGVEL = B.member_offset(:btRigidBody, :m_angularVelocity)
@@ -52,6 +65,7 @@ mutable struct Body
     name::String
     spec::ObjectSpec
     ptr::Ptr{Cvoid}
+    motion::Ptr{Cvoid}         # btDefaultMotionState for moving bodies, else C_NULL
     shape::Ptr{Cvoid}
     shape_class::Symbol
     iface::Ptr{Cvoid}          # btTriangleIndexVertexArray for `mesh`, else C_NULL
@@ -125,8 +139,8 @@ function _shape(s::ObjectSpec)
         B.btBoxShape_btBoxShape(p, Ref(_btv(h)))
         mesh = box_mesh(h)
     elseif s.shape == :sphere
-        cls = :btMultiSphereShape; p = _alloc(cls)
-        B.btMultiSphereShape_btMultiSphereShape(p, Ref(_btv((0, 0, 0))), Ref(s.radius), 1)
+        cls = :btSphereShape; p = _alloc(cls)
+        B.bt_new_SphereShape(p, s.radius)
         mesh = sphere_mesh(s.radius)
     elseif s.shape == :capsule
         straight = s.height - 2s.radius           # bullet3: distance between sphere centres
@@ -186,25 +200,37 @@ function add!(w::World, s::ObjectSpec)
     R = rotation_matrix(s.rotation)
     origin = vadd(s.position, _rotate(R, com))     # spec position is the asset's origin
     xf = B.btTransform(B.btMatrix3x3((_btv(R[1]), _btv(R[2]), _btv(R[3]))), _btv(origin))
-    ci = Ref(B.btRigidBodyConstructionInfo(
-        s.mass, ntuple(_ -> 0x00, 4),
-        Ptr{B.btMotionState}(C_NULL), xf,
-        Ptr{B.btCollisionShape}(p), _inertia(cls, p, s.mass),
-        s.damping[1], s.damping[2],
-        s.friction, s.rolling_friction, 0f0,      # friction, rolling, spinning
-        s.restitution,
-        0.8f0, 1.0f0,                             # sleeping thresholds
-        false, ntuple(_ -> 0x00, 3),
-        0.005f0, 0.01f0, 0.01f0, 0.01f0,
-        ntuple(_ -> 0x00, 4)))
+
+    # Static bodies never move, so only moving ones get a motion state. With
+    # one, the body takes its start pose from it, not from the construction info.
+    ms = C_NULL
+    if s.mass > 0
+        ms = _alloc(:btDefaultMotionState)
+        B.bt_new_DefaultMotionState(ms, Ref(xf))
+    end
+
+    # The real btRigidBodyConstructionInfo constructor fills upstream's
+    # defaults; then the scene's own values replace the ones it sets.
+    cip = _alloc(:btRigidBodyConstructionInfo)
     body = _alloc(:btRigidBody)
-    B.btRigidBody_btRigidBody(body, ci)
+    try
+        B.bt_new_RigidBodyConstructionInfo(cip, s.mass, ms, p, Ref(_inertia(cls, p, s.mass)))
+        ptr = Ptr{B.btRigidBodyConstructionInfo}(cip)
+        unsafe_store!(ptr, _with(unsafe_load(ptr);
+            m_startWorldTransform = xf,
+            m_linearDamping = s.damping[1], m_angularDamping = s.damping[2],
+            m_friction = s.friction, m_rollingFriction = s.rolling_friction,
+            m_restitution = s.restitution))
+        B.btRigidBody_btRigidBody(body, ptr)
+    finally
+        B.btAlignedFreeInternal(cip)          # plain struct: nothing to destroy
+    end
     if s.mass > 0
         unsafe_store!(Ptr{B.btVector3}(body + _OFF_LINVEL), _btv(s.velocity))
         unsafe_store!(Ptr{B.btVector3}(body + _OFF_ANGVEL), _btv(s.spin))
     end
     B.btDiscreteDynamicsWorld_addRigidBody(w.world, body)
-    b = Body(s.name, s, body, p, cls, iface, mesh, keep)
+    b = Body(s.name, s, body, ms, p, cls, iface, mesh, keep)
     push!(w.bodies, b)
     return b
 end
@@ -217,10 +243,26 @@ Advance `n` fixed steps of `1/hz` seconds each.
 function step!(w::World, n::Integer = 1)
     _check(w)
     for _ in 1:n
-        B.btDiscreteDynamicsWorld_stepSimulation(w.world, w.dt, 1, w.dt)
+        w.steps += B.btDiscreteDynamicsWorld_stepSimulation(w.world, w.dt, 1, w.dt)
     end
-    w.steps += n
     return w
+end
+
+"""
+    advance!(w, seconds; max_substeps = 8) -> Int
+
+Hand bullet3 a variable timestep, as a real-time loop does: it runs as many
+fixed `1/hz` steps as fit (at most `max_substeps`, dropping the rest of a
+long frame), keeps the remainder for next time, and sets every moving body's
+[`render_transform`](@ref) to its pose at (last step − dt + remainder),
+interpolated between the previous step and the current one.
+Returns the number of fixed steps taken.
+"""
+function advance!(w::World, seconds::Real; max_substeps::Integer = 8)
+    _check(w)
+    n = B.btDiscreteDynamicsWorld_stepSimulation(w.world, Float32(seconds), max_substeps, w.dt)
+    w.steps += n
+    return Int(n)
 end
 
 """
@@ -230,12 +272,28 @@ Step until `seconds` more simulated time has passed.
 """
 simulate!(w::World, seconds::Real) = step!(w, round(Int, seconds / w.dt))
 
-"""The body's world transform as (rotation rows, origin of the centre of mass)."""
-function transform(b::Body)
-    t = unsafe_load(Ptr{B.btTransform}(b.ptr + _OFF_XFORM))
+function _rows_origin(t::B.btTransform)
     el = t.m_basis.m_el
     return (_tuple(el[1]), _tuple(el[2]), _tuple(el[3])), _tuple(t.m_origin)
 end
+
+"""The body's world transform after the last fixed step, as (rotation rows,
+origin of the centre of mass)."""
+transform(b::Body) = _rows_origin(unsafe_load(Ptr{B.btTransform}(b.ptr + _OFF_XFORM)))
+
+"""
+    render_transform(b)
+
+The pose to draw: the motion state's graphics transform. bullet3 sets it to
+the pose at (last fixed step − dt + leftover time), between the previous step
+and the current one, so it trails [`transform`](@ref) by up to one fixed step;
+[`advance!`](@ref) is what produces a leftover. Static bodies have no motion state and
+return [`transform`](@ref). Read straight from `m_graphicsWorldTrans`, which is
+what `getWorldTransform` returns when the centre-of-mass offset is identity
+(ObjectSim never sets one).
+"""
+render_transform(b::Body) = b.motion == C_NULL ? transform(b) :
+    _rows_origin(unsafe_load(Ptr{B.btTransform}(b.motion + _OFF_GFX)))
 
 """World position of the body's centre of mass. (A method of `Base.position`,
 so `position(body)` works after `using ObjectSim` without a name clash.)"""
@@ -274,6 +332,7 @@ function destroy!(w::World)
     for b in reverse(w.bodies)
         B.btDiscreteDynamicsWorld_removeRigidBody(w.world, b.ptr)
         _delete(:btRigidBody, b.ptr)
+        b.motion == C_NULL || _delete(:btDefaultMotionState, b.motion)
         _delete(b.shape_class, b.shape)
         b.iface == C_NULL || _delete(:btTriangleIndexVertexArray, b.iface)
         empty!(b.keep)
