@@ -313,21 +313,53 @@ context, the VRAM it holds (from its DRM file descriptors), how long it has
 been up, and `Stop`, which ends it and frees the card. A typed session's own
 `laya daemon` shows there too, marked as this window's.
 
-`Start` in the same menu serves a model from the store: `llama-server` on
-127.0.0.1, from port 8090 (8080 is `laya serve`'s), one slot, `--jinja` (the
-model's own template, which is what gives a client tool calls), with the
-context, batch and flash attention the planner picks for the VRAM free at that
-moment. It runs detached, so it outlives the window; its output is in
-`~/.cache/llamachat/llama-server.log`. A server does not fit itself to the
-card, so a model that would not go wholly on the GPU is refused, with what is
-holding the memory. And when a model you load in the window lands on the CPU
-because a server has the card, the transcript says which one.
+`Start server` in the same menu serves **the whole store from one address**:
+`llama-server` in router mode on 127.0.0.1:8090 (8080 is `laya serve`'s). A
+server started on one model answers as that model whatever a client asks for,
+so a client's model list was a fiction and choosing another model there loaded
+nothing. The router lists every model, loads the one a request names, and with
+one model allowed at a time unloads the one before it: switching in the client
+is switching on the card. Each model gets the context, batch and flash
+attention the planner picks for it with the card to itself, written to
+`~/.cache/llamachat/llama-server.ini`; a model that would not go wholly on the
+GPU is left out, because a server aborts where an in-process load falls back.
+It runs detached, so it outlives the window; its output is in
+`~/.cache/llamachat/llama-server.log`. A model the router has loaded shows
+under it with `Unload`, which frees the card and leaves the server listening.
+And when a model you load in the window lands on the CPU because a server has
+the card, the transcript says which one.
+
+Starting the server also rewrites opencode's `llamacpp` provider
+(`~/.config/opencode/opencode.json`, the rest of the file untouched) to list
+exactly what is served, each with its real context size. A coding agent sends
+tool definitions with every request, so only models that can take them are
+listed: each is probed once, the first time it is served, and the answer is
+kept in `~/.cache/llamachat/tool-probe.json`. On llama.cpp b10286 qwen3:4b
+fails that probe (its template's tool parser cannot be built from a schema
+with a regex `pattern`) and is served but not listed. Nimble is left out too:
+it passes the probe, but it is a decision model, and given an agent's prompt
+it reasoned for over 280 s without answering.
+
+Served names drop `:latest` and use `-` for `:` (`qwen3.8:27b` is
+`qwen3.8-27b`): the router upper-cases what follows a colon.
 
 ```julia
-LlamaChat.list_servers()                 # what is running
-s = LlamaChat.serve("qwen3-coder")       # http://127.0.0.1:8090/v1, planner-sized
-LlamaChat.stop_server(s.pid)
+LlamaChat.serve_all()                    # every model, http://127.0.0.1:8090/v1, opencode synced
+LlamaChat.list_servers()                 # the router, and the model it has loaded
+LlamaChat.unload_served(8090, "qwen3-coder")
+LlamaChat.stop_server(pid)               # the router: its loaded model goes with it
+s = LlamaChat.serve("qwen3-coder")       # or one model only, planner-sized
 ```
+
+Measured on the B60, the router, one short request each (2026-11-14):
+
+| served as | context | switch to it | generation |
+|---|---|---|---|
+| qwen3-coder | 25600 | 6.6 s | 128–146 tok/s |
+| gemma4-26b | 32768 | 20.5 s | 64 tok/s |
+| qwen3.8-27b | 32768 | 10.3 s | 18–19 tok/s |
+| nimble | 32768 | 4.6 s | 41 tok/s |
+| qwen3-4b | 32768 | 2.0 s | 90 tok/s |
 
 `llama-server` is not part of the Hub's llama.cpp package (which wraps the
 library, not its tools); it has to be on PATH, or named in `$LLAMACHAT_SERVER`.

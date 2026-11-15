@@ -267,7 +267,17 @@ function _live_vram_free()
     return best
 end
 
+"""
+A VRAM budget for the plans made inside one task, in bytes: `with_budget(f, b)`.
+For planning against memory that is not free yet but will be (a server about
+to be replaced). Scoped to the task, so a load on another thread still sees
+the card as it is.
+"""
+const _BUDGET = Base.ScopedValues.ScopedValue{Union{Nothing,Float64}}(nothing)
+with_budget(f, bytes::Real) = Base.ScopedValues.with(f, _BUDGET => Float64(bytes))
+
 function _vram_budget()
+    _BUDGET[] === nothing || return _BUDGET[]
     haskey(ENV, "LLAMACHAT_VRAM_GB") && return parse(Float64, ENV["LLAMACHAT_VRAM_GB"]) * _GiB
     live = _live_vram_free()
     return live === nothing ? _B60_BUDGET_GIB * _GiB : max(live - _VRAM_MARGIN, 0.0)

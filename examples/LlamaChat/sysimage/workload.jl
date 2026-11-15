@@ -106,6 +106,8 @@ Base.invokelatest() do
         # The Servers view: reading /proc, with whatever is or is not running.
         LlamaChat.list_servers(); GM.refresh_servers!(app); GM.poll_servers!(app)
         GM._uptime(time() - 100.0); LlamaChat.port_open(1); LlamaChat.stop_server(0)
+        LlamaChat.served_id("a:b"); LlamaChat.write_preset(NamedTuple[], joinpath(tmp, "p.ini"))
+        LlamaChat.opencode_sync(NamedTuple[], 1; file = joinpath(tmp, "none", "opencode.json"))
         GM.toggle_terminal!(app)
         # The Pull row, the status line, a pixel readback.
         app.pull_open = true

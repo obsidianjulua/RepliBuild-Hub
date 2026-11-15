@@ -822,7 +822,7 @@ function poll!(app::App)
             held = [s for s in app.servers if s.vram >= 2^30 && !s.own]
             res.gpu_layers < res.n_layer && !isempty(held) && push_turn!(app, :note,
                 "The card is held by " * join(("$(s.model) ($(server_what(s)), $(_gib(s.vram)) GiB)" for s in held), ", ") *
-                ". Servers, then Stop, frees it; load this model again after.")
+                ". Servers, then Unload or Stop, frees it; load this model again after.")
             # "loading qwen3:4b … ok (1.6s, …)" reads as still loading. Replace
             # it with a line that says what is true now; keep anything else the
             # loader said (a partial-offload note, say).
@@ -1488,7 +1488,8 @@ _tick() = Threads.threadpool() === :interactive ? yield() : Base.process_events(
 
 # ── model servers ────────────────────────────────────────────────────────────
 
-server_what(s::LC.Server) = s.kind === :llama ? "llama-server" : s.port == 0 ? "laya daemon" : "laya serve"
+server_what(s::LC.Server) = s.kind === :laya ? (s.port == 0 ? "laya daemon" : "laya serve") :
+                            s.router ? "llama-server, every model" : s.parent != 0 ? "loaded by the router" : "llama-server"
 
 function refresh_servers!(app::App)
     app.servers = try LC.list_servers() catch; LC.Server[] end
@@ -1504,9 +1505,32 @@ function poll_servers!(app::App)
     app.serve_task = nothing
     res = try fetch(t) catch e; _unwrap(e) end
     app.serve_msg = res isa LC.Server ?
-        "$(res.model) is served at http://127.0.0.1:$(res.port)/v1  (context $(res.ctx))" :
-        sprint(showerror, res)
+            "$(res.model) is served at http://127.0.0.1:$(res.port)/v1  (context $(res.ctx))" :
+        res isa NamedTuple ?
+            "$(length(res.models)) models served at http://127.0.0.1:$(res.server.port)/v1, one loaded at a time.  $(res.note)" :
+        res === true ? "Unloaded: the card is free until a request asks for a model." :
+        res === false ? "The router did not unload it." :
+            sprint(showerror, res)
     refresh_servers!(app)
+end
+
+"""Serve every model in the store from one address (`LlamaChat.serve_all`), on a worker thread."""
+function start_router!(app::App)
+    app.serve_task === nothing || return false
+    app.serve_msg = "starting the server..."
+    app.serve_task = Threads.@spawn LC.serve_all()
+    return true
+end
+
+"""Ask a router to unload the model it has loaded; the router itself keeps running."""
+function unload_served!(app::App, s::LC.Server)
+    app.serve_task === nothing || return false
+    i = findfirst(r -> r.pid == s.parent, app.servers)
+    i === nothing && return false
+    port, id = app.servers[i].port, LC.served_id(s.model)   # the router knows it by its served name
+    app.serve_msg = "unloading $id..."
+    app.serve_task = Threads.@spawn LC.unload_served(port, id)
+    return true
 end
 
 """Start a llama-server on a store model, on a worker thread. One at a time."""
@@ -1537,7 +1561,7 @@ The Servers button and its menu: what is serving models on this machine, what
 each holds, a Stop for each, and a way to start one on a model from the store.
 """
 function servers_menu!(app::App)
-    n = count(s -> !s.own, app.servers)
+    n = count(s -> !s.own && s.parent == 0, app.servers)
     G.ImGui_Button(n == 0 ? "Servers###servers" : "Servers ($n)###servers", ZERO) &&
         (refresh_servers!(app); G.ImGui_OpenPopup("##serversmenu", Cint(0)))
     rect!(app, :servers)
@@ -1550,44 +1574,42 @@ function servers_menu!(app::App)
     for s in app.servers
         G.ImGui_PushID(Cint(s.pid))
         G.ImGui_AlignTextToFramePadding()
-        colored(() -> text!(s.model), C_BOT)
+        s.parent != 0 && (G.ImGui_Dummy(Ref(vec2(fs, 1f0))); G.ImGui_SameLine(0f0, 0f0))   # under its router
+        colored(() -> text!(s.router ? "all models" : s.model), C_BOT)
         G.ImGui_SameLine(0f0, fs * 0.8f0)
-        text!(join(filter(!isempty, [server_what(s), s.port > 0 ? "http://127.0.0.1:$(s.port)" * (s.kind === :llama ? "/v1" : "") : "",
-                                     s.ctx > 0 ? "context $(s.ctx)" : "", s.vram >= 0 ? "$(_gib(s.vram)) GiB" : "",
+        text!(join(filter(!isempty, [server_what(s),
+                                     s.port > 0 && s.parent == 0 ? "http://127.0.0.1:$(s.port)" * (s.kind === :llama ? "/v1" : "") : "",
+                                     s.ctx > 0 ? "context $(s.ctx)" : "", s.vram > 2^20 ? "$(_gib(s.vram)) GiB" : "",
                                      "up " * _uptime(s.started), "pid $(s.pid)"]), "  ·  "))
         G.ImGui_SameLine(0f0, fs)
         if s.own
             colored(() -> text!("this window's: Unload stops it"), app.dim)
+        elseif s.parent != 0
+            G.ImGui_BeginDisabled(app.serve_task !== nothing)
+            G.ImGui_SmallButton("Unload") && unload_served!(app, s)
+            G.ImGui_EndDisabled()
         else
             G.ImGui_SmallButton("Stop") && stop_server!(app, s)
         end
         G.ImGui_PopID()
     end
     G.ImGui_Separator()
-    # Start one. Laya has its own server; everything else llama-server can load.
-    choices = [name for (name, _) in app.models if !startswith(name, "laya:")]
-    isempty(app.serve_pick) && !isempty(choices) && (app.serve_pick = first(choices))
-    G.ImGui_AlignTextToFramePadding()
-    text!("Serve")
-    G.ImGui_SameLine(0f0, fs * 0.5f0)
-    G.ImGui_SetNextItemWidth(fs * 13)
-    if G.ImGui_BeginCombo("##servepick", isempty(app.serve_pick) ? "no models" : app.serve_pick, Cint(0))
-        for (k, name) in enumerate(choices)
-            G.ImGui_Selectable("$name###sp$k", name == app.serve_pick, Cint(0), ZERO) && (app.serve_pick = name)
-        end
-        G.ImGui_EndCombo()
-    end
-    G.ImGui_SameLine(0f0, fs * 0.5f0)
-    G.ImGui_BeginDisabled(app.serve_task !== nothing || isempty(app.serve_pick))
-    G.ImGui_Button("Start", ZERO) && start_server!(app, app.serve_pick)
+    # One server for the whole store: every model listed, the one a request
+    # names loaded, one at a time. Starting it again re-reads the store.
+    running = any(s -> s.router, app.servers)
+    G.ImGui_BeginDisabled(app.serve_task !== nothing)
+    G.ImGui_Button(running ? "Restart server" : "Start server", ZERO) && start_router!(app)
+    rect!(app, :serve_start)
     G.ImGui_EndDisabled()
     G.ImGui_SameLine(0f0, fs * 0.8f0)
     colored(app.dim) do
-        text!("llama-server, OpenAI-compatible, sized for the VRAM free now (unload this window's model first)")
+        text!("Serves every chat model in the store at one address (OpenAI-compatible). A client picks the model;\n" *
+              "the server loads it and unloads the one before. Unload this window's model first: both need the card.")
     end
     isempty(app.serve_msg) || colored(() -> text!(app.serve_msg),
                                       occursin("http://", app.serve_msg) || startswith(app.serve_msg, "start") ||
-                                      startswith(app.serve_msg, "Stopping") ? C_READY : C_ERR)
+                                      startswith(app.serve_msg, "Stopping") || startswith(app.serve_msg, "unload") ||
+                                      startswith(app.serve_msg, "Unloaded") ? C_READY : C_ERR)
     G.ImGui_EndPopup()
     return nothing
 end

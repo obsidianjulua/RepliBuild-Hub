@@ -1640,6 +1640,56 @@ else
         end
         @test_throws ErrorException withenv(() -> LC.llama_server_bin(), "LLAMACHAT_SERVER" => nothing, "PATH" => dir * "/none")
 
+        # Router mode: one server that holds no model, and a child per loaded model.
+        fakeproc(400, "llama-server", ["llama-server", "--models-preset", "/x/llama-server.ini", "--models-max", "1", "--port", "8090"])
+        fakeproc(410, "llama-server", ["llama-server", "--port", "40001", "--alias", "qwen3-coder", "--ctx-size", "25600", "--model", "/models/blobs/sha256-abc"];
+                 ppid = 400, fdinfo = [drm(3, 4096)])
+        by = Dict(s.pid => s for s in LC.list_servers(; proc = proc, names = Dict{String,String}()))
+        @test by[400].router && by[400].model == "router" && by[400].parent == 0 && by[400].port == 8090
+        @test !by[410].router && by[410].parent == 400 && by[410].model == "qwen3-coder" && by[410].ctx == 25600
+        @test by[300].parent == 0 && !by[300].router         # a plain server's parent is not a router: not recorded
+
+        # Served names: no `:latest`, and no colon (the router upper-cases what follows one).
+        @test LC.served_id.(["qwen3-coder:latest", "qwen3.8:27b", "nimble"]) == ["qwen3-coder", "qwen3.8-27b", "nimble"]
+        ms = [(id = "a-model", name = "a:model", path = "/m/sha256-aaa", n_ctx = 32768, n_batch = 512, flash_attn = :off),
+              (id = "small", name = "small", path = "/m/sha256-bbb", n_ctx = 8192, n_batch = 2048, flash_attn = :on)]
+        ini = read(LC.write_preset(ms, joinpath(dir, "preset.ini")), String)
+        @test occursin("version = 1", ini) && occursin("[*]\nn-gpu-layers = 99\njinja = true\nparallel = 1", ini)
+        @test occursin("[a-model]\nmodel = /m/sha256-aaa\nc = 32768\nb = 512\nub = 512\nflash-attn = off", ini)
+        @test occursin("[small]\nmodel = /m/sha256-bbb\nc = 8192\nb = 2048\nub = 2048\nflash-attn = on", ini)
+
+        # opencode's config: the llamacpp provider is rewritten, everything else is kept.
+        oc = joinpath(mkpath(joinpath(dir, "opencode")), "opencode.json")
+        write(oc, """{"theme": "dark", "providers": {"other": {"name": "kept"}, "llamacpp": {"models": {"stale": {}}}}}""")
+        @test LC.opencode_sync(ms, 8090; file = oc) == "opencode: llamacpp/a-model, llamacpp/small"
+        cfg = LC._parse_json(read(oc, String))
+        @test collect(keys(cfg))[1:2] == ["theme", "providers"] && cfg["theme"] == "dark" && cfg["providers"]["other"]["name"] == "kept"
+        lp = cfg["providers"]["llamacpp"]
+        @test lp["settings"]["baseURL"] == "http://127.0.0.1:8090/v1" && collect(keys(lp["models"])) == ["a-model", "small"]
+        @test lp["models"]["a-model"]["limit"]["context"] == 32768 && lp["models"]["small"]["limit"]["output"] == 2048
+        write(oc, "{ // a comment makes this jsonc\n}")
+        @test occursin("left alone", LC.opencode_sync(ms, 8090; file = oc)) && startswith(read(oc, String), "{ //")
+        @test occursin("nothing written", LC.opencode_sync(ms, 8090; file = joinpath(dir, "no-opencode", "opencode.json")))
+        fresh = joinpath(mkpath(joinpath(dir, "oc2")), "opencode.json")
+        LC.opencode_sync(ms[1:1], 8091; file = fresh)
+        @test LC._parse_json(read(fresh, String))["providers"]["llamacpp"]["settings"]["baseURL"] == "http://127.0.0.1:8091/v1"
+
+        # What is known about tool calls is reused, not probed again (no server here to ask).
+        pc = joinpath(dir, "tool-probe.json")
+        write(pc, """{"sha256-aaa": true, "sha256-bbb": false}""")
+        @test LC.tool_capable(ms, 1; cache = pc) == Dict("a-model" => true, "small" => false)
+
+        # Nothing listening: no answer, not an exception; and the same from a worker thread.
+        @test LC.http_post(1, "/models/unload", "{}"; timeout = 2) == (0, "")
+        @test fetch(Threads.@spawn LC.unload_served(1, "x")) === false
+
+        # A budget for the plans of one task only.
+        @test LC.with_budget(() -> LC._vram_budget(), 3 * 1024^3) == 3 * 1024^3
+        @test fetch(Threads.@spawn LC.with_budget(() -> LC._vram_budget(), 5.0)) == 5.0
+        withenv("LLAMACHAT_VRAM_GB" => "7") do
+            @test LC._vram_budget() == 7 * 1024^3 && LC.with_budget(() -> LC._vram_budget(), 1.0) == 1.0
+        end
+
         if MODEL !== nothing
             # `serve` sizes the server with the planner and starts it detached.
             withenv("LLAMACHAT_SERVER" => bin, "XDG_CACHE_HOME" => dir) do
