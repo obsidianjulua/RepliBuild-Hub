@@ -1,0 +1,18 @@
+name = "ObjectSim"
+uuid = "a0e4028b-abb6-4164-a86c-f7595e5e1f89"
+version = "0.1.0"
+authors = ["John <archjulialua@gmail.com>"]
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
+[sources]
+RepliBuild = {path = "/home/john/Desktop/Projects/RepliBuild.jl"}
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

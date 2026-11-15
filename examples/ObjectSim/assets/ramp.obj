@@ -1,0 +1,18 @@
+# ObjectSim sample: a wedge ramp, 4 m long (x), 3 m wide (z), 1.5 m high.
+# Low end at x = -2, high end at x = +2, base on y = 0. Written by hand with
+# quads so the loader's polygon triangulation is exercised.
+v -2.0 0.0 -1.5
+v  2.0 0.0 -1.5
+v  2.0 1.5 -1.5
+v -2.0 0.0  1.5
+v  2.0 0.0  1.5
+v  2.0 1.5  1.5
+# bottom
+f 1 2 5 4
+# back (high end)
+f 2 3 6 5
+# slope
+f 1 4 6 3
+# sides
+f 1 3 2
+f 4 5 6

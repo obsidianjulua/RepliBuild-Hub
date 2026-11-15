@@ -1,0 +1,118 @@
+# A bit of everything: primitives, a stack, mesh assets as convex hulls, and
+# static triangle-mesh scenery.
+#
+#   julia --project=examples/ObjectSim examples/ObjectSim/sim.jl examples/ObjectSim/scenes/tumble.toml
+
+[world]
+gravity = [0, -9.81, 0]
+hz = 120
+
+[camera]
+target = [0, 1.5, 0]
+distance = 22
+yaw = 15
+pitch = 28
+
+# ── Scenery (static) ────────────────────────────────────────────────────────
+[[object]]
+name = "floor"
+shape = "box"
+size = [40, 1, 40]
+position = [0, -0.5, 0]
+mass = 0
+color = "#3a3f4b"
+
+[[object]]
+name = "bowl"                     # concave: a static triangle mesh
+shape = "mesh"
+asset = "../assets/bowl.obj"
+position = [-5, 0, 0]
+color = "#6b7280"
+
+[[object]]
+name = "ramp"
+shape = "mesh"
+asset = "../assets/ramp.stl"      # binary STL
+position = [6, 0, -3]
+rotation = [0, 0, 0]
+color = "#8a7a5c"
+
+# ── A stack of crates ───────────────────────────────────────────────────────
+[[object]]
+name = "crate"
+shape = "box"
+size = [0.8, 0.8, 0.8]
+position = [1.0, 0.4, 4.0]
+repeat = [3, 5, 1]
+spacing = [0.82, 0.8, 1]
+friction = 0.7
+color = "#c98a3d"
+
+# ── Things dropped into the bowl ────────────────────────────────────────────
+[[object]]
+name = "ball"
+shape = "sphere"
+radius = 0.35
+position = [-6.2, 4, -1.2]
+repeat = [3, 2, 3]
+spacing = [1.1, 1.2, 1.1]
+restitution = 0.3
+rolling_friction = 0.02
+color = "#3d8bd9"
+
+[[object]]
+name = "pill"
+shape = "capsule"
+radius = 0.2
+height = 1.0
+position = [-5, 7, 0]
+rotation = [0, 0, 70]
+repeat = [1, 3, 1]
+spacing = [0, 1.0, 0]
+color = "#e8b33a"
+
+# ── Rolling down the ramp ───────────────────────────────────────────────────
+[[object]]
+name = "rock"
+shape = "hull"                    # mesh asset as a moving convex hull
+asset = "../assets/rock.obj"
+mass = 3
+position = [7.3, 3.5, -3.6]
+repeat = [1, 2, 3]
+spacing = [0, 1.3, 1.0]
+friction = 0.8
+rolling_friction = 0.05
+damping = [0.05, 0.3]
+color = "#9a8f80"
+
+[[object]]
+name = "drum"
+shape = "cylinder"
+radius = 0.4
+height = 0.9
+mass = 2
+position = [7.6, 3, -1.8]
+rotation = [90, 0, 0]
+rolling_friction = 0.03
+color = "#4fb06a"
+
+# ── Odd ones out ────────────────────────────────────────────────────────────
+[[object]]
+name = "cone"
+shape = "cone"
+radius = 0.5
+height = 1.2
+position = [2, 6, 0]
+rotation = [30, 0, 20]
+spin = [0, 3, 0]
+color = "#9a6fd6"
+
+[[object]]
+name = "thrown"
+shape = "box"
+size = [0.5, 0.5, 0.5]
+mass = 4
+position = [1.8, 2.2, 10]
+velocity = [0, 2.5, -11]          # thrown at the crate stack
+spin = [2, 0, 4]
+color = "#d94f3d"
