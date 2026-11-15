@@ -1,0 +1,189 @@
+[project]
+name = "micropython"
+version = "1.29.0"
+root = "."
+
+# MicroPython (MIT), through upstream's embed port.
+#
+# The sources are NOT a git dependency: a bare MicroPython checkout cannot be
+# compiled under one flag set, because its build generates genhdr/ with Python
+# scripts that scan the preprocessed sources. Upstream's ports/embed runs those
+# generators once and emits a self-contained tree; harvest_embed.sh does that
+# from the pinned tag (v1.29.0, commit 0fd6c573, checked by the script) against
+# the committed mpconfigport.h, into embed/ (gitignored, 3 MB). Run it before
+# the first build and after any change to TAG or mpconfigport.h:
+#
+#   packages/micropython/harvest_embed.sh
+#
+# embed/HARVEST.md records the tag, commit and the config's sha256; test.jl
+# checks that the compiled tree was generated from the config being compiled
+# against. A genhdr from one config compiled under another is a library whose
+# qstr table does not match its code.
+[dependencies.embed]
+type = "local"
+path = "embed"
+
+[compile]
+# Upstream's examples/embedding/Makefile: -I. -I<embed> -I<embed>/port,
+# -fno-common, and the compiler's default (GNU) C dialect — not -std=c99,
+# under which shared/runtime/gchelper_generic.c's register `asm` does not parse.
+# "." is the package directory, for mpconfigport.h; embed/ itself comes from
+# the local dependency.
+flags = ["-O2", "-fPIC", "-fno-common"]
+include_dirs = [".", "embed/port"]
+
+[link]
+# LTO off, and no [wrap.tier1]: on x86-64, MicroPython's nlr_push (its
+# exception mechanism) is hand-written assembly that returns twice, like
+# setjmp, but is not marked returns_twice, so the Tier 1 hazard gate would not
+# see it. Inlining a function that calls it (mp_embed_exec_str) into
+# Julia-compiled code is exactly the unsafe case. Plain ccall keeps every
+# nlr_push frame inside the library.
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["m"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["port/micropython_embed.h", "py/runtime.h", "py/obj.h", "py/smallint.h"]
+
+# ── Calling MicroPython from Julia: the rule ──
+# MicroPython raises through nlr (non-local return). With no nlr handler on
+# the stack, a raise ends in the embed port's nlr_jump_fail, which is
+# `for (;;) {}`: a silent hang, not a crash. Julia cannot push an nlr handler
+# itself (nlr_push returns twice). So from Julia call only what cannot raise:
+#   - mp_embed_exec_str / mp_embed_exec_mpy (each pushes its own handler and
+#     prints an uncaught exception as a traceback),
+#   - lookups that answer NULL instead of raising (mp_map_lookup on
+#     mp_globals_get()'s map),
+#   - the predicates and encoders below, and conversions only after a
+#     predicate says they apply (mp_obj_get_int on a value mp_obj_is_int
+#     accepted).
+# A Julia function called FROM Python must not raise either: a raise there
+# would jump straight across the Julia frames.
+#
+# Configuration this residue matches (mpconfigport.h, 64-bit): object
+# representation A (py/obj.h:84-127), so small ints are (n << 1) | 1 and
+# interned strings (qstr) are (q << 3) | 2, encoded in the pointer itself.
+
+# ── Variadic functions ──
+# Only those safe to call from Julia. Left out: mp_raise_msg_varg (raises;
+# see the rule above). List ONLY the variadic arg types.
+# proven_at is unset: the source is a harvested tree, pinned by
+# harvest_embed.sh's TAG/COMMIT and embed/HARVEST.md, not a dependency commit.
+[wrap.varargs]
+# int mp_printf(const mp_print_t *print, const char *fmt, ...)       py/mpprint.h
+# (print through &mp_plat_print to reach stdout)
+mp_printf = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+# void vstr_printf(vstr_t *vstr, const char *fmt, ...)                py/misc.h
+vstr_printf = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+# mp_obj_t mp_obj_new_exception_msg_varg(const mp_obj_type_t *exc_type,
+#                                        mp_rom_error_text_t fmt, ...) py/obj.h
+# Makes an exception object; does not raise.
+mp_obj_new_exception_msg_varg = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cstring", "Cint"],
+]
+
+# ── Runtime state (static inline)                               py/runtime.h:150-160 ──
+# The dict running code assigns into. Read results out of its map with
+# mp_map_lookup(..., MP_MAP_LOOKUP), which answers NULL for a missing name.
+[wrap.macros.mp_globals_get]
+ret = "mp_obj_dict_t*"
+args = []
+
+[wrap.macros.mp_locals_get]
+ret = "mp_obj_dict_t*"
+args = []
+
+# ── Object encoding, representation A                           py/obj.h:84-127 ──
+
+[wrap.macros.mp_obj_is_small_int]
+ret = "int"
+args = ["mp_obj_t"]
+
+[wrap.macros.MP_OBJ_SMALL_INT_VALUE]
+ret = "long"
+args = ["mp_obj_t"]
+
+[wrap.macros.MP_OBJ_NEW_SMALL_INT]
+ret = "mp_obj_t"
+args = ["long"]
+
+[wrap.macros.mp_obj_is_qstr]
+ret = "int"
+args = ["mp_obj_t"]
+
+[wrap.macros.MP_OBJ_QSTR_VALUE]
+ret = "size_t"
+args = ["mp_obj_t"]
+
+# qstr is `typedef size_t qstr` (py/qstr.h:60); make one with qstr_from_str.
+[wrap.macros.MP_OBJ_NEW_QSTR]
+ret = "mp_obj_t"
+args = ["size_t"]
+
+[wrap.macros.mp_obj_is_obj]
+ret = "int"
+args = ["mp_obj_t"]
+
+# ── Type predicates                                             py/obj.h:995-1003 ──
+
+[wrap.macros.mp_obj_is_int]
+ret = "int"
+args = ["mp_obj_t"]
+
+[wrap.macros.mp_obj_is_str]
+ret = "int"
+args = ["mp_obj_t"]
+
+[wrap.macros.mp_obj_is_float]
+ret = "int"
+args = ["mp_obj_t"]
+
+# ── Singletons                                                  py/obj.h:926-932 ──
+
+[wrap.macros.mp_const_none]
+ret = "mp_obj_t"
+
+[wrap.macros.mp_const_false]
+ret = "mp_obj_t"
+
+[wrap.macros.mp_const_true]
+ret = "mp_obj_t"
+
+# ── Small-int range                                             py/smallint.h ──
+# Beyond these, an int is a heap (mpz) object, not encoded in the pointer.
+
+[wrap.macros.MP_SMALL_INT_MIN]
+ret = "long"
+
+[wrap.macros.MP_SMALL_INT_MAX]
+ret = "long"
+
+[wrap.macros.MP_SMALL_INT_FITS]
+ret = "int"
+args = ["long"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

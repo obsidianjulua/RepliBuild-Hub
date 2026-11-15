@@ -31,6 +31,15 @@ packages/llamacpp/vulkan/
 # reviewable in a diff.
 packages/onednn/ocl/
 
+# micropython's harvested embed tree — upstream's ports/embed output (py/*.c,
+# the generated genhdr/, the port glue), 3 MB, regenerated from the pinned tag
+# and the committed packages/micropython/mpconfigport.h by
+# packages/micropython/harvest_embed.sh. Same class as the shaders above: a
+# build-time generator's output (MicroPython's qstr/module scan), not tracked
+# content. The CONFIG it was generated under IS tracked, and embed/HARVEST.md
+# records its sha256, which test.jl checks.
+packages/micropython/embed/
+
 # imgui writes imgui.ini next to the process cwd on exit — window positions,
 # sizes and collapsed state from whoever last ran a demo. Runtime residue of a
 # test run, not configuration.

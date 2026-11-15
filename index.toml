@@ -225,3 +225,21 @@ description = "libwebp as a graph — webp (encode/decode), libwebpmux (animatio
 version = "1.6.0"
 language = "c"
 tags = ["webp", "image", "imaging", "codec", "animation", "graph"]
+
+[bullet3]
+description = "Bullet Physics 3.25 — the C++ rigid-body pipeline (LinearMath, BulletCollision, BulletDynamics)"
+version = "3.25"
+language = "cpp"
+tags = ["physics", "simulation", "3d", "games", "cpp"]
+
+[quickjs]
+description = "QuickJS 2026-06-04 — Fabrice Bellard's small embeddable ES2023 JavaScript engine, with quickjs-libc (std/os)"
+version = "2026-06-04"
+language = "c"
+tags = ["javascript", "scripting", "embedded", "interpreter"]
+
+[micropython]
+description = "MicroPython 1.29.0 — a small Python 3 interpreter (compiler, VM, GC, big ints, floats) embedded through upstream's embed port"
+version = "1.29.0"
+language = "c"
+tags = ["python", "scripting", "embedded", "interpreter"]

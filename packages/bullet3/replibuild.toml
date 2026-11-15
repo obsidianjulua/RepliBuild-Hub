@@ -1,0 +1,67 @@
+[project]
+name = "bullet3"
+version = "3.25"
+root = "."
+
+# Bullet Physics, the classic rigid-body pipeline: LinearMath + BulletCollision +
+# BulletDynamics (153 .cpp under src/). zlib licence for everything under src/.
+#
+# Left out, and why:
+#   Extras/                      tools and importers (zlib-ish, but not the engine;
+#                                Extras/ is outside the licence line in LICENSE.txt)
+#   src/Bullet3*                 the experimental "Bullet 3" GPU pipeline (OpenCL,
+#                                its own Common/Collision/Dynamics/Geometry/Serialize)
+#   src/BulletSoftBody           soft bodies — a separate library upstream
+#   src/BulletInverseDynamics    a separate library upstream
+#   src/clew                     OpenCL loader for Bullet3OpenCL
+#   src/bt*All.cpp               upstream's unity-build TUs; each #includes every
+#                                .cpp of its library, so compiling them alongside
+#                                the per-file TUs defines every symbol twice
+# examples/, test/, docs/ are skipped by the resolver itself.
+#
+# Upstream's default configure adds no defines to these three libraries:
+# single precision (btScalar = float), BT_THREADSAFE off, SSE picked by
+# btScalar.h from the compiler's own __SSE__ macros. No generated headers.
+[dependencies.bullet3]
+type = "git"
+url = "https://github.com/bulletphysics/bullet3.git"
+tag = "3.25"
+commit = "2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5"
+exclude = [
+    "Extras",
+    "src/Bullet3",
+    "src/BulletSoftBody",
+    "src/BulletInverseDynamics",
+    "src/clew",
+    "btLinearMathAll.cpp",
+    "btBulletCollisionAll.cpp",
+    "btBulletDynamicsAll.cpp",
+]
+
+[compile]
+# -fstandalone-debug: same reason as box2d. Bullet's value types (btVector3,
+# btTransform, btQuaternion, btMatrix3x3) and its *ConstructionInfo structs are
+# header-only; clang's limited debug info would emit them as declaration-only
+# stubs, which wrap to empty Julia structs. DWARF is the input — load-bearing.
+flags = ["-O2", "-fPIC", "-std=c++17", "-fstandalone-debug"]
+
+[link]
+enable_lto = false
+optimization_level = "2"
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# Upstream's umbrella header for the rigid-body pipeline (src/ is on the
+# include path); it pulls in btBulletCollisionCommon.h and LinearMath.
+shim_headers = ["btBulletDynamicsCommon.h"]
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true

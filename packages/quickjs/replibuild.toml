@@ -1,0 +1,539 @@
+[project]
+name = "quickjs"
+version = "2026-06-04"
+root = "."
+
+# QuickJS, Fabrice Bellard's ES2023 engine (MIT). Bellard publishes releases as
+# dated tarballs on bellard.org; the GitHub mirror carries no tags, so this is
+# an archive dependency pinned by its SHA-256. (quickjs-ng is a separate fork
+# with its own API drift; this package is upstream QuickJS.)
+#
+# The library is the Makefile's QJS_LIB_OBJS: quickjs.c, dtoa.c, libregexp.c,
+# libunicode.c, cutils.c, quickjs-libc.c (the `std` and `os` modules). Left
+# out, each with its own main(): the qjs REPL, the qjsc compiler, the test262
+# runner, and the unicode table generator. examples/, tests/ and doc/ are
+# skipped by the resolver itself.
+[dependencies.quickjs]
+type = "archive"
+url = "https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz"
+sha256 = "b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a"
+exclude = ["qjs.c", "qjsc.c", "run-test262.c", "unicode_gen.c"]
+
+[compile]
+# The Makefile's Linux build: -O2, -D_GNU_SOURCE, -fwrapv ("ensure that signed
+# overflows behave as expected" — the interpreter relies on it). No
+# -funsigned-char: upstream adds that only on its Darwin/FreeBSD branch.
+# HAVE_CLOSEFROM is decided by compiling compat/test-closefrom.c, which the
+# release tarball does not ship, so upstream's own Linux build never defines it.
+flags = ["-O2", "-fPIC", "-fwrapv", "-D_GNU_SOURCE"]
+
+[compile.defines]
+# -DCONFIG_VERSION=\"$(shell cat VERSION)\" in the Makefile: a C string literal.
+# Flags reach clang as separate arguments with no shell, so the quotes survive.
+CONFIG_VERSION = "\"2026-06-04\""
+
+[link]
+enable_lto = true
+optimization_level = "2"
+# Makefile LIBS on Linux: -lm -lpthread -ldl (the os.Worker threads, dlopen of
+# native modules in quickjs-libc).
+link_libraries = ["m", "pthread", "dl"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "c"
+shim_headers = ["quickjs.h", "quickjs-libc.h"]
+
+# Everything below is the compiler-erased surface of the two public headers,
+# re-checked by hand against quickjs.h / quickjs-libc.h in the 2026-06-04
+# tarball. With neither CONFIG_CHECK_JSVALUE nor JS_NAN_BOXING defined (a
+# 64-bit build), quickjs.h takes its THIRD representation branch
+# (`#else /* !JS_NAN_BOXING */`, quickjs.h:216-282): JSValue is the 16-byte
+# struct { JSValueUnion u; int64_t tag; }. The pointer-tagging and NaN-boxing
+# branches (quickjs.h:105-215) are not compiled and are not listed.
+#
+# Not shimmable, deliberately absent:
+#   JS_CFUNC_DEF … JS_ALIAS_BASE_DEF (quickjs.h:1113-1128) expand to
+#     brace-initializers for JSCFunctionListEntry, not expressions (and
+#     JS_CFUNC_SPECIAL_DEF token-pastes). Build JSCFunctionListEntry values in
+#     Julia, with the JS_DEF_* kinds below.
+#   JS_BOOL, JSValueConst — type aliases (`int`, `JSValue`), not values.
+#   JS_PTR64_DEF, js_likely, js_force_inline, __js_printf_like — attributes.
+#   __JS_NewFloat64, __JS_NewShortBigInt, __js_rc, JS_NewCatchOffset — internal.
+#
+# No [wrap.stl]: QuickJS is C99 with no C++ or STL types (metadata stl_methods = 0).
+
+# ── Variadic functions ──
+# JSValue __js_printf_like(2, 3) JS_Throw*Error(JSContext *ctx, const char *fmt, ...)
+#                                                                    quickjs.h:673-677
+# Each sets the context's pending exception and returns JS_EXCEPTION, so a
+# JSCFunction written in Julia can `return JS_ThrowTypeError_Cstring(ctx, ...)`.
+# List ONLY the variadic arg types; ctx and fmt come from DWARF.
+# proven_at is unset: this package is pinned by a tarball sha256, not a commit,
+# and how the provenance check treats an archive pin is not verified here.
+[wrap.varargs]
+JS_ThrowSyntaxError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+JS_ThrowTypeError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+JS_ThrowReferenceError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+JS_ThrowRangeError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+JS_ThrowInternalError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+
+# ── JSValue access (struct branch macros)                      quickjs.h:236-252 ──
+
+[wrap.macros.JS_VALUE_GET_TAG]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_NORM_TAG]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_INT]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_BOOL]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_FLOAT64]
+ret = "double"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_SHORT_BIG_INT]
+ret = "long long"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_GET_PTR]
+ret = "void*"
+args = ["JSValue"]
+
+[wrap.macros.JS_MKVAL]
+ret = "JSValue"
+args = ["int", "int"]
+
+[wrap.macros.JS_MKPTR]
+ret = "JSValue"
+args = ["int", "void*"]
+
+[wrap.macros.JS_TAG_IS_FLOAT64]
+ret = "int"
+args = ["int"]
+
+# static inline JS_BOOL JS_VALUE_IS_NAN(JSValue v)                   quickjs.h:262
+[wrap.macros.JS_VALUE_IS_NAN]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_VALUE_IS_BOTH_INT]
+ret = "int"
+args = ["JSValue", "JSValue"]
+
+[wrap.macros.JS_VALUE_IS_BOTH_FLOAT]
+ret = "int"
+args = ["JSValue", "JSValue"]
+
+[wrap.macros.JS_VALUE_HAS_REF_COUNT]
+ret = "int"
+args = ["JSValue"]
+
+# ── Constructors (static / js_force_inline)                    quickjs.h:555-600 ──
+
+[wrap.macros.JS_NewBool]
+ret = "JSValue"
+args = ["JSContext*", "int"]
+
+[wrap.macros.JS_NewInt32]
+ret = "JSValue"
+args = ["JSContext*", "int"]
+
+[wrap.macros.JS_NewInt64]
+ret = "JSValue"
+args = ["JSContext*", "long long"]
+
+[wrap.macros.JS_NewUint32]
+ret = "JSValue"
+args = ["JSContext*", "unsigned int"]
+
+[wrap.macros.JS_NewFloat64]
+ret = "JSValue"
+args = ["JSContext*", "double"]
+
+# static inline JSValue JS_NewString(JSContext *ctx, const char *str) quickjs.h:744
+[wrap.macros.JS_NewString]
+ret = "JSValue"
+args = ["JSContext*", "const char*"]
+
+# static inline JSValue JS_NewCFunction(ctx, func, name, length)     quickjs.h:1050
+[wrap.macros.JS_NewCFunction]
+ret = "JSValue"
+args = ["JSContext*", "JSCFunction*", "const char*", "int"]
+
+# static inline JSValue JS_NewCFunctionMagic(ctx, func, name, length, cproto, magic)
+#                                                                    quickjs.h:1056
+[wrap.macros.JS_NewCFunctionMagic]
+ret = "JSValue"
+args = ["JSContext*", "JSCFunctionMagic*", "const char*", "int", "JSCFunctionEnum", "int"]
+
+# ── Type predicates                                            quickjs.h:614-665 ──
+
+[wrap.macros.JS_IsNumber]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsBigInt]
+ret = "int"
+args = ["JSContext*", "JSValue"]
+
+[wrap.macros.JS_IsBool]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsNull]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsUndefined]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsException]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsUninitialized]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsString]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsSymbol]
+ret = "int"
+args = ["JSValue"]
+
+[wrap.macros.JS_IsObject]
+ret = "int"
+args = ["JSValue"]
+
+# ── Reference counting                                         quickjs.h:687-725 ──
+# Load-bearing: JS_FreeRuntime asserts that no GC object leaked, so every value
+# the embedder receives must be released through JS_FreeValue.
+
+[wrap.macros.JS_FreeValue]
+ret = "void"
+args = ["JSContext*", "JSValue"]
+
+[wrap.macros.JS_FreeValueRT]
+ret = "void"
+args = ["JSRuntime*", "JSValue"]
+
+[wrap.macros.JS_DupValue]
+ret = "JSValue"
+args = ["JSContext*", "JSValue"]
+
+[wrap.macros.JS_DupValueRT]
+ret = "JSValue"
+args = ["JSRuntime*", "JSValue"]
+
+# ── Conversions and properties                                 quickjs.h:731-800 ──
+
+[wrap.macros.JS_ToUint32]
+ret = "int"
+args = ["JSContext*", "unsigned int*", "JSValue"]
+
+[wrap.macros.JS_ToCStringLen]
+ret = "const char*"
+args = ["JSContext*", "size_t*", "JSValue"]
+
+[wrap.macros.JS_ToCString]
+ret = "const char*"
+args = ["JSContext*", "JSValue"]
+
+# JSAtom is `typedef uint32_t JSAtom`                                quickjs.h:54
+[wrap.macros.JS_AtomToCString]
+ret = "const char*"
+args = ["JSContext*", "unsigned int"]
+
+[wrap.macros.JS_GetProperty]
+ret = "JSValue"
+args = ["JSContext*", "JSValue", "unsigned int"]
+
+[wrap.macros.JS_SetProperty]
+ret = "int"
+args = ["JSContext*", "JSValue", "unsigned int", "JSValue"]
+
+# ── Value macros: JSValue constants                            quickjs.h:252, 290-295 ──
+
+[wrap.macros.JS_NULL]
+ret = "JSValue"
+
+[wrap.macros.JS_UNDEFINED]
+ret = "JSValue"
+
+[wrap.macros.JS_FALSE]
+ret = "JSValue"
+
+[wrap.macros.JS_TRUE]
+ret = "JSValue"
+
+[wrap.macros.JS_EXCEPTION]
+ret = "JSValue"
+
+[wrap.macros.JS_UNINITIALIZED]
+ret = "JSValue"
+
+# JS_NAN and JS_FLOAT64_NAN are left out: they expand to C's NAN, from
+# <math.h>, which quickjs.h uses without including (upstream's .c files include
+# it first). A system header cannot be a shim_header (verify_shim_headers
+# refuses anything outside the package tree), and forcing it into every TU for
+# two constants is not worth it. In Julia: NaN, and JS_NewFloat64(ctx, NaN).
+
+[wrap.macros.JS_LIMB_BITS]
+ret = "int"
+
+[wrap.macros.JS_SHORT_BIG_INT_BITS]
+ret = "int"
+
+# ── Property flags                                             quickjs.h:298-325 ──
+
+[wrap.macros.JS_PROP_CONFIGURABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_WRITABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_ENUMERABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_C_W_E]
+ret = "int"
+
+[wrap.macros.JS_PROP_LENGTH]
+ret = "int"
+
+[wrap.macros.JS_PROP_TMASK]
+ret = "int"
+
+[wrap.macros.JS_PROP_NORMAL]
+ret = "int"
+
+[wrap.macros.JS_PROP_GETSET]
+ret = "int"
+
+[wrap.macros.JS_PROP_VARREF]
+ret = "int"
+
+[wrap.macros.JS_PROP_AUTOINIT]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_SHIFT]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_CONFIGURABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_WRITABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_ENUMERABLE]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_GET]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_SET]
+ret = "int"
+
+[wrap.macros.JS_PROP_HAS_VALUE]
+ret = "int"
+
+[wrap.macros.JS_PROP_THROW]
+ret = "int"
+
+[wrap.macros.JS_PROP_THROW_STRICT]
+ret = "int"
+
+[wrap.macros.JS_PROP_NO_EXOTIC]
+ret = "int"
+
+[wrap.macros.JS_DEFAULT_STACK_SIZE]
+ret = "int"
+
+# ── JS_Eval flags                                              quickjs.h:332-347 ──
+
+[wrap.macros.JS_EVAL_TYPE_GLOBAL]
+ret = "int"
+
+[wrap.macros.JS_EVAL_TYPE_MODULE]
+ret = "int"
+
+[wrap.macros.JS_EVAL_TYPE_DIRECT]
+ret = "int"
+
+[wrap.macros.JS_EVAL_TYPE_INDIRECT]
+ret = "int"
+
+[wrap.macros.JS_EVAL_TYPE_MASK]
+ret = "int"
+
+[wrap.macros.JS_EVAL_FLAG_STRICT]
+ret = "int"
+
+# Compile without running: the result is a JS_TAG_FUNCTION_BYTECODE (or
+# JS_TAG_MODULE) value, runnable with JS_EvalFunction or serializable with
+# JS_WriteObject.
+[wrap.macros.JS_EVAL_FLAG_COMPILE_ONLY]
+ret = "int"
+
+[wrap.macros.JS_EVAL_FLAG_BACKTRACE_BARRIER]
+ret = "int"
+
+[wrap.macros.JS_EVAL_FLAG_ASYNC]
+ret = "int"
+
+# ── Atoms, calls, classes                                      quickjs.h:451, 526, 546 ──
+
+[wrap.macros.JS_ATOM_NULL]
+ret = "int"
+
+[wrap.macros.JS_CALL_FLAG_CONSTRUCTOR]
+ret = "int"
+
+[wrap.macros.JS_INVALID_CLASS_ID]
+ret = "int"
+
+# ── JS_GetOwnPropertyNames flags                               quickjs.h:810-816 ──
+
+[wrap.macros.JS_GPN_STRING_MASK]
+ret = "int"
+
+[wrap.macros.JS_GPN_SYMBOL_MASK]
+ret = "int"
+
+[wrap.macros.JS_GPN_PRIVATE_MASK]
+ret = "int"
+
+[wrap.macros.JS_GPN_ENUM_ONLY]
+ret = "int"
+
+[wrap.macros.JS_GPN_SET_ENUM]
+ret = "int"
+
+# ── JSON / strip flags                                         quickjs.h:864, 930-931 ──
+
+[wrap.macros.JS_PARSE_JSON_EXT]
+ret = "int"
+
+[wrap.macros.JS_STRIP_SOURCE]
+ret = "int"
+
+[wrap.macros.JS_STRIP_DEBUG]
+ret = "int"
+
+# ── Bytecode serialization (JS_WriteObject / JS_ReadObject)    quickjs.h:980-994 ──
+# The format is tied to this QuickJS release (BC_VERSION 5 in quickjs.c), and
+# no check is done before running loaded bytecode: load only bytecode you wrote.
+
+[wrap.macros.JS_WRITE_OBJ_BYTECODE]
+ret = "int"
+
+[wrap.macros.JS_WRITE_OBJ_BSWAP]
+ret = "int"
+
+[wrap.macros.JS_WRITE_OBJ_SAB]
+ret = "int"
+
+[wrap.macros.JS_WRITE_OBJ_REFERENCE]
+ret = "int"
+
+[wrap.macros.JS_READ_OBJ_BYTECODE]
+ret = "int"
+
+[wrap.macros.JS_READ_OBJ_ROM_DATA]
+ret = "int"
+
+[wrap.macros.JS_READ_OBJ_SAB]
+ret = "int"
+
+[wrap.macros.JS_READ_OBJ_REFERENCE]
+ret = "int"
+
+# ── JSCFunctionListEntry kinds (for tables built in Julia)     quickjs.h:1099-1110 ──
+
+[wrap.macros.JS_DEF_CFUNC]
+ret = "int"
+
+[wrap.macros.JS_DEF_CGETSET]
+ret = "int"
+
+[wrap.macros.JS_DEF_CGETSET_MAGIC]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_STRING]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_INT32]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_INT64]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_DOUBLE]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_UNDEFINED]
+ret = "int"
+
+[wrap.macros.JS_DEF_OBJECT]
+ret = "int"
+
+[wrap.macros.JS_DEF_ALIAS]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_ATOM]
+ret = "int"
+
+[wrap.macros.JS_DEF_PROP_BOOL]
+ret = "int"
+
+[types]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
