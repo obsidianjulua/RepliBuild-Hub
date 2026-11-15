@@ -76,3 +76,108 @@ examples/*/Manifest.toml
 
 # Claude Code session state and worktrees (nested git checkouts).
 .claude/
+
+# ════════════════════════════════════════════════════════════════════════════
+# Beyond Julia and C/C++ — the Hub now also embeds JavaScript (quickjs),
+# Python (micropython) and runs LLM chat tooling (LlamaChat). Rules for what
+# those bring along.
+# ════════════════════════════════════════════════════════════════════════════
+
+# Secrets — never tracked, whatever the directory. Keys, certificates, env
+# files and token/credential stores. (*.key also covers the IR cache's
+# `<file>.ll.key` stamps, which live under build/ and are ignored anyway.)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.netrc
+*.token
+*secret*.json
+*secrets*.toml
+*credentials*
+.npmrc
+.pypirc
+
+# Jinja — no template files and no Jinja engine are tracked. Chat templates
+# come with the models (GGUF metadata / tokenizer_config.json) and the JS
+# engine (@huggingface/jinja, MIT) is third-party code: both are fetched or
+# copied into place locally, not committed. Includes LlamaChat's js/ folder,
+# where vendor_js.sh expects jinja-<ver>.cjs and its licence.
+*.jinja
+*.jinja2
+*.j2
+*jinja*.cjs
+*jinja*.mjs
+*jinja*.js
+jinja-LICENSE
+examples/*/js/
+*chat_template*
+tokenizer_config.json
+
+# Model weights and tensors — large, licensed separately, never in the Hub.
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# JavaScript (quickjs) — npm installs, and compiled QuickJS bytecode that a
+# test or example writes out (JS_WriteObject output; tied to one QuickJS
+# release, see packages/quickjs/replibuild.toml).
+node_modules/
+package-lock.json
+*.tgz
+*.qjsbc
+*.jsbc
+
+# Python (micropython, harvest scripts) — interpreter caches and venvs, plus
+# MicroPython's own build output: precompiled .mpy bytecode and embed.mk's
+# scratch directory if a harvest is run in-tree.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+*.mpy
+build-embed/
+micropython_embed/
+
+# Downloaded release archives (quickjs is an archive dependency; its tarball is
+# fetched into .replibuild_cache, but a manual download should not be tracked).
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.tar.zst
+*.zip
+
+# Julia coverage/allocation output and machine-local preferences.
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+LocalPreferences.toml
+
+# Logs, crash dumps, profiles.
+*.log
+core
+core.[0-9]*
+perf.data*
+
+# Editors and OS.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
