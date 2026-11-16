@@ -39,7 +39,9 @@ const R = Raylib
 # that no function signature references do not reach DWARF, so they are
 # spelled here against the pinned header.
 const FLAG_WINDOW_HIDDEN = UInt32(0x00000080)
+const LOG_INFO    = Cint(3)
 const LOG_WARNING = Cint(4)
+const LOG_ERROR   = Cint(5)
 const LOG_NONE    = Cint(7)
 
 rgba(r, g, b, a=255) = R.Color(UInt8(r), UInt8(g), UInt8(b), UInt8(a))
@@ -53,7 +55,59 @@ const BLUE  = rgba(0, 121, 241)      # raylib.h BLUE
 
 R.SetTraceLogLevel(LOG_WARNING)
 
+"What `f()` printed to stdout (TraceLog vprintf()s and fflush()es it)."
+function stdout_of(f)
+    path = tempname()
+    open(path, "w") do io
+        redirect_stdout(io) do
+            f()
+            Libc.flush_cstdio()
+        end
+    end
+    s = read(path, String)
+    rm(path)
+    return s
+end
+
 @testset "raylib Deep Tests" begin
+
+@testset "[wrap.varargs] TextFormat" begin
+    @test R.TextFormat("plain text") == "plain text"          # the fixed-only form still exists
+    @test R.TextFormat_Cint("score: %d", 42) == "score: 42"
+    @test R.TextFormat_Cdouble("%.3f", Float64(pi)) == "3.142"
+    @test R.TextFormat_Cstring("hello %s", "julia") == "hello julia"
+    @test R.TextFormat_Cint_Cint("%dx%d", 1920, 1080) == "1920x1080"
+    @test R.TextFormat_Cdouble_Cdouble("(%.1f, %.1f)", 1.5, -2.5) == "(1.5, -2.5)"
+    @test R.TextFormat_Cstring_Cint("%s=%d", "lives", 3) == "lives=3"
+    @test R.TextFormat_Cstring_Cstring("%s/%s", "a", "b") == "a/b"
+    @test R.TextFormat_Cint_Cint_Cint("#%02x%02x%02x", 255, 128, 0) == "#ff8000"
+    # raylib rotates 4 static buffers; the wrapper copies each result into a
+    # Julia String, so results survive any number of later calls.
+    rs = [R.TextFormat_Cint("n%d", i) for i in 1:10]
+    @test rs == ["n$i" for i in 1:10]
+end
+
+@testset "[wrap.varargs] TraceLog" begin
+    # Threshold is LOG_WARNING (set above): INFO is dropped, WARNING and ERROR
+    # print with their prefix. LOG_FATAL is never called: it exit()s.
+    out = stdout_of() do
+        R.TraceLog_Cint(LOG_WARNING, "frame %d dropped", 7)
+        R.TraceLog_Cstring(LOG_INFO, "below the threshold %s", "x")
+        R.TraceLog_Cstring_Cint(LOG_ERROR, "%s failed: %d", "load", -1)
+        R.TraceLog_Cdouble(LOG_WARNING, "dt=%.2f", 0.25)
+        R.TraceLog_Cint_Cint(LOG_WARNING, "%d of %d", 3, 4)
+        R.TraceLog_Cstring_Cstring(LOG_WARNING, "%s %s", "a", "b")
+        R.TraceLog(LOG_WARNING, "no arguments")
+    end
+    @test out == """
+        WARNING: frame 7 dropped
+        ERROR: load failed: -1
+        WARNING: dt=0.25
+        WARNING: 3 of 4
+        WARNING: a b
+        WARNING: no arguments
+        """
+end
 
 @testset "Version macros match the pinned tag" begin
     @test R.RAYLIB_VERSION_MAJOR() == 6

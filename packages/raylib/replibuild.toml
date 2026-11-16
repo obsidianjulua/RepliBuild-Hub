@@ -111,6 +111,41 @@ ret = "int"
 [wrap.macros.RAYLIB_VERSION]
 ret = "const char*"
 
+# ── Variadic functions ──
+# raylib.h's only two (checked by hand at this commit):
+#   void TraceLog(int logLevel, const char *text, ...)          raylib.h:1119
+#     rcore.c:1860: drops anything below SetTraceLogLevel's threshold,
+#     prefixes "INFO: " etc., vprintf()s to stdout and flushes. LOG_FATAL then
+#     calls exit(EXIT_FAILURE) (rcore.c:1910): never pass it from Julia, it ends
+#     the process.
+#   const char *TextFormat(const char *text, ...)               raylib.h:1558
+#     rtext.c: vsnprintf into one of MAX_TEXTFORMAT_BUFFERS (4) static
+#     buffers, rotating, so a result stays valid for 4 calls. The wrapper
+#     copies it into a Julia String, so that limit never shows.
+# Without this table both bind with their fixed parameters only: a format
+# string and no arguments. List ONLY the variadic arg types; the fixed ones
+# come from DWARF. C promotes float to double through `...`: use Cdouble.
+[wrap.varargs]
+proven_at = "02566453880e06bec97f5b8160fa6fe1e98397ca"
+TraceLog = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cint", "Cint"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+]
+TextFormat = [
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring"],
+    ["Cint", "Cint"],
+    ["Cdouble", "Cdouble"],
+    ["Cstring", "Cint"],
+    ["Cstring", "Cstring"],
+    ["Cint", "Cint", "Cint"],
+]
+
 [wrap.tier1]
 enable = false
 
