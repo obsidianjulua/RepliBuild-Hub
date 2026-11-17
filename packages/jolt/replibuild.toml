@@ -1,0 +1,160 @@
+[project]
+name = "jolt"
+version = "5.7.0"
+root = "."
+
+# Jolt Physics: rigid bodies, constraints, characters, vehicles, soft bodies
+# and ragdolls (Jolt/, 138 .cpp after the exclusions below). MIT licence.
+#
+# This is Jolt.cmake's Linux x86-64 source list in its "Distribution"
+# configuration, with ObjectStream kept and, for now, no compute backend
+# (see the WORKAROUND in exclude):
+#   Jolt/Compute/DX12, Jolt/Compute/VK   Windows-only / needs the Vulkan SDK's
+#                                        glslc + dxc at build time; upstream
+#                                        adds them only when found (VK) or on
+#                                        WIN32 (DX12). Compute/MTL is .mm.
+#   Samples, TestFramework, UnitTests,   consumers of the library, each with its
+#   PerformanceTest, HelloWorld,         own main() and renderer
+#   JoltViewer
+#   Build, Docs, Assets                  CMake, doxygen, sample meshes
+# Jolt/Renderer/*.cpp stay: upstream compiles them in every configuration and
+# they reduce to nothing without JPH_DEBUG_RENDERER.
+[dependencies.jolt]
+type = "git"
+url = "https://github.com/jrouwe/JoltPhysics.git"
+tag = "v5.7.0"
+commit = "cf16769bb0ede9c45d57d06068ff0689e9702f5c"
+exclude = [
+    "Jolt/Compute/DX12/",
+    "Jolt/Compute/VK/",
+    "Jolt/Compute/MTL/",
+    # WORKAROUND (GENERATOR-fragment-header-in-forced-unit.md): the CPU
+    # compute backend. Upstream turns it on by default (JPH_USE_CPU_COMPUTE),
+    # but its shader-wrapper classes are declared in WrapShaderBegin.h, a
+    # fragment that opens namespace JPH::ShaderWrappers for WrapShaderEnd.h
+    # to close; the build's forced-constructor unit includes it alone and
+    # every later JPH:: name breaks (1,944 constructors declined, SphereShape
+    # and BodyCreationSettings among them). Without it there is no compute
+    # backend at all on Linux, which only Hair needs. Once the engine fix
+    # lands: delete the next three entries and restore -DJPH_USE_CPU_COMPUTE.
+    "Jolt/Compute/CPU/",
+    "Jolt/Shaders/HairWrapper.cpp",
+    "Jolt/Shaders/TestComputeWrapper.cpp",
+    "Samples/",
+    "TestFramework/",
+    "UnitTests/",
+    "PerformanceTest/",
+    "HelloWorld/",
+    "JoltViewer/",
+    "Build/",
+    "Docs/",
+    "Assets/",
+]
+
+[compile]
+# From Build/CMakeLists.txt + Jolt/Jolt.cmake, clang on x86-64 Linux, the
+# upstream option defaults except where noted:
+#   -std=c++17 -pthread
+#   -mavx2 -mbmi -mpopcnt -mlzcnt -mf16c -mfma -mfpmath=sse
+#                     USE_AVX2/LZCNT/TZCNT/F16C/FMADD = ON (all on this CPU).
+#                     Jolt/Core/Core.h turns __AVX2__, __FMA__, … into its own
+#                     JPH_USE_* switches, so no -DJPH_USE_* is needed.
+#   -ffp-contract=fast   USE_FMADD on x86 and not CROSS_PLATFORM_DETERMINISTIC
+#   -DJPH_OBJECT_STREAM  ENABLE_OBJECT_STREAM = ON
+#   (-DJPH_USE_CPU_COMPUTE, upstream ON, is left out for now: see the
+#   WORKAROUND under [dependencies.jolt] exclude.)
+# Left at their "Distribution" values (no define): JPH_DEBUG_RENDERER and
+# JPH_PROFILE_ENABLED (both need an application-side renderer/profiler),
+# JPH_ENABLE_ASSERTS, JPH_DOUBLE_PRECISION (positions are float: RVec3 = Vec3),
+# JPH_CROSS_PLATFORM_DETERMINISTIC. JPH_SHARED_LIBRARY is not defined either:
+# JPH_EXPORT is then empty and every symbol keeps default visibility.
+# Upstream builds with -fno-rtti -fno-exceptions by default; both stay ON here
+# (CPP_RTTI_ENABLED / CPP_EXCEPTIONS_ENABLED are upstream options) so the
+# build's generated units and the library agree on typeinfo for every vtable.
+# -fstandalone-debug: Jolt's value types (Vec3, Quat, Mat44, BodyID) and its
+# *Settings structs are header-only; DWARF is the input.
+flags = [
+    "-O2", "-fPIC",
+    "-std=c++17",
+    "-fstandalone-debug",
+    "-pthread",
+    "-mavx2", "-mbmi", "-mpopcnt", "-mlzcnt", "-mf16c", "-mfma", "-mfpmath=sse",
+    "-ffp-contract=fast",
+    "-DJPH_OBJECT_STREAM",
+]
+parallel = true
+# WORKAROUND (GENERATOR-simd-by-value-trapped.md): Vec3/Vec4/Quat are one
+# __m128 each, and every function taking or returning one by value is an
+# "ABI Safety Trap" in the wrapper (~1,000). shims/jolt_hub.cpp forwards the
+# HelloWorld set and the everyday BodyInterface/PhysicsSystem vector calls by
+# reference, as `JoltHub_*`, and adds Factory_New/RegisterTypes, which no
+# pass wraps by design (see the file's header).
+source_files = ["shims/jolt_hub.cpp"]
+# overrides/ comes first: it holds the one upstream header the Hub patches
+# (see the WORKAROUND note under [wrap]).
+include_dirs = ["overrides", ".replibuild_cache/deps/jolt"]
+
+# Same reason as bullet3: every Jolt method is Tier 2 (C++ `this`, references,
+# by-value Vec3/Quat), so compile the thunks once at build time.
+aot_thunks = true
+
+[link]
+enable_lto = false
+optimization_level = "2"
+link_libraries = ["pthread"]
+
+[binary]
+type = "shared"
+
+[wrap]
+language = "cpp"
+# Jolt/Jolt.h must come first in any unit (Core.h, Memory.h, STL wrappers).
+# The rest is upstream HelloWorld.cpp's include list plus the three table
+# classes that replace its hand-written layer interfaces.
+shim_headers = [
+    "Jolt/Jolt.h",
+    "Jolt/RegisterTypes.h",
+    "Jolt/Core/Factory.h",
+    "Jolt/Core/TempAllocator.h",
+    "Jolt/Core/JobSystemThreadPool.h",
+    "Jolt/Core/JobSystemSingleThreaded.h",
+    "Jolt/Physics/PhysicsSettings.h",
+    "Jolt/Physics/PhysicsSystem.h",
+    "Jolt/Physics/Collision/Shape/BoxShape.h",
+    "Jolt/Physics/Collision/Shape/SphereShape.h",
+    "Jolt/Physics/Body/BodyCreationSettings.h",
+    "Jolt/Physics/Body/BodyActivationListener.h",
+    "Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h",
+    "Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h",
+    "Jolt/Physics/Collision/ObjectLayerPairFilterTable.h",
+]
+# WORKAROUND (GENERATOR-uint64-enum-overflow.md): LargeIslandSplitter's
+# internal `enum EIterationStatus : uint64` has 0xffff000000000000, which the
+# wrap's enum pass cannot hold in Int64 and aborts on. `exclude_symbols` does
+# not reach enums ("matched nothing"), so overrides/Jolt/Physics/
+# LargeIslandSplitter.h, upstream's header with only that enum rewritten as
+# five `static constexpr uint64` members (same values, same generated code),
+# shadows the clone's copy via include_dirs. Once the engine fix lands: delete
+# overrides/, drop it from include_dirs, rebuild cold.
+
+[types]
+# Header-only classes no Jolt .cpp mentions, so no CU's DWARF defines them
+# (RepliBuild.jl #107). They are what an application needs to start a
+# PhysicsSystem without subclassing anything:
+#   TempAllocatorImpl                   the per-step scratch allocator
+#   BroadPhaseLayerInterfaceTable       object layer -> broad-phase layer
+#   ObjectVsBroadPhaseLayerFilterTable  derived from the two tables
+#   ObjectLayerPairFilterTable          which object layers collide
+# (upstream HelloWorld hand-writes the last three as subclasses).
+records = [
+    "JPH::TempAllocatorImpl",
+    "JPH::BroadPhaseLayerInterfaceTable",
+    "JPH::ObjectVsBroadPhaseLayerFilterTable",
+    "JPH::ObjectLayerPairFilterTable",
+]
+strictness = "warn"
+allow_unknown_structs = true
+allow_function_pointers = true
+
+[cache]
+enabled = true
