@@ -26,19 +26,27 @@ const JULIA_DIR = joinpath(PKG_DIR, "julia")
     wrapper = RepliBuild.wrap(TOML_PATH)
     @test isfile(wrapper)
     @test endswith(wrapper, "Bullet3.jl")
+    # [compile] aot_thunks: the Tier-2 thunks are compiled at build time, and
+    # the wrapper loads them from the sibling .so instead of JIT-compiling.
+    thunks = joinpath(JULIA_DIR, "libbullet3_thunks.so")
+    @test isfile(thunks)
+    src = read(wrapper, String)
+    @test occursin("libbullet3_thunks.so", src)
 end
 
 @testset "what was compiled and wrapped" begin
     meta = JSON.parsefile(joinpath(JULIA_DIR, "compilation_metadata.json"))
-    # LinearMath + BulletCollision + BulletDynamics (153), the package's
-    # shims/visible_records.cpp (makes btDefaultMotionState visible to the
-    # build), and the build's own replibuild_ctors.cpp (RepliBuild.jl #105:
-    # the header-only constructors no library .cpp defines). Nothing else.
+    # LinearMath + BulletCollision + BulletDynamics (153) and the build's two
+    # generated units: replibuild_records.cpp ([types] records, #107: makes
+    # btDefaultMotionState visible) and replibuild_ctors.cpp (#105/#108: the
+    # header-only constructors and member functions no library .cpp defines).
+    # No package shims any more. Nothing else.
     srcs = meta["source_files"]
     @test length(srcs) == 155
-    @test any(s -> endswith(s, "shims/visible_records.cpp"), srcs)
+    @test any(s -> endswith(s, "replibuild_records.cpp"), srcs)
     @test any(s -> endswith(s, "replibuild_ctors.cpp"), srcs)
-    @test !any(s -> occursin("inline_ctors", s), srcs)      # the retired hand-written shim
+    @test !any(s -> occursin("shims/", s), srcs)             # the retired hand-written shims
+    @test !isdir(joinpath(PKG_DIR, "shims"))
     # The three HelloWorld needs, now the build's: real C2 constructors.
     syms = read(`nm -D --defined-only $(joinpath(JULIA_DIR, "libbullet3.so"))`, String)
     for s in ("_ZN13btSphereShapeC2Ef",
@@ -47,6 +55,21 @@ end
         @test occursin(" $s\n", syms)
     end
     @test !occursin("bt_new_", syms)
+    # Header-inline member functions no library .cpp calls (#108): the ones an
+    # application needs every day are now real symbols.
+    for s in ("_ZN11btRigidBody19applyCentralImpulseERK9btVector3",
+              "_ZN11btRigidBody17setLinearVelocityERK9btVector3",
+              "_ZN17btHingeConstraint8setLimitEfffff",
+              "_ZN17btHingeConstraint18enableAngularMotorEbff",
+              "_ZN23btPoint2PointConstraint9setPivotBERK9btVector3",
+              "_ZN15btDynamicsWorld23setInternalTickCallbackEPFvPS_fEPvb",
+              "_ZN20btPersistentManifold15getContactPointEi",
+              "_ZNK20btDefaultMotionState17getWorldTransformER11btTransform")
+        @test occursin(" $s\n", syms)
+    end
+    methods = meta["inline_methods"]["forced"]
+    @test length(methods) > 1500                             # 2009 at 3.25 / RepliBuild ee7e2cf
+    @test all(r -> r["emitted"] == true, methods)
     forced = meta["inline_constructors"]["forced"]          # every planned row
     emitted = filter(r -> r["emitted"] == true, forced)
     @test length(emitted) > 400                             # 496 of 502 at 3.25 / RepliBuild f7e843f

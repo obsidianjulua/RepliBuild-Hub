@@ -24,8 +24,8 @@
 # RepliBuild.jl #105 the build defines them itself and they wrap like any
 # constructor (btSphereShape_btSphereShape, btDefaultMotionState_btDefaultMotionState,
 # btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo).
-# btDefaultMotionState also needs shims/visible_records.cpp to be seen at all
-# (no library .cpp mentions it). The box scenario still fills its construction
+# btDefaultMotionState is mentioned by no library .cpp, so the recipe names it
+# in [types] records (#107) for it to be seen at all. The box scenario still fills its construction
 # info by hand, which checks a Julia-built record crossing into a constructor;
 # the sphere scenario uses the real constructors throughout, as upstream's
 # HelloWorld does, and checks the hand-written defaults against the real ones.

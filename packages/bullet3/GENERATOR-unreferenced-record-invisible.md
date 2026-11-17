@@ -1,6 +1,9 @@
 # Generator gap: a header-only class no library source mentions is invisible to the build
 
-> **STATUS:** OPEN
+> **STATUS:** FIXED — RepliBuild.jl #107 (`[types] records`), merged at `ee7e2cf`.
+> Verified 2026-11-15 on a cold bullet3 rebuild: the recipe names
+> `records = ["btDefaultMotionState"]`, shims/visible_records.cpp is retired,
+> the class wraps with its constructor and methods; test.jl 32/32, test_deep 45/45.
 > **PACKAGE:** bullet3 3.25 (`2c204c4`)
 > **STAGE:** build (DWARF extraction → #105's forced inline constructors)
 > **BLOCKS:** any class an application uses but the library's own code never
