@@ -1,0 +1,128 @@
+# Objects with their own rules. Press C in the window to see contact points.
+#
+# - balloons have their own gravity, upward, and collect under the ceiling;
+# - a ball under Moon gravity falls beside one under Earth's;
+# - a crate with sideways gravity slides off its platform and into a wall;
+# - two stacks of ghost blocks (layer "ghost", ignore ["ghost"]) fall through
+#   each other but not through the floor;
+# - a trigger gate: things pass through it, and it still reports contacts.
+
+[world]
+gravity = [0, -9.81, 0]
+hz = 120
+
+[camera]
+target = [0, 3, 0]
+distance = 20
+yaw = 20
+pitch = 18
+orbit = false
+
+[[object]]
+name = "floor"
+shape = "box"
+size = [40, 1, 40]
+position = [0, -0.5, 0]
+mass = 0
+color = "#3a3f4b"
+
+[[object]]
+name = "ceiling"
+shape = "box"
+size = [4, 0.3, 4]
+position = [-6, 8, 0]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "balloon"
+shape = "sphere"
+radius = 0.35
+mass = 0.2
+position = [-7, 1, -1]
+repeat = [3, 1, 3]
+spacing = [1.0, 0, 1.0]
+gravity = [0, 1.5, 0]           # their own gravity: up
+damping = [0.3, 0.3]            # air drag, roughly
+color = "#e8606a"
+
+[[object]]
+name = "moon_ball"
+shape = "sphere"
+radius = 0.4
+position = [-1.2, 9, 3]
+gravity = [0, -1.62, 0]         # the Moon's surface gravity
+color = "#c8c8c8"
+
+[[object]]
+name = "earth_ball"
+shape = "sphere"
+radius = 0.4
+position = [-2.4, 9, 3]         # the world's gravity
+color = "#3d8bd9"
+
+[[object]]
+name = "shelf"
+shape = "box"
+size = [2, 0.3, 2]
+position = [5, 3, 3]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "wall"                   # catches the drifter
+shape = "box"
+size = [0.4, 2, 4]
+position = [9, 1, 3]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "drifter"
+shape = "box"
+size = [0.6, 0.6, 0.6]
+position = [5, 3.5, 3]
+gravity = [3, -9.81, 0]         # gravity with a sideways pull
+friction = 0.3
+color = "#e8b33a"
+
+[[object]]
+name = "ghost_low"
+shape = "box"
+size = [0.8, 0.8, 0.8]
+position = [2, 0.4, -3]
+repeat = [1, 3, 1]
+spacing = [0, 0.8, 0]
+layer = "ghost"
+ignore = ["ghost"]              # ghosts pass through ghosts …
+color = "#9a6fd6"
+
+[[object]]
+name = "ghost_high"
+shape = "box"
+size = [0.8, 0.8, 0.8]
+position = [2.2, 5, -3.1]
+repeat = [1, 3, 1]
+spacing = [0, 0.8, 0]
+rotation = [0, 30, 0]
+layer = "ghost"
+ignore = ["ghost"]              # … but not through the floor
+color = "#38b2ac"
+
+[[object]]
+name = "gate"
+shape = "box"
+size = [3, 3, 0.4]
+position = [0, 1.5, 8]
+mass = 0
+trigger = true                  # nothing bounces off it
+color = "#40d0ff"
+
+[[object]]
+name = "runner"
+shape = "sphere"
+radius = 0.35
+position = [0, 0.35, 12]
+velocity = [0, 0, -5]           # rolls through the gate
+rolling_friction = 0.02
+color = "#4fb06a"

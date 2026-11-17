@@ -1,0 +1,87 @@
+# The Sun, the eight planets and the Moon, from approximate J2000 mean orbital
+# elements (a in AU; e; i, node, peri and the mean anomaly M in degrees, all
+# relative to the ecliptic). Masses in solar masses, radii in AU. Good for
+# looking at, not for predicting where Mars is tonight: the elements are
+# rounded and there is no relativity, no oblateness, no asteroids.
+#
+#   julia --project=examples/ObjectSim examples/ObjectSim/orbits.jl examples/ObjectSim/scenes/orbits/solar_system.toml
+
+[system]
+units = "solar"
+
+[view]
+days_per_second = 20
+exaggerate = 50                 # drawn 50× real size (more would swallow the Moon's orbit)
+scale = 10
+distance = 4.5                  # start on the inner planets; scroll out for the rest
+
+[[body]]
+name = "Sun"
+mass = 1.0
+radius = 0.00465
+display_radius = 0.12
+color = "#ffcf4d"
+
+[[body]]
+name = "Mercury"
+mass = 1.6601e-7
+radius = 1.63e-5
+color = "#a9a39b"
+orbit = { around = "Sun", a = 0.38710, e = 0.20563, i = 7.005, node = 48.331, peri = 29.124, M = 174.796 }
+
+[[body]]
+name = "Venus"
+mass = 2.4478e-6
+radius = 4.05e-5
+color = "#e8c27a"
+orbit = { around = "Sun", a = 0.72333, e = 0.00677, i = 3.3946, node = 76.680, peri = 54.884, M = 50.115 }
+
+[[body]]
+name = "Earth"
+mass = 3.0034e-6
+radius = 4.26e-5
+color = "#3d8bd9"
+orbit = { around = "Sun", a = 1.00000, e = 0.01671, i = 0.0, node = 0.0, peri = 102.937, M = 357.517 }
+
+[[body]]
+name = "Moon"
+mass = 3.694e-8
+radius = 1.16e-5
+display_radius = 0.008
+color = "#c8c8c8"
+orbit = { around = "Earth", a = 0.00257, e = 0.0549, i = 5.145, node = 125.08, peri = 318.15, M = 135.27 }
+
+[[body]]
+name = "Mars"
+mass = 3.2271e-7
+radius = 2.27e-5
+color = "#d9643d"
+orbit = { around = "Sun", a = 1.52368, e = 0.09340, i = 1.850, node = 49.558, peri = 286.502, M = 19.412 }
+
+[[body]]
+name = "Jupiter"
+mass = 9.5479e-4
+radius = 4.78e-4
+color = "#d8b38a"
+orbit = { around = "Sun", a = 5.2026, e = 0.04849, i = 1.303, node = 100.464, peri = 273.867, M = 20.020 }
+
+[[body]]
+name = "Saturn"
+mass = 2.8589e-4
+radius = 4.03e-4
+color = "#e3d29a"
+orbit = { around = "Sun", a = 9.5549, e = 0.05551, i = 2.489, node = 113.665, peri = 339.392, M = 317.020 }
+
+[[body]]
+name = "Uranus"
+mass = 4.3662e-5
+radius = 1.71e-4
+color = "#9fd6dd"
+orbit = { around = "Sun", a = 19.2184, e = 0.04630, i = 0.773, node = 74.006, peri = 96.999, M = 142.239 }
+
+[[body]]
+name = "Neptune"
+mass = 5.1514e-5
+radius = 1.65e-4
+color = "#4f6fd9"
+orbit = { around = "Sun", a = 30.110, e = 0.00899, i = 1.770, node = 131.784, peri = 273.187, M = 256.228 }

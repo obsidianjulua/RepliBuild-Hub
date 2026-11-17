@@ -1,52 +1,46 @@
-# The bullet3 side: a dynamics world and the bodies in it.
+# The world and its bodies, whichever physics engine runs them.
 #
-# Every C++ object lives on storage from Bullet's own aligned allocator
-# (btAlignedAllocInternal), which is what Bullet's class-level operator new
-# uses. That is why `<Class>_delete_<Class>` (the deleting destructor, which
-# frees through the same allocator) is the right way to free shapes, bodies
-# and mesh interfaces: every class used here inherits BT_DECLARE_ALIGNED_ALLOCATOR
-# from btCollisionShape, btCollisionObject or btStridingMeshInterface.
+# ObjectSim has two physics backends, kept apart in src/backends/:
+#   jolt/      Jolt Physics' PhysicsSystem (the default)
+#   bullet3/   btDiscreteDynamicsWorld
+# Everything outside src/backends/ — scenes, the viewer, water, springs,
+# mutual gravity, force hooks, picking logic, layers — is shared and talks to
+# a backend only through the `_be_*` functions listed below. A World holds its
+# backend's state in `w.phys` and each Body its backend handle in `b.h`.
 #
-# btSphereShape, btDefaultMotionState and btRigidBodyConstructionInfo have
-# header-inline constructors only. Since RepliBuild.jl #105 the build defines
-# them (btSphereShape_btSphereShape, btDefaultMotionState_btDefaultMotionState,
-# btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo), and
-# they construct in place in storage from btAlignedAllocInternal like any other
-# constructor here. The construction info therefore starts from upstream's real
-# defaults, and ObjectSim overrides only what a scene sets.
-#
-# Two transforms per moving body:
-# - the body's own world transform: the physics state after the last fixed
-#   step. `transform`, `position`, tests and snapshots read this.
-# - its btDefaultMotionState's graphics transform: what bullet3 writes back
-#   after each stepSimulation. btDiscreteDynamicsWorld defaults to *latency*
-#   interpolation: the pose at (last step - dt + time left over), i.e. between
-#   the previous fixed step and the current one, never extrapolated past it
-#   (so nothing is drawn inside a floor it is about to hit). `render_transform`
-#   reads this and the viewer draws with it: motion stays smooth when the
-#   display rate is not a multiple of the physics rate, one fixed step behind.
+# The backend interface (`P` is the backend's state, a subtype of Physics):
+#   _be_world(::Val{name}, w) -> P          make the engine's world
+#   _be_destroy!(P, w)                      free it (bodies and joints are gone already)
+#   _be_set_gravity!(P, g)
+#   _be_iterations(P), _be_set_iterations!(P, n)
+#   _be_add_body!(P, w, spec, mesh, com) -> handle
+#   _be_free_body!(P, w, b)
+#   _be_step!(P, w)                         one fixed step of w.dt; calls _pre_step!(w, dt) first
+#   _be_advance!(P, w, seconds, max_substeps) -> steps taken (real-time loop)
+#   _be_transform(P, b), _be_render_transform(P, b) -> (rotation rows, origin)
+#   _be_velocity(P, b), _be_spin(P, b), _be_set_velocity!(P, b, v, spin)
+#   _be_impulse!(P, b, J, at)               at = nothing: through the centre of mass
+#   _be_angular_impulse!(P, b, T)
+#   _be_sleeping(P, b), _be_wake!(P, b), _be_keep_awake!(P, b, on::Bool)
+#   _be_set_mass!(P, b, m), _be_set_friction!, _be_set_restitution!,
+#   _be_set_rolling_friction!, _be_set_damping!(P, b, lin, ang)
+#   _be_set_body_gravity!(P, w, b, g), _be_body_gravity(P, w, b), _be_istrigger(P, b)
+#   _be_raycast(P, w, from, to) -> (body, point, normal, fraction) or nothing
+#   _be_contacts(P, w, within) -> Vector{Contact}
+#   _be_add_joint!(P, w, spec, a, b, pa, pb) -> handle
+#   _be_free_joint!(P, w, j), _be_broken(P, j), _be_set_motor!(P, j, factor)
+#   _be_grab!(P, w, b, local_point, world_point) -> handle
+#   _be_drag!(P, w, pick, world_point), _be_release!(P, w, pick)
+#   _be_name(P) -> "bullet3" / "jolt"
 
-const _OFF_XFORM  = B.member_offset(:btCollisionObject, :m_worldTransform)
-# btDefaultMotionState's second argument (centerOfMassOffset) defaults to the
-# identity in C++; the wrapper takes it explicitly.
-const _IDENTITY_XF = B.btTransform(
-    B.btMatrix3x3((B.btVector3((1f0, 0f0, 0f0, 0f0)), B.btVector3((0f0, 1f0, 0f0, 0f0)),
-                   B.btVector3((0f0, 0f0, 1f0, 0f0)))),
-    B.btVector3((0f0, 0f0, 0f0, 0f0)))
-const _OFF_GFX    = B.member_offset(:btDefaultMotionState, :m_graphicsWorldTrans)
-const _OFF_ACTIVE = B.member_offset(:btCollisionObject, :m_activationState1)
-const _OFF_LINVEL = B.member_offset(:btRigidBody, :m_linearVelocity)
-const _OFF_ANGVEL = B.member_offset(:btRigidBody, :m_angularVelocity)
+"""Physics engine state behind a World (one subtype per backend)."""
+abstract type Physics end
 
-# btCollisionObject.h activation states
-const ACTIVE_TAG = 1
-const ISLAND_SLEEPING = 2
-const DISABLE_DEACTIVATION = 4
+const BACKENDS = ("bullet3", "jolt")
 
-_alloc(cls::Symbol) = B.btAlignedAllocInternal(B.struct_size(cls), 16)
-_btv(v) = B.btVector3((Float32(v[1]), Float32(v[2]), Float32(v[3]), 0f0))
-_tuple(v::B.btVector3) = (v.m_floats[1], v.m_floats[2], v.m_floats[3])
-_delete(cls::Symbol, p::Ptr) = getfield(B, Symbol(cls, "_delete_", cls))(p)
+"""The backend a World uses when neither `World(…; backend)` nor the scene's
+`[world] backend` names one. Starts as \$OBJECTSIM_BACKEND, else "jolt"."""
+const DEFAULT_BACKEND = Ref("jolt")
 
 """
     rotation_matrix(degrees) -> rows
@@ -66,62 +60,69 @@ _rotate(R, v) = (vdot(R[1], v), vdot(R[2], v), vdot(R[3], v))
     Body
 
 One rigid body. `mesh` is its geometry in the body's own frame, which for
-`hull` objects is centred on the centre of mass. `ptr` is the btRigidBody.
+`hull` objects is centred on the centre of mass. `h` is the backend's handle
+(`nothing` once the body has been removed).
 """
 mutable struct Body
     name::String
     spec::ObjectSpec
-    ptr::Ptr{Cvoid}
-    motion::Ptr{Cvoid}         # btDefaultMotionState for moving bodies, else C_NULL
-    shape::Ptr{Cvoid}
-    shape_class::Symbol
-    iface::Ptr{Cvoid}          # btTriangleIndexVertexArray for `mesh`, else C_NULL
+    h::Any
     mesh::TriMesh
-    keep::Vector{Any}          # buffers bullet3 points into but does not copy
 end
 
 Base.show(io::IO, b::Body) = print(io, "Body(\"", b.name, "\", ", b.spec.shape,
-    b.spec.mass == 0 ? ", static" : ", $(b.spec.mass) kg", ")")
+    b.spec.mass == 0 ? ", static" : ", $(b.spec.mass) kg", b.h === nothing ? ", removed" : "", ")")
+
+"""Whether the body is still in its world (not removed or destroyed)."""
+isalive(b::Body) = b.h !== nothing
 
 """
-    World(scene::SceneSpec)
-    World(path::AbstractString)
+    World(scene; backend = nothing)
+    World(path; backend = nothing)
 
-A btDiscreteDynamicsWorld with every object of the scene in it. Call
-[`destroy!`](@ref) when done; nothing is freed by the garbage collector.
+A physics world with every object of the scene in it, run by `backend`
+("jolt" or "bullet3"; default: the scene's `[world] backend`, else jolt).
+Call [`destroy!`](@ref) when done; nothing is freed by the garbage collector.
 """
 mutable struct World
     scene::SceneSpec
-    cfg::Ptr{Cvoid}
-    disp::Ptr{Cvoid}
-    bp::Ptr{Cvoid}
-    solver::Ptr{Cvoid}
-    world::Ptr{Cvoid}
+    phys::Physics                        # set right after construction
     bodies::Vector{Body}
+    joints::Vector{Any}                  # Vector{Joint}; Joint is defined in joints.jl
+    pick::Any                            # the Pick in progress, or nothing
+    gravity::Vec3
     dt::Float32
     steps::Int
+    spawned::Int                         # bodies added after the scene loaded
+    layers::Dict{String,Int32}           # collision layer name → group bit
+    forces::Vector{Any}                  # f(w, dt) run before every fixed step
+    hook_error::Any                      # an error a force hook threw, rethrown after the step
+    mutual::Any                          # the mutual-gravity hook in `forces`, or nothing
+    mutual_G::Float64
+    water::Any                           # (WaterSpec, its force hook), or nothing
+    spring_key::UInt                     # what `springs` was last worked out for (joints.jl)
+    springs::Any                         # the springs' _SpringSystem (joints.jl), or nothing
     alive::Bool
+    # the bare struct; the public constructors below fill it
+    World(scene::SceneSpec, ::Val{:bare}) = new(scene, _NoPhysics(), Body[], Any[], nothing, scene.world.gravity,
+                                  1f0 / scene.world.hz, 0, 0, Dict{String,Int32}(), Any[], nothing,
+                                  nothing, 0.0, nothing, UInt(0), nothing, true)
 end
 
-World(path::AbstractString) = World(load_scene(path))
+struct _NoPhysics <: Physics end
 
-function World(scene::SceneSpec)
-    info = Ref(B.btDefaultCollisionConstructionInfo(C_NULL, C_NULL, 4096, 4096, 0, 1))
-    cfg = _alloc(:btDefaultCollisionConfiguration)
-    B.btDefaultCollisionConfiguration_btDefaultCollisionConfiguration(cfg, info)
-    disp = _alloc(:btCollisionDispatcher)
-    B.btCollisionDispatcher_btCollisionDispatcher(disp, cfg)
-    bp = _alloc(:btDbvtBroadphase)
-    B.btDbvtBroadphase_btDbvtBroadphase(bp, C_NULL)
-    solver = _alloc(:btSequentialImpulseConstraintSolver)
-    B.btSequentialImpulseConstraintSolver_btSequentialImpulseConstraintSolver(solver)
-    world = _alloc(:btDiscreteDynamicsWorld)
-    B.btDiscreteDynamicsWorld_btDiscreteDynamicsWorld(world, disp, bp, solver, cfg)
-    B.btDiscreteDynamicsWorld_setGravity(world, Ref(_btv(scene.world.gravity)))
+World(path::AbstractString; backend = nothing) = World(load_scene(path); backend)
 
-    w = World(scene, cfg, disp, bp, solver, world, Body[], 1f0 / scene.world.hz, 0, true)
+function World(scene::SceneSpec; backend = nothing)
+    name = String(something(backend, isempty(scene.world.backend) ? DEFAULT_BACKEND[] : scene.world.backend))
+    name in BACKENDS || error("ObjectSim: unknown backend '$name' (one of: $(join(BACKENDS, ", ")))")
+    w = World(scene, Val(:bare))
+    w.phys = _be_world(Val(Symbol(name)), w)
     try
+        scene.world.mutual_gravity > 0 && set_mutual_gravity!(w, scene.world.mutual_gravity)
+        scene.world.water === nothing || set_water!(w, scene.world.water)
         foreach(s -> add!(w, s), scene.objects)
+        foreach(j -> add_joint!(w, j), scene.joints)
     catch
         destroy!(w)
         rethrow()
@@ -129,71 +130,40 @@ function World(scene::SceneSpec)
     return w
 end
 
-Base.show(io::IO, w::World) = print(io, "World(\"", w.scene.name, "\", ", length(w.bodies),
+"""Which physics engine runs the world: "bullet3" or "jolt"."""
+backend(w::World) = _be_name(w.phys)
+
+Base.show(io::IO, w::World) = print(io, "World(\"", w.scene.name, "\", ", backend(w), ", ", length(w.bodies),
     " bodies, t = ", round(sim_time(w); digits = 3), " s", w.alive ? "" : ", destroyed", ")")
 
 """Simulated seconds so far."""
 sim_time(w::World) = w.steps * Float64(w.dt)
 
-# Build the collision shape for a spec. Returns the shape, its class, the
-# body-local mesh, the offset from the spec's origin to the centre of mass
-# (in the object's unrotated frame), the mesh interface and kept buffers.
-function _shape(s::ObjectSpec)
-    keep = Any[]; iface = C_NULL; com = (0f0, 0f0, 0f0)
-    if s.shape == :box
-        h = vscale(s.size, 0.5f0)
-        cls = :btBoxShape; p = _alloc(cls)
-        B.btBoxShape_btBoxShape(p, Ref(_btv(h)))
-        mesh = box_mesh(h)
+# The body-local mesh for a spec and the offset from the spec's origin to its
+# centre of mass (in the object's unrotated frame). Backends build their
+# collision shape from the spec, and from this mesh for `hull` and `mesh`.
+function _body_mesh(s::ObjectSpec)
+    com = (0f0, 0f0, 0f0)
+    mesh = if s.shape == :box
+        box_mesh(vscale(s.size, 0.5f0))
     elseif s.shape == :sphere
-        cls = :btSphereShape; p = _alloc(cls)
-        B.btSphereShape_btSphereShape(p, s.radius)
-        mesh = sphere_mesh(s.radius)
+        sphere_mesh(s.radius)
     elseif s.shape == :capsule
-        straight = s.height - 2s.radius           # bullet3: distance between sphere centres
-        cls = :btCapsuleShape; p = _alloc(cls)
-        B.btCapsuleShape_btCapsuleShape(p, s.radius, straight)
-        mesh = capsule_mesh(s.radius, straight / 2)
+        capsule_mesh(s.radius, (s.height - 2s.radius) / 2)
     elseif s.shape == :cylinder
-        cls = :btCylinderShape; p = _alloc(cls)
-        B.btCylinderShape_btCylinderShape(p, Ref(_btv((s.radius, s.height / 2, s.radius))))
-        mesh = cylinder_mesh(s.radius, s.height / 2)
+        cylinder_mesh(s.radius, s.height / 2)
     elseif s.shape == :cone
-        cls = :btConeShape; p = _alloc(cls)
-        B.btConeShape_btConeShape(p, s.radius, s.height)
-        mesh = cone_mesh(s.radius, s.height)
+        cone_mesh(s.radius, s.height)
     elseif s.shape == :hull
         m = transform_mesh(load_mesh(s.asset); scale = s.scale)
         com = centroid(m)
-        mesh = transform_mesh(m; offset = vscale(com, -1f0))
-        pts = reinterpret(Float32, mesh.vertices) |> collect   # copied by the constructor
-        cls = :btConvexHullShape; p = _alloc(cls)
-        GC.@preserve pts B.btConvexHullShape_btConvexHullShape(p, pointer(pts), length(mesh.vertices), 12)
-        B.btConvexHullShape_optimizeConvexHull(p)           # keep only the hull's own points
-        B.btConvexHullShape_setLocalScaling(p, Ref(_btv((1, 1, 1))))   # recomputes the cached AABB
+        transform_mesh(m; offset = vscale(com, -1f0))
     elseif s.shape == :mesh
-        mesh = transform_mesh(load_mesh(s.asset); scale = s.scale)
-        verts = collect(reinterpret(Float32, mesh.vertices))
-        idx = Int32[i - 1 for f in mesh.faces for i in f]
-        push!(keep, verts, idx)                  # bullet3 keeps these pointers: hold them
-        iface = _alloc(:btTriangleIndexVertexArray)
-        B.btTriangleIndexVertexArray_btTriangleIndexVertexArray(iface, length(mesh.faces),
-            pointer(idx), 12, length(mesh.vertices), pointer(verts), 12)
-        cls = :btBvhTriangleMeshShape; p = _alloc(cls)
-        B.btBvhTriangleMeshShape_btBvhTriangleMeshShape(p, iface, true, true)
+        transform_mesh(load_mesh(s.asset); scale = s.scale)
     else
         error("ObjectSim: unknown shape $(s.shape)")
     end
-    return p, cls, mesh, com, iface, keep
-end
-
-function _inertia(cls::Symbol, p::Ptr, mass::Float32)
-    inertia = Ref(_btv((0, 0, 0)))
-    mass == 0 && return inertia[]
-    f = cls == :btConvexHullShape ? B.btPolyhedralConvexShape_calculateLocalInertia :
-        getfield(B, Symbol(cls, "_calculateLocalInertia"))
-    f(p, mass, inertia)
-    return inertia[]
+    return mesh, com
 end
 
 """
@@ -203,41 +173,9 @@ Create the shape and rigid body for one object and add it to the world.
 """
 function add!(w::World, s::ObjectSpec)
     _check(w)
-    p, cls, mesh, com, iface, keep = _shape(s)
-    R = rotation_matrix(s.rotation)
-    origin = vadd(s.position, _rotate(R, com))     # spec position is the asset's origin
-    xf = B.btTransform(B.btMatrix3x3((_btv(R[1]), _btv(R[2]), _btv(R[3]))), _btv(origin))
-
-    # Static bodies never move, so only moving ones get a motion state. With
-    # one, the body takes its start pose from it, not from the construction info.
-    ms = C_NULL
-    if s.mass > 0
-        ms = _alloc(:btDefaultMotionState)
-        B.btDefaultMotionState_btDefaultMotionState(ms, Ref(xf), Ref(_IDENTITY_XF))
-    end
-
-    # The real btRigidBodyConstructionInfo constructor fills upstream's
-    # defaults; then the scene's own values replace the ones it sets.
-    cip = _alloc(:btRigidBodyConstructionInfo)
-    body = _alloc(:btRigidBody)
-    try
-        B.btRigidBody_btRigidBodyConstructionInfo_btRigidBodyConstructionInfo(cip, s.mass, ms, p, Ref(_inertia(cls, p, s.mass)))
-        ptr = Ptr{B.btRigidBodyConstructionInfo}(cip)
-        unsafe_store!(ptr, _with(unsafe_load(ptr);
-            m_startWorldTransform = xf,
-            m_linearDamping = s.damping[1], m_angularDamping = s.damping[2],
-            m_friction = s.friction, m_rollingFriction = s.rolling_friction,
-            m_restitution = s.restitution))
-        B.btRigidBody_btRigidBody(body, ptr)
-    finally
-        B.btAlignedFreeInternal(cip)          # plain struct: nothing to destroy
-    end
-    if s.mass > 0
-        unsafe_store!(Ptr{B.btVector3}(body + _OFF_LINVEL), _btv(s.velocity))
-        unsafe_store!(Ptr{B.btVector3}(body + _OFF_ANGVEL), _btv(s.spin))
-    end
-    B.btDiscreteDynamicsWorld_addRigidBody(w.world, body)
-    b = Body(s.name, s, body, ms, p, cls, iface, mesh, keep)
+    mesh, com = _body_mesh(s)
+    b = Body(s.name, s, nothing, mesh)
+    b.h = _be_add_body!(w.phys, w, b, com)
     push!(w.bodies, b)
     return b
 end
@@ -250,7 +188,9 @@ Advance `n` fixed steps of `1/hz` seconds each.
 function step!(w::World, n::Integer = 1)
     _check(w)
     for _ in 1:n
-        w.steps += B.btDiscreteDynamicsWorld_stepSimulation(w.world, w.dt, 1, w.dt)
+        _be_step!(w.phys, w)
+        w.steps += 1
+        _rethrow_hook_error!(w)
     end
     return w
 end
@@ -258,17 +198,17 @@ end
 """
     advance!(w, seconds; max_substeps = 8) -> Int
 
-Hand bullet3 a variable timestep, as a real-time loop does: it runs as many
-fixed `1/hz` steps as fit (at most `max_substeps`, dropping the rest of a
-long frame), keeps the remainder for next time, and sets every moving body's
+A variable timestep, as a real-time loop has: runs as many fixed `1/hz` steps
+as fit (at most `max_substeps`, dropping the rest of a long frame), keeps the
+remainder for next time, and sets every moving body's
 [`render_transform`](@ref) to its pose at (last step − dt + remainder),
-interpolated between the previous step and the current one.
-Returns the number of fixed steps taken.
+between the previous step and the current one. Returns the steps taken.
 """
 function advance!(w::World, seconds::Real; max_substeps::Integer = 8)
     _check(w)
-    n = B.btDiscreteDynamicsWorld_stepSimulation(w.world, Float32(seconds), max_substeps, w.dt)
+    n = _be_advance!(w.phys, w, Float32(seconds), max_substeps)
     w.steps += n
+    _rethrow_hook_error!(w)
     return Int(n)
 end
 
@@ -279,38 +219,33 @@ Step until `seconds` more simulated time has passed.
 """
 simulate!(w::World, seconds::Real) = step!(w, round(Int, seconds / w.dt))
 
-function _rows_origin(t::B.btTransform)
-    el = t.m_basis.m_el
-    return (_tuple(el[1]), _tuple(el[2]), _tuple(el[3])), _tuple(t.m_origin)
-end
-
 """The body's world transform after the last fixed step, as (rotation rows,
 origin of the centre of mass)."""
-transform(b::Body) = _rows_origin(unsafe_load(Ptr{B.btTransform}(b.ptr + _OFF_XFORM)))
+transform(b::Body) = _be_transform(_phys(b), b)
 
 """
     render_transform(b)
 
-The pose to draw: the motion state's graphics transform. bullet3 sets it to
-the pose at (last fixed step − dt + leftover time), between the previous step
-and the current one, so it trails [`transform`](@ref) by up to one fixed step;
-[`advance!`](@ref) is what produces a leftover. Static bodies have no motion state and
-return [`transform`](@ref). Read straight from `m_graphicsWorldTrans`, which is
-what `getWorldTransform` returns when the centre-of-mass offset is identity
-(ObjectSim never sets one).
+The pose to draw: between the previous fixed step and the current one (it
+trails [`transform`](@ref) by up to one step), so motion stays smooth when the
+display rate isn't a multiple of the physics rate. [`advance!`](@ref) is what
+makes the leftover time; static bodies return [`transform`](@ref).
 """
-render_transform(b::Body) = b.motion == C_NULL ? transform(b) :
-    _rows_origin(unsafe_load(Ptr{B.btTransform}(b.motion + _OFF_GFX)))
+render_transform(b::Body) = _be_render_transform(_phys(b), b)
+
+# A body's backend, reached through its handle (every handle knows its world's
+# Physics), so body-only functions keep their one-argument form.
+_phys(b::Body) = (b.h === nothing && error("ObjectSim: $(b.name) has been removed"); b.h.phys)
 
 """World position of the body's centre of mass. (A method of `Base.position`,
 so `position(body)` works after `using ObjectSim` without a name clash.)"""
 Base.position(b::Body) = transform(b)[2]
 """Linear velocity, m/s."""
-velocity(b::Body) = _tuple(unsafe_load(Ptr{B.btVector3}(b.ptr + _OFF_LINVEL)))
+velocity(b::Body) = _be_velocity(_phys(b), b)
 """Angular velocity, rad/s."""
-spin(b::Body) = _tuple(unsafe_load(Ptr{B.btVector3}(b.ptr + _OFF_ANGVEL)))
-"""Whether bullet3 has put the body to sleep (it stopped moving)."""
-sleeping(b::Body) = unsafe_load(Ptr{Cint}(b.ptr + _OFF_ACTIVE)) == ISLAND_SLEEPING
+spin(b::Body) = _be_spin(_phys(b), b)
+"""Whether the engine has put the body to sleep (it stopped moving)."""
+sleeping(b::Body) = _be_sleeping(_phys(b), b)
 isstatic(b::Body) = b.spec.mass == 0
 
 body(w::World, name::AbstractString) =
@@ -327,40 +262,55 @@ snapshot(w::World) = [(name = b.name, position = position(b), velocity = velocit
 
 _check(w::World) = w.alive || error("ObjectSim: the world has been destroyed")
 
-"""
-    destroy!(w)
+function _free_body!(w::World, b::Body)
+    b.h === nothing && return
+    _be_free_body!(w.phys, w, b)
+    b.h = nothing
+end
 
-Remove and free every body, shape and the world itself, in upstream's order.
-Safe to call twice.
 """
-function destroy!(w::World)
-    w.alive || return nothing
-    w.alive = false
-    for b in reverse(w.bodies)
-        B.btDiscreteDynamicsWorld_removeRigidBody(w.world, b.ptr)
-        _delete(:btRigidBody, b.ptr)
-        b.motion == C_NULL || _delete(:btDefaultMotionState, b.motion)
-        _delete(b.shape_class, b.shape)
-        b.iface == C_NULL || _delete(:btTriangleIndexVertexArray, b.iface)
-        empty!(b.keep)
+    remove!(w, b)
+
+Take a body out of the world and free it, with every joint attached to it.
+"""
+function remove!(w::World, b::Body)
+    _check(w)
+    i = findfirst(x -> x === b, w.bodies)
+    i === nothing && error("ObjectSim: $(b.name) is not in this world")
+    w.pick !== nothing && w.pick.body === b && release!(w)
+    for j in filter(j -> j.a === b || j.b === b, w.joints)
+        _free_joint!(w, j)
+        filter!(x -> x !== j, w.joints)
     end
-    empty!(w.bodies)
-    B.btDiscreteDynamicsWorld_destroy_btDiscreteDynamicsWorld(w.world)
-    B.btSequentialImpulseConstraintSolver_destroy_btSequentialImpulseConstraintSolver(w.solver)
-    B.btDbvtBroadphase_destroy_btDbvtBroadphase(w.bp)
-    B.btCollisionDispatcher_destroy_btCollisionDispatcher(w.disp)
-    B.btDefaultCollisionConfiguration_destroy_btDefaultCollisionConfiguration(w.cfg)
-    foreach(B.btAlignedFreeInternal, (w.world, w.solver, w.bp, w.disp, w.cfg))
+    deleteat!(w.bodies, i)
+    _free_body!(w, b)
     return nothing
 end
 
 """
-    with_world(f, scene_or_path)
+    destroy!(w)
+
+Remove and free every joint, body and the engine's world. Safe to call twice.
+"""
+function destroy!(w::World)
+    w.alive || return nothing
+    release!(w)
+    foreach(j -> _free_joint!(w, j), reverse(w.joints))   # constraints before their bodies
+    empty!(w.joints)
+    foreach(b -> _free_body!(w, b), reverse(w.bodies))
+    empty!(w.bodies)
+    w.alive = false
+    w.phys isa _NoPhysics || _be_destroy!(w.phys, w)
+    return nothing
+end
+
+"""
+    with_world(f, scene_or_path; backend = nothing)
 
 Build a world, run `f(world)`, and destroy it afterwards even on error.
 """
-function with_world(f, scene)
-    w = World(scene)
+function with_world(f, scene; backend = nothing)
+    w = World(scene; backend)
     try
         return f(w)
     finally

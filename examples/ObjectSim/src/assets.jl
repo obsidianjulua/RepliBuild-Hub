@@ -11,11 +11,18 @@ Read a Wavefront `.obj` or an `.stl` (ASCII or binary).
 """
 function load_mesh(path::AbstractString)
     isfile(path) || error("ObjectSim: mesh file not found: $path")
-    ext = lowercase(splitext(path)[2])
-    ext == ".obj" && return load_obj(path)
-    ext == ".stl" && return load_stl(path)
-    error("ObjectSim: unsupported mesh format '$ext' ($path); use .obj or .stl")
+    key = (abspath(path), mtime(path), filesize(path))
+    return get!(_MESHES, key) do
+        ext = lowercase(splitext(path)[2])
+        ext == ".obj" ? load_obj(path) :
+        ext == ".stl" ? load_stl(path) :
+        error("ObjectSim: unsupported mesh format '$ext' ($path); use .obj or .stl")
+    end
 end
+
+# Files read once per session: a scene with fifty copies of a model, or a
+# model dropped again, reads it from here. (A changed file has a new mtime.)
+const _MESHES = Dict{Tuple{String,Float64,Int},Any}()
 
 """
     load_obj(path) -> TriMesh

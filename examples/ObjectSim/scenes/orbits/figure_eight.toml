@@ -1,0 +1,38 @@
+# The figure-eight: three equal masses chasing each other round one
+# figure-eight path (Moore 1993; proved by Chenciner & Montgomery, 2000).
+# Initial conditions from Chenciner & Montgomery, G = 1, m = 1; the period is
+# T ≈ 6.32591398. The orbit is stable but delicate: an inaccurate integrator
+# smears it into chaos within a few turns.
+
+[system]
+units = "nbody"
+barycentric = false
+
+[view]
+days_per_second = 1.2           # time units per second
+exaggerate = 1
+scale = 4
+
+[[body]]
+name = "A"
+mass = 1
+radius = 0.04
+color = "#d94f3d"
+position = [0.97000436, -0.24308753, 0]
+velocity = [0.466203685, 0.43236573, 0]
+
+[[body]]
+name = "B"
+mass = 1
+radius = 0.04
+color = "#3d8bd9"
+position = [-0.97000436, 0.24308753, 0]
+velocity = [0.466203685, 0.43236573, 0]
+
+[[body]]
+name = "C"
+mass = 1
+radius = 0.04
+color = "#e8b33a"
+position = [0, 0, 0]
+velocity = [-0.93240737, -0.86473146, 0]

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Start ObjectSim on a scene, by name or path. ESC opens the menu in the window;
+# its Scenes tab moves between scenes.
+#
+#   objectsim                  # the playground
+#   objectsim night            # scenes/night.toml
+#   objectsim solar_system     # scenes/orbits/solar_system.toml (the orbit window)
+#   objectsim ~/models/x.toml  # any scene file
+#   objectsim -f [scene]       # stay attached to this terminal (see output live)
+#   objectsim --bullet3 [scene] # run the physics on bullet3 (--jolt: Jolt, the default)
+#   objectsim --record [scene] # record an MP4 to recordings/<scene>.mp4 (--record=FILE: to FILE);
+#                              # ESC or closing the window ends it
+#
+# Detaches by default, like llamagui: the shell returns at once and closing the
+# terminal does not close the window. Output goes to ~/.cache/objectsim/objectsim.log;
+# `objectsim -f` keeps it here. raylib's GLFW here is X11, so this needs
+# Xwayland's display (:1 on this machine) when $DISPLAY is unset.
+set -euo pipefail
+P="$HOME/Desktop/Projects/RepliBuild-Hub/examples/ObjectSim"
+export DISPLAY="${DISPLAY:-:1}"
+
+fg=0
+rec=()
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -f|--foreground) fg=1 ;;
+        --jolt)          export OBJECTSIM_BACKEND=jolt ;;
+        --bullet3)       export OBJECTSIM_BACKEND=bullet3 ;;
+        --record|--record=*) rec+=("$1") ;;
+        *) echo "objectsim: unknown option $1 (use -f, --jolt, --bullet3, --record[=FILE])" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ ! -f "$P/lib/bullet3/Bullet3.jl" || ! -f "$P/lib/jolt/Jolt.jl" || ! -f "$P/lib/raylib/Raylib.jl" ]]; then
+    echo "objectsim: the wrappers are not vendored yet; run $P/vendor.sh first" >&2
+    exit 1
+fi
+
+# A keybinding's PATH (Hyprland's) has ~/.local/bin but not juliaup's bin.
+JULIA=$(command -v julia || echo "$HOME/.juliaup/bin/julia")
+cmd=("$JULIA" --project="$P" -e 'using ObjectSim; ObjectSim.app(ARGS)' -- "${rec[@]}" "$@")
+
+if (( fg )); then
+    exec "${cmd[@]}"
+fi
+
+log="${XDG_CACHE_HOME:-$HOME/.cache}/objectsim/objectsim.log"
+mkdir -p "$(dirname "$log")"
+setsid -f "${cmd[@]}" >"$log" 2>&1 </dev/null
+echo "objectsim: window starting; output in $log"

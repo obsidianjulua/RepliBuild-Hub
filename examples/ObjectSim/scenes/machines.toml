@@ -1,0 +1,296 @@
+# Joints doing things:
+# - a sweeper arm on a motorised hinge, turning through crates and a glued
+#   tower whose fixed joints snap when hit hard enough (break_impulse);
+# - three boxes hanging from springs of different stiffness;
+# - a pendulum wave: ten pendulums whose lengths are tuned so they drift in and
+#   out of step (see below).
+
+[world]
+gravity = [0, -9.81, 0]
+hz = 240
+iterations = 50               # solver passes: the pendulum periods need more than the default 10
+
+[camera]
+target = [0, 1.8, 1]
+distance = 20
+yaw = 18
+pitch = 26
+orbit = false
+
+[[object]]
+name = "floor"
+shape = "box"
+size = [60, 1, 60]
+position = [0, -0.5, 0]
+mass = 0
+color = "#3a3f4b"
+
+# ── sweeper: a long arm turning about Y at its centre ───────────────────────
+[[object]]
+name = "hub"
+shape = "cylinder"
+radius = 0.35
+height = 0.8
+position = [-4, 0.4, 0]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "arm"
+shape = "box"
+size = [6, 0.35, 0.35]
+mass = 20
+position = [-4, 0.35, 0]
+friction = 0.3
+color = "#d94f3d"
+
+[[joint]]
+name = "motor"
+type = "hinge"
+a = "arm"
+pivot = [-4, 0.35, 0]
+axis = [0, 1, 0]
+motor = [50, 40]              # 50°/s, up to 40 N·s per step
+
+[[object]]
+name = "crate"
+shape = "box"
+size = [0.6, 0.6, 0.6]
+mass = 1
+position = [-6.2, 0.3, 1.6]
+repeat = [3, 2, 1]
+spacing = [0.65, 0.6, 1]
+color = "#c98a3d"
+
+[[object]]
+name = "block"
+shape = "box"
+size = [0.5, 0.5, 0.5]
+mass = 1
+position = [-1.6, 0.25, -0.6]
+repeat = [1, 6, 1]
+spacing = [0, 0.5, 0]
+color = "#e8b33a"
+
+[[joint]]
+name = "glue"
+type = "fixed"
+chain = "block"
+break_impulse = 1.2          # holds the tower up, snaps when the arm hits it
+
+# ── springs ────────────────────────────────────────────────────────────────
+[[object]]
+name = "frame"
+shape = "box"
+size = [4.4, 0.2, 0.2]
+position = [4, 4.6, -1.5]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "soft"
+shape = "box"
+size = [0.6, 0.6, 0.6]
+position = [2.6, 2.5, -1.5]
+velocity = [0, -3, 0]
+color = "#4fb06a"
+
+[[object]]
+name = "medium"
+shape = "box"
+size = [0.6, 0.6, 0.6]
+position = [4.0, 2.5, -1.5]
+velocity = [0, -3, 0]
+color = "#38b2ac"
+
+[[object]]
+name = "stiff"
+shape = "box"
+size = [0.6, 0.6, 0.6]
+position = [5.4, 2.5, -1.5]
+velocity = [0, -3, 0]
+color = "#3d8bd9"
+
+[[joint]]
+type = "spring"
+a = "soft"
+pivot = [2.6, 4.5, -1.5]
+stiffness = 25
+damping = 0.3
+
+[[joint]]
+type = "spring"
+a = "medium"
+pivot = [4.0, 4.5, -1.5]
+stiffness = 80
+damping = 0.3
+
+[[joint]]
+type = "spring"
+a = "stiff"
+pivot = [5.4, 4.5, -1.5]
+stiffness = 300
+damping = 0.3
+
+# ── pendulum wave: ten pendulums on point joints, all let go from 15°. In a
+# 30 s cycle pendulum k swings 15 + k times, so they fall in and out of step
+# and line up again at 30 s. Lengths solve T₀ = 2π√((L² + ⅖r²)/(gL)), the bob
+# being a 0.08 m sphere, with T₀ = T/(1 + θ²/16) for the 15° swing (a wide
+# swing is slower than the small-angle period) and T = 30/(15 + k).
+[[object]]
+name = "wave_bar"
+shape = "box"
+size = [3.2, 0.1, 0.1]
+position = [4.0, 3.2, 2.5]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "bob1"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [2.65, 2.2506, 2.75439]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob1"
+pivot = [2.65, 3.2, 2.5]                # L = 0.9829 m, T = 2.0 s
+
+[[object]]
+name = "bob2"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [2.95, 2.36622, 2.72341]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob2"
+pivot = [2.95, 3.2, 2.5]                # L = 0.8632 m, T = 1.875 s
+
+[[object]]
+name = "bob3"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [3.25, 2.46212, 2.69771]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob3"
+pivot = [3.25, 3.2, 2.5]                # L = 0.7639 m, T = 1.7647 s
+
+[[object]]
+name = "bob4"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [3.55, 2.54258, 2.67616]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob4"
+pivot = [3.55, 3.2, 2.5]                # L = 0.6806 m, T = 1.6667 s
+
+[[object]]
+name = "bob5"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [3.85, 2.61075, 2.65789]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob5"
+pivot = [3.85, 3.2, 2.5]                # L = 0.61 m, T = 1.5789 s
+
+[[object]]
+name = "bob6"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [4.15, 2.66904, 2.64227]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob6"
+pivot = [4.15, 3.2, 2.5]                # L = 0.5497 m, T = 1.5 s
+
+[[object]]
+name = "bob7"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [4.45, 2.7193, 2.6288]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob7"
+pivot = [4.45, 3.2, 2.5]                # L = 0.4977 m, T = 1.4286 s
+
+[[object]]
+name = "bob8"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [4.75, 2.76294, 2.61711]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob8"
+pivot = [4.75, 3.2, 2.5]                # L = 0.4525 m, T = 1.3636 s
+
+[[object]]
+name = "bob9"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [5.05, 2.80111, 2.60688]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob9"
+pivot = [5.05, 3.2, 2.5]                # L = 0.413 m, T = 1.3043 s
+
+[[object]]
+name = "bob10"
+shape = "sphere"
+radius = 0.08
+mass = 0.5
+sleep = false
+position = [5.35, 2.83469, 2.59788]
+friction = 0
+color = "#e8e8e8"
+
+[[joint]]
+type = "point"
+a = "bob10"
+pivot = [5.35, 3.2, 2.5]                # L = 0.3782 m, T = 1.25 s

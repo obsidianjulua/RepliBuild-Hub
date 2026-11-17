@@ -5,11 +5,19 @@ authors = ["John <archjulialua@gmail.com>"]
 
 [deps]
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
+OrdinaryDiffEqRKN = "af6ede74-add8-4cfd-b1df-9a4dbb109d7a"
 RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [sources]
 RepliBuild = {path = "/home/john/Desktop/Projects/RepliBuild.jl"}
+
+[compat]
+OrdinaryDiffEq = "7.8.1"
+OrdinaryDiffEqRKN = "2.3.0"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

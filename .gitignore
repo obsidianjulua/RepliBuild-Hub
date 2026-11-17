@@ -58,6 +58,11 @@ imgui.ini
 # src/, test/, Project.toml, README.md — stay tracked.
 examples/*/lib/
 
+# ObjectSim's downloaded models (third-party STLs, ~115 MB; its README's
+# "Getting models" names each source) and its recordings (output videos).
+examples/ObjectSim/assets/models/
+examples/ObjectSim/recordings/
+
 # Compiled objects / build artifacts, wherever they land
 *.so
 *.dylib

@@ -1,0 +1,138 @@
+# Nebulae: NASA's 3D models made from Chandra X-ray data (assets/models/space),
+# hung in empty space with no gravity. At the top, the Crab Nebula's two
+# pulsar jets, with the pulsar where they meet: it attracts (mutual gravity),
+# and three stones circle it. Below, the Tycho supernova remnant: the
+# outer and inner models, each a shell printed in two halves and joined back
+# together here (the right half turned 180° about y: fitted from the cut
+# faces, the seam is within a millimetre on the 90 mm print). The shells are
+# solid: throw balls (F) and they bounce around inside.
+
+[world]
+gravity = [0, 0, 0]
+hz = 120
+mutual_gravity = 1.0               # G; only the pulsar is heavy enough to matter
+
+[lighting]
+sun = 0.3
+ambient = 0.55
+sky = "#05060a"
+
+[camera]
+target = [0, 5.5, 0]
+distance = 34
+yaw = 0
+pitch = 12
+orbit = false
+
+# ── Crab Nebula: both jets start at the files' origin, the pulsar ──────────
+[[object]]
+name = "crab_jet_1"
+shape = "mesh"
+asset = "../assets/models/space/crab_nebula_jet_1.stl"
+scale = 0.05
+position = [0, 11, 0]
+glow = 0.45
+color = "#8fd8ff"
+
+[[object]]
+name = "crab_jet_2"
+shape = "mesh"
+asset = "../assets/models/space/crab_nebula_jet_2.stl"
+scale = 0.05
+position = [0, 11, 0]
+glow = 0.45
+color = "#c69bff"
+
+[[object]]
+name = "pulsar"
+shape = "sphere"
+radius = 0.3
+position = [0, 11, 0]
+mass = 0
+gravity_mass = 60
+glow = 1
+light = 14
+light_intensity = 2.0
+color = "#dff2ff"
+
+# Three stones in circular orbits (v = √(G·M/r)) in the plane across the jets.
+# gravity_mass ≈ 0: the pulsar pulls them but they barely pull each other, so
+# the orbits stay circles (at mass 1 each, near passes would bend them).
+[[object]]
+name = "stone_a"
+shape = "sphere"
+radius = 0.15
+position = [1.983, 11, -2.251]    # r = 3
+velocity = [1.591, -3.935, 1.402]
+mass = 1
+gravity_mass = 1e-6
+sleep = false
+glow = 0.6
+color = "#ffd27a"
+
+[[object]]
+name = "stone_b"
+shape = "sphere"
+radius = 0.15
+position = [-1.983, 11, 2.251]
+velocity = [-1.591, 3.935, -1.402]
+mass = 1
+gravity_mass = 1e-6
+sleep = false
+glow = 0.6
+color = "#7affc8"
+
+[[object]]
+name = "stone_c"
+shape = "sphere"
+radius = 0.12
+position = [0.783, 9.063, 0.690] # r = 2.2
+velocity = [-3.451, 0, 3.915]
+mass = 1
+gravity_mass = 1e-6
+sleep = false
+glow = 0.6
+color = "#ff8a7a"
+
+# ── Tycho's supernova remnant, outer model, centre (-5, 0, 0) ──────────────
+# The sphere's centre is the cut face's centre, (-38.68, 18.44, 0) mm in the
+# left file; the right half maps onto the left's frame by (-x + 3.84,
+# y + 55.69, -z). At scale 0.08 that puts the halves at these positions.
+[[object]]
+name = "tycho_outer_left"
+shape = "mesh"
+asset = "../assets/models/space/tycho_left_outer.stl"
+scale = 0.08
+position = [-1.906, -1.475, 0]
+glow = 0.3
+color = "#ff8a4d"
+
+[[object]]
+name = "tycho_outer_right"
+shape = "mesh"
+asset = "../assets/models/space/tycho_right_outer.stl"
+scale = 0.08
+position = [-1.599, 2.980, 0]
+rotation = [0, 180, 0]
+glow = 0.3
+color = "#ff8a4d"
+
+# ── and the inner model beside it, centre (5, 0, 0) ───────────────────────
+[[object]]
+name = "tycho_inner_left"
+shape = "mesh"
+asset = "../assets/models/space/tycho_left_inner.stl"
+scale = 0.08
+position = [8.094, -1.475, 0]
+glow = 0.3
+color = "#6fb7ff"
+
+[[object]]
+name = "tycho_inner_right"
+shape = "mesh"
+asset = "../assets/models/space/tycho_right_inner.stl"
+scale = 0.08
+position = [8.401, 2.980, 0]
+rotation = [0, 180, 0]
+glow = 0.3
+color = "#6fb7ff"

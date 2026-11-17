@@ -1,0 +1,125 @@
+# Harbour: sea water (1025 kg/m³) with a steamship (the Schaarhörn model in
+# assets/models/ships) floating in it. Things float or sink by density —
+# mass ÷ volume against the water's. The crates on the quay are 400 kg/m³
+# and float 40% under; the anchor is 6 t and sinks; the ship rights itself
+# when you tip it. Push crates in, drop things (1-7, F), open an object in
+# the menu (ESC → Object) to see its density and change its mass until it
+# sinks. World → Water switches the liquid: oil, honey, mercury.
+
+[world]
+gravity = [0, -9.81, 0]
+hz = 120
+
+[water]
+level = 0
+density = 1025                    # sea water
+drag = 1.0
+color = "#2a6f97"
+clarity = 0.55
+
+[lighting]
+sun = 1.0
+ambient = 1.0
+sky = "#6d86a8"
+
+[camera]
+target = [0, 0, 0]
+distance = 34
+yaw = 40
+pitch = 24
+orbit = false
+
+[[object]]
+name = "seabed"
+shape = "box"
+size = [160, 1, 160]
+position = [0, -9.5, 0]
+mass = 0
+color = "#7a6a4f"
+
+[[object]]
+name = "quay"
+shape = "box"
+size = [8, 11, 40]
+position = [-14, -3.5, 0]        # top at 2 m
+mass = 0
+color = "#8a8f9a"
+
+[[object]]
+name = "ship"
+shape = "hull"
+asset = "../assets/models/ships/schaarhoern.stl"
+scale = 0.12                      # 16.7 m long
+rotation = [-90, 0, 0]            # the file is z-up
+position = [2, -0.3, 6]           # the file's origin is the keel
+mass = 22500                      # 40% of its 56 m³ in sea water: it floats
+sleep = false
+friction = 0.6
+color = "#2f3a4a"
+
+[[object]]
+name = "crate"
+shape = "box"
+size = [1, 1, 1]
+position = [-15.5, 2.5, -6]
+repeat = [2, 3, 4]
+spacing = [1.02, 1.0, 1.02]
+mass = 400
+friction = 0.7
+color = "#c98a3d"
+
+[[object]]
+name = "barrel"
+shape = "cylinder"
+radius = 0.4
+height = 1.2
+position = [-6, 0.3, -8]
+rotation = [90, 0, 0]
+repeat = 5
+step = [1.4, 0, 0.6]
+mass = 250
+color = "#d94f3d"
+
+[[object]]
+name = "anchor"
+shape = "sphere"
+radius = 0.45
+position = [-10.6, 2.45, 8]
+mass = 6000
+friction = 0.9
+color = "#3a3f4b"
+
+[[object]]
+name = "buoy_red"
+shape = "sphere"
+radius = 0.35
+position = [8, 0.1, -10]
+mass = 40
+glow = 1
+light = 5
+color = "#ff4040"
+
+[[object]]
+name = "buoy_green"
+shape = "sphere"
+radius = 0.35
+position = [14, 0.1, -4]
+mass = 40
+glow = 1
+light = 5
+color = "#40ff70"
+
+# Moored: a soft spring to where each buoy starts, so it bobs but stays put.
+[[joint]]
+type = "spring"
+a = "buoy_red"
+pivot = [8, 0.1, -10]
+stiffness = 60
+damping = 1
+
+[[joint]]
+type = "spring"
+a = "buoy_green"
+pivot = [14, 0.1, -4]
+stiffness = 60
+damping = 1

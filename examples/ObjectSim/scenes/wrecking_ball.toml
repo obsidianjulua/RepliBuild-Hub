@@ -1,0 +1,80 @@
+# A heavy ball on a chain, let go from 50° out, swings into a crate wall.
+# The chain is ten capsules joined by point joints (`chain`), pinned to the
+# world at its top end; one more point joint hangs the ball on the last link.
+#
+# Chain geometry: anchor at (0, 10, 0); links of 0.6 m laid along
+# d = (-sin 50°, -cos 50°, 0) = (-0.766, -0.643, 0); a capsule's own axis is
+# Y, turned onto d by rotating 130° about Z.
+
+[world]
+gravity = [0, -9.81, 0]
+hz = 240                      # small steps …
+iterations = 60               # … and more solver passes keep a heavy chain from stretching
+
+[camera]
+target = [-0.5, 3.5, 0]
+distance = 20
+yaw = -38                     # from the side the ball swings in from
+pitch = 14
+orbit = false
+
+[[object]]
+name = "floor"
+shape = "box"
+size = [60, 1, 60]
+position = [0, -0.5, 0]
+mass = 0
+color = "#3a3f4b"
+
+[[object]]
+name = "beam"                 # decoration: where the chain hangs from
+shape = "box"
+size = [0.4, 0.4, 3]
+position = [0, 10.2, 0]
+mass = 0
+color = "#6b7280"
+
+[[object]]
+name = "link"
+shape = "capsule"
+radius = 0.07
+height = 0.6
+mass = 1
+position = [-0.2298, 9.8071, 0]       # anchor + d · 0.3
+rotation = [0, 0, 130]
+repeat = 10
+step = [-0.4596, -0.3857, 0]          # d · 0.6: each link 0.6 m further down the line
+color = "#b0b4bd"
+damping = [0.02, 0.1]
+
+[[object]]
+name = "ball"
+shape = "sphere"
+radius = 0.7
+mass = 10
+position = [-5.132, 5.693, 0]         # anchor + d · (6 + 0.7)
+color = "#2b2f38"
+
+[[joint]]
+name = "chain"
+type = "point"
+chain = "link"
+ends = "first"
+
+[[joint]]
+name = "hook"
+type = "point"
+a = "link[10]"
+b = "ball"
+pivot = [-4.596, 6.143, 0]            # anchor + d · 6
+
+[[object]]
+name = "crate"
+shape = "box"
+size = [0.8, 0.8, 0.8]
+mass = 2
+position = [1.0, 0.4, -1.64]
+repeat = [1, 8, 5]
+spacing = [0.8, 0.8, 0.82]
+friction = 0.6
+color = "#c98a3d"

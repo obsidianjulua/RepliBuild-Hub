@@ -1,0 +1,40 @@
+# Two rubble clumps on a collision course, slightly off-centre, under their own
+# gravity: each one is a ball of 64 rocks held together by mutual_gravity.
+# They meet, splash debris, and what stays bound settles into one spinning body.
+
+[world]
+gravity = [0, 0, 0]
+mutual_gravity = 0.03
+hz = 120
+iterations = 20
+
+[camera]
+target = [0, 0, 0]
+distance = 15
+yaw = 0
+pitch = 35
+orbit = false
+
+[[object]]
+name = "left"
+shape = "sphere"
+radius = 0.3
+mass = 1
+position = [-7.95, -0.45, -0.75]
+repeat = [4, 4, 4]
+spacing = [0.62, 0.62, 0.62]
+velocity = [0.9, 0, 0]
+friction = 0.6
+color = "#d94f3d"
+
+[[object]]
+name = "right"
+shape = "sphere"
+radius = 0.3
+mass = 1
+position = [6.05, 0.15, -1.15]
+repeat = [4, 4, 4]
+spacing = [0.62, 0.62, 0.62]
+velocity = [-0.9, 0, 0]
+friction = 0.6
+color = "#3d8bd9"

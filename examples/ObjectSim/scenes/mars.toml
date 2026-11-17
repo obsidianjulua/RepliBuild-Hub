@@ -1,0 +1,201 @@
+# Mars: NASA's Perseverance rover (the 3D-print kit's chassis, wheels and RTG,
+# from assets/models/perseverance) driving itself over rocks in Mars gravity.
+# The six wheels are hinges with motors: World → Motors runs them faster,
+# stops them or reverses. The camera follows the chassis; click a rock and
+# carry it into the rover's way. The kit is in millimetres, so scale = 0.012
+# makes the chassis 2.5 m long. More parts are in Spawn → Models → perseverance.
+
+[world]
+gravity = [0, -3.71, 0]          # Mars
+hz = 120
+iterations = 30                  # stiff wheel hinges under the heavy body
+
+[lighting]
+sun = 0.95
+ambient = 0.8
+sky = "#c99a72"                  # butterscotch dust
+
+[camera]
+follow = "chassis"
+distance = 9
+yaw = 35
+pitch = 20
+orbit = false
+
+[[object]]
+name = "ground"
+shape = "box"
+size = [160, 1, 160]
+position = [0, -0.5, 20]
+mass = 0
+friction = 0.9
+color = "#b5653a"
+
+# ── the rover ───────────────────────────────────────────────────────────────
+[[object]]
+name = "chassis"
+shape = "hull"
+asset = "../assets/models/perseverance/chassis.stl"
+scale = 0.012
+position = [0, 0.42, 0]          # the file's origin is the chassis floor
+mass = 400
+sleep = false
+color = "#e8e4dc"
+
+[[object]]
+name = "rtg"
+shape = "hull"
+asset = "../assets/models/perseverance/rtg_shroud.stl"
+scale = 0.012
+position = [0, 1.05, -1.55]
+rotation = [-30, 0, 0]
+mass = 45
+sleep = false
+color = "#5b5f66"
+
+[[joint]]
+type = "fixed"
+a = "rtg"
+b = "chassis"
+pivot = [0, 1.0, -1.25]
+
+# Left wheels: the file's axle runs along +y; turned 90° about z it runs
+# along −x, so each wheel spans x = −1.06 … −0.76. Right wheels mirror that.
+[[object]]
+name = "wheel_l"
+shape = "hull"
+asset = "../assets/models/perseverance/mobility_wheel_outer.stl"
+scale = 0.012
+rotation = [0, 0, 90]
+position = [-0.76, 0.27, -1.0]
+repeat = 3
+step = [0, 0, 1.05]
+mass = 15
+friction = 1.2
+sleep = false
+color = "#9aa0aa"
+
+[[object]]
+name = "wheel_r"
+shape = "hull"
+asset = "../assets/models/perseverance/mobility_wheel_outer.stl"
+scale = 0.012
+rotation = [0, 0, -90]
+position = [0.76, 0.27, -1.0]
+repeat = 3
+step = [0, 0, 1.05]
+mass = 15
+friction = 1.2
+sleep = false
+color = "#9aa0aa"
+
+# Each wheel turns about x on the chassis, driven at 70°/s (0.32 m/s).
+[[joint]]
+type = "hinge"
+a = "wheel_l[1]"
+b = "chassis"
+pivot = [-0.91, 0.27, -1.0]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+[[joint]]
+type = "hinge"
+a = "wheel_l[2]"
+b = "chassis"
+pivot = [-0.91, 0.27, 0.05]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+[[joint]]
+type = "hinge"
+a = "wheel_l[3]"
+b = "chassis"
+pivot = [-0.91, 0.27, 1.1]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+[[joint]]
+type = "hinge"
+a = "wheel_r[1]"
+b = "chassis"
+pivot = [0.91, 0.27, -1.0]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+[[joint]]
+type = "hinge"
+a = "wheel_r[2]"
+b = "chassis"
+pivot = [0.91, 0.27, 0.05]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+[[joint]]
+type = "hinge"
+a = "wheel_r[3]"
+b = "chassis"
+pivot = [0.91, 0.27, 1.1]
+axis = [1, 0, 0]
+motor = [70, 3]
+
+# ── rocks: big ones bedded in the ground, small ones loose ─────────────────
+[[object]]
+name = "boulder_a"
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = 1.6
+position = [-3.2, 0.1, 9]
+rotation = [0, 30, 0]
+mass = 0
+color = "#8c4a2f"
+
+[[object]]
+name = "boulder_b"
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = 2.2
+position = [3.5, 0.2, 17]
+rotation = [10, 120, 0]
+mass = 0
+color = "#7a4029"
+
+[[object]]
+name = "boulder_c"
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = 1.2
+position = [-1.8, -0.05, 25]
+rotation = [0, 75, 8]
+mass = 0
+color = "#94543a"
+
+[[object]]
+name = "bump"                     # low, in the right wheels' path
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = [0.8, 0.35, 0.8]
+position = [0.9, 0.0, 5.5]
+mass = 0
+color = "#9a5a3e"
+
+[[object]]
+name = "bump2"                    # and one under the left wheels
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = [0.9, 0.3, 0.7]
+position = [-0.9, 0.0, 12]
+rotation = [0, 40, 0]
+mass = 0
+color = "#9a5a3e"
+
+[[object]]
+name = "pebble"
+shape = "hull"
+asset = "../assets/rock.obj"
+scale = 0.35
+position = [-0.4, 0.3, 3]
+repeat = [3, 1, 4]
+spacing = [0.9, 0, 3.5]
+mass = 25
+friction = 0.9
+color = "#a5654a"

@@ -1,0 +1,31 @@
+# A slowly spinning cloud of 216 rocks in empty space, held together by
+# nothing but their own gravity (mutual_gravity): it falls in on itself and
+# bullet3's contacts turn the collapse into a spinning rubble pile — the way
+# small asteroids are thought to form. Units are metres, kilograms, seconds,
+# with G turned up (the real G would take hours) so it happens in seconds.
+
+[world]
+gravity = [0, 0, 0]
+mutual_gravity = 0.02
+hz = 120
+iterations = 20
+
+[camera]
+target = [0, 0, 0]
+distance = 16
+yaw = 30
+pitch = 20
+orbit = true
+
+[[object]]
+name = "rock"
+shape = "sphere"
+radius = 0.25
+mass = 1
+position = [-2.5, -2.5, -2.5]
+repeat = [6, 6, 6]
+spacing = [1.0, 1.0, 1.0]
+swirl = [0, 0.15, 0]            # the whole cloud turns slowly about Y
+friction = 0.6
+rolling_friction = 0.02
+color = "#9a8f80"
