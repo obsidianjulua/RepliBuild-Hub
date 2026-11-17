@@ -1,6 +1,6 @@
 # Generator gap: a record that is one 16-byte SIMD vector cannot cross by value
 
-> **STATUS:** OPEN
+> **STATUS:** FIXED in RepliBuild.jl #114 (`4deefe6`); the shim's by-value section is retired
 > **PACKAGE:** jolt 5.7.0 (`cf16769`)
 > **STAGE:** wrap (SysV record classification → FunctionGen trap)
 > **BLOCKS:** about 1,000 Jolt functions are emitted as "ABI Safety Trap"

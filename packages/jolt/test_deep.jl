@@ -13,14 +13,11 @@
 # The three layer classes upstream hand-writes as subclasses are Jolt's own
 # header-only *Table classes, made visible by the recipe's [types] records.
 #
-# Workarounds this exercises, each with its GENERATOR report:
-#   * JoltHub_* (shims/jolt_hub.cpp): every call that passes Vec3/Quat by value
-#     (GENERATOR-simd-by-value-trapped.md), plus Factory_New / RegisterTypes;
-#   * the build without CPU compute (GENERATOR-fragment-header-in-forced-unit.md)
-#     is what makes SphereShape/BodyCreationSettings/TempAllocatorImpl/the
-#     tables constructible at all;
-#   * overrides/ LargeIslandSplitter.h (GENERATOR-uint64-enum-overflow.md) is
-#     what lets the wrapper exist.
+# Every call is Jolt's own, Vec3/Quat by value included
+# (GENERATOR-simd-by-value-trapped.md is FIXED, as are the fragment-header and
+# uint64-enum reports: the build has its CPU compute backend and wraps
+# upstream's own headers). The shim gives only Factory_New / RegisterTypes,
+# which no pass wraps by design.
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/jolt/test_deep.jl
 
@@ -88,28 +85,27 @@ function hello_world()
                              Ptr{J.ObjectVsBroadPhaseLayerFilter}(ovb), Ptr{J.ObjectLayerPairFilter}(pairs))
     bi = J.JPH_PhysicsSystem_GetBodyInterface(ps)
 
-    floor_shape = cpp_new(:BoxShape, J.JoltHub_BoxShape_BoxShape, Ref(vec3(100, 1, 100)), 0.05f0) # cDefaultConvexRadius
+    floor_shape = cpp_new(:BoxShape, J.JPH_BoxShape_BoxShape, vec3(100, 1, 100), 0.05f0) # cDefaultConvexRadius
     sphere_shape = cpp_new(:SphereShape, J.JPH_SphereShape_SphereShape, 0.5f0)
 
     ids = J.BodyID[]
     for (shape, pos, motion, layer, act) in ((floor_shape, vec3(0, -1, 0), STATIC, NON_MOVING, DONT_ACTIVATE),
                                              (sphere_shape, vec3(0, 2, 0), DYNAMIC, MOVING, ACTIVATE))
-        bcs = cpp_new(:BodyCreationSettings, J.JoltHub_BodyCreationSettings_BodyCreationSettings,
-                      shape, Ref(pos), Ref(QUAT_IDENTITY), motion, layer)
+        bcs = cpp_new(:BodyCreationSettings, J.JPH_BodyCreationSettings_BodyCreationSettings,
+                      Ptr{J.Shape}(shape), pos, QUAT_IDENTITY, motion, layer)
         push!(ids, J.JPH_BodyInterface_CreateAndAddBody(bi, bcs, act))
         cpp_delete(:BodyCreationSettings, bcs)       # the body keeps its own reference to the shape
     end
     floor_id, sphere_id = ids
-    J.JoltHub_BodyInterface_SetLinearVelocity(bi, sphere_id, Ref(vec3(0, -5, 0)))
+    J.JPH_BodyInterface_SetLinearVelocity(bi, Ref(sphere_id), vec3(0, -5, 0))
     J.JPH_PhysicsSystem_OptimizeBroadPhase(ps)
     return (; temp, jobs, pairs, bp, ovb, ps, bi, floor_id, sphere_id)
 end
 
 function state(w)
-    p = Ref(vec3(0, 0, 0)); v = Ref(vec3(0, 0, 0))
-    J.JoltHub_BodyInterface_GetCenterOfMassPosition(w.bi, w.sphere_id, p)
-    J.JoltHub_BodyInterface_GetLinearVelocity(w.bi, w.sphere_id, v)
-    return (p[], v[], J.JPH_BodyInterface_IsActive(w.bi, Ref(w.sphere_id)))
+    p = J.JPH_BodyInterface_GetCenterOfMassPosition(w.bi, Ref(w.sphere_id))
+    v = J.JPH_BodyInterface_GetLinearVelocity(w.bi, Ref(w.sphere_id))
+    return (p, v, J.JPH_BodyInterface_IsActive(w.bi, Ref(w.sphere_id)))
 end
 
 step!(w) = J.JPH_PhysicsSystem_Update(w.ps, DT, 1, w.temp, w.jobs)
@@ -228,35 +224,35 @@ end
     teardown(w)
 end
 
-@testset "shimmed vector calls drive the body" begin
+@testset "by-value Vec3/Quat calls drive the body" begin
     w = hello_world()
-    g = Ref(vec3(0, 0, 0))
-    J.JoltHub_PhysicsSystem_GetGravity(w.ps, g)
-    @test xyz(g[]) == (0f0, -9.81f0, 0f0)           # Jolt's default gravity
-    J.JoltHub_PhysicsSystem_SetGravity(w.ps, Ref(vec3(0, 0, 0)))
-    J.JoltHub_PhysicsSystem_GetGravity(w.ps, g)
-    @test xyz(g[]) == (0f0, 0f0, 0f0)
+    @test xyz(J.JPH_PhysicsSystem_GetGravity(w.ps)) == (0f0, -9.81f0, 0f0)   # Jolt's default gravity
+    J.JPH_PhysicsSystem_SetGravity(w.ps, vec3(0, 0, 0))
+    @test xyz(J.JPH_PhysicsSystem_GetGravity(w.ps)) == (0f0, 0f0, 0f0)
 
-    J.JoltHub_BodyInterface_SetLinearVelocity(w.bi, w.sphere_id, Ref(vec3(1.5, 0, -2)))
+    J.JPH_BodyInterface_SetLinearVelocity(w.bi, Ref(w.sphere_id), vec3(1.5, 0, -2))
     _, v, _ = state(w)
     @test xyz(v) == (1.5f0, 0f0, -2f0)
 
     # An impulse J changes velocity by J/m. Sphere mass: density 1000 kg/m³
     # (BodyCreationSettings default) × 4/3·π·0.5³.
     m = 1000 * 4 / 3 * π * 0.5^3
-    J.JoltHub_BodyInterface_AddImpulse(w.bi, w.sphere_id, Ref(vec3(0, 100, 0)))
+    J.JPH_BodyInterface_AddImpulse(w.bi, Ref(w.sphere_id), vec3(0, 100, 0))
     _, v, _ = state(w)
     @test isapprox(xyz(v)[2], 100 / m; rtol=1e-5)
 
-    J.JoltHub_BodyInterface_SetAngularVelocity(w.bi, w.sphere_id, Ref(vec3(0, 3, 0)))
-    av = Ref(vec3(0, 0, 0))
-    J.JoltHub_BodyInterface_GetAngularVelocity(w.bi, w.sphere_id, av)
-    @test xyz(av[]) == (0f0, 3f0, 0f0)
+    J.JPH_BodyInterface_SetAngularVelocity(w.bi, Ref(w.sphere_id), vec3(0, 3, 0))
+    @test xyz(J.JPH_BodyInterface_GetAngularVelocity(w.bi, Ref(w.sphere_id))) == (0f0, 3f0, 0f0)
 
-    J.JoltHub_BodyInterface_SetPosition(w.bi, w.sphere_id, Ref(vec3(4, 5, 6)), ACTIVATE)
-    pos = Ref(vec3(0, 0, 0))
-    J.JoltHub_BodyInterface_GetPosition(w.bi, w.sphere_id, pos)
-    @test xyz(pos[]) == (4f0, 5f0, 6f0)
+    J.JPH_BodyInterface_SetPosition(w.bi, Ref(w.sphere_id), vec3(4, 5, 6), ACTIVATE)
+    @test xyz(J.JPH_BodyInterface_GetPosition(w.bi, Ref(w.sphere_id))) == (4f0, 5f0, 6f0)
+
+    # An impulse at a point off the centre also spins the body: Δω = I⁻¹(r × J).
+    # Solid sphere: I = 2/5·m·r².
+    J.JPH_BodyInterface_SetAngularVelocity(w.bi, Ref(w.sphere_id), vec3(0, 0, 0))
+    J.JPH_BodyInterface_AddImpulse(w.bi, Ref(w.sphere_id), vec3(0, 0, 1), vec3(4.5, 5, 6))   # r = (0.5, 0, 0)
+    I = 0.4 * m * 0.5^2
+    @test isapprox(xyz(J.JPH_BodyInterface_GetAngularVelocity(w.bi, Ref(w.sphere_id)))[2], -0.5 / I; rtol = 1e-4)
 
     # Zero gravity, no contacts: one step moves the sphere by v·dt, damped by
     # Jolt's default linear damping (0.05): v' = v·max(0, 1 - 0.05·dt).
@@ -266,6 +262,24 @@ end
     k = max(0f0, 1f0 - 0.05f0 * DT)
     @test all(isapprox.(xyz(v1), xyz(v0) .* k; rtol=1e-5))
     @test all(isapprox.(xyz(p1), (4f0, 5f0, 6f0) .+ xyz(v1) .* DT; rtol=1e-5, atol=1e-6))
+    teardown(w)
+end
+
+@testset "one-byte enum arguments (EBodyType, EMotionType)" begin
+    # GENERATOR-narrow-enum-arg-not-extended.md, FIXED (engine #115): a uint8
+    # enum crosses a thunk as its integer, zero-extended, so a callee that
+    # reads the argument 32 bits wide (GetNumActiveBodies indexes with it)
+    # sees the value and nothing above it. Before: 0 or garbage, then a segfault.
+    w = hello_world()
+    @test all(==(1), [J.JPH_PhysicsSystem_GetNumActiveBodies(w.ps, J.RigidBody) for _ in 1:1000])  # the sphere
+    @test J.JPH_PhysicsSystem_GetNumActiveBodies(w.ps, J.EBodyType_SoftBody) == 0
+    bm = w.ps + fieldoffset(J.PhysicsSystem, findfirst(==(:mBodyManager), fieldnames(J.PhysicsSystem)))
+    @test J.JPH_BodyManager_GetNumActiveBodies(bm, J.RigidBody) == 1
+    KINEMATIC = J.EMotionType(1)
+    J.JPH_BodyInterface_SetMotionType(w.bi, Ref(w.sphere_id), KINEMATIC, DONT_ACTIVATE)
+    @test J.JPH_BodyInterface_GetMotionType(w.bi, Ref(w.sphere_id)) == KINEMATIC
+    J.JPH_BodyInterface_DeactivateBody(w.bi, Ref(w.sphere_id))
+    @test J.JPH_PhysicsSystem_GetNumActiveBodies(w.ps, J.RigidBody) == 0
     teardown(w)
 end
 

@@ -1,6 +1,6 @@
 # Generator gap: a fragment header in the forced unit declines every row after it
 
-> **STATUS:** OPEN
+> **STATUS:** FIXED in RepliBuild.jl #113 (`b48535e`); the Hub workaround is retired (recipe, test gates)
 > **PACKAGE:** jolt 5.7.0 (`cf16769`)
 > **STAGE:** build (#105/#108 forced constructors and member functions,
 > the probe loop at `src/Builder/Compiler.jl:3728`)

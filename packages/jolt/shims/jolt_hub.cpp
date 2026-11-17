@@ -1,70 +1,97 @@
-// RepliBuild-Hub shims for Jolt: WORKAROUNDS, each tied to a report.
+// RepliBuild-Hub shims for Jolt: what the wrapper can't give by design.
+// (The by-value Vec3/Quat forwards that used to open this file are retired:
+// GENERATOR-simd-by-value-trapped.md is fixed, and those calls are wrapped
+// under Jolt's own names.)
 //
-// 1. By-value SIMD math (GENERATOR-simd-by-value-trapped.md)
-//    JPH::Vec3, Vec4, Quat (and RVec3 = Vec3 here) wrap one __m128. SysV passes
-//    and returns them in a single SSE register, and the wrapper's thunks can't
-//    do that, so every function taking or returning one by value is an
-//    "ABI Safety Trap" in Jolt.jl (~1,000 of them). The engine's trap message
-//    suggests a shim that takes the record by pointer or reference, which these
-//    are. Each one forwards to the upstream function of the same name, no logic
-//    added. In-place constructors follow the build's own convention:
-//    `Class_Class(this, args...)`, where `this` comes from the class's own
-//    `operator new` (Jolt's allocator), as upstream's `new BoxShape(...)` does.
-//    Covered: what upstream HelloWorld uses, plus the everyday BodyInterface
-//    vector calls. Retire this section when the trap is gone.
-//
-// 2. Not wrapped, by design (not a bug report):
+// 1. Not wrapped, by design (not a bug report):
 //    * JPH::Factory has only an implicit default constructor; the forced-ctor
 //      pass skips those ("an implicit constructor, never declared").
 //    * JPH::RegisterTypes() is an inline free function that passes
 //      JPH_VERSION_ID, a value derived from this build's defines. Forwarding
 //      it here gives Julia exactly the library's own ID.
+//
+// 2. A listener Julia cannot be (not a bug report):
+//    Jolt reports contacts only to a ContactListener subclass, from inside
+//    PhysicsSystem::Update and, with JobSystemThreadPool, from its worker
+//    threads at the same time. A Julia @cfunction there would run on threads
+//    Julia doesn't own while the calling thread sits in the ccall, so a GC
+//    triggered by one of them could never complete. ContactRecorder is a
+//    plain C++ listener that copies each contact into a buffer under a mutex;
+//    Julia clears it before Update and reads it after.
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Physics/PhysicsSystem.h>
-#include <Jolt/Physics/Body/BodyCreationSettings.h>
-#include <Jolt/Physics/Collision/Shape/BoxShape.h>
-#include <new>
+#include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Body/Body.h>
+#include <mutex>
+#include <vector>
 
 namespace JoltHub {
 
 using namespace JPH;
 
-// ── 2. setup ──
+// ── 1. setup ──
 void RegisterTypes()                 { JPH::RegisterTypes(); }
 uint64 VersionID()                   { return JPH_VERSION_ID; }
 Factory *Factory_New()               { return new Factory(); }
 void Factory_Delete(Factory *f)      { delete f; }
 
-// ── 1. constructors whose upstream form takes Vec3/Quat by value ──
-void BoxShape_BoxShape(BoxShape *self, const Vec3 &inHalfExtent, float inConvexRadius)
+// ── 2. ContactRecorder ──
+// One row per contact manifold that is new or still touching this step:
+// ids[2i], ids[2i+1] = the two BodyID values (GetIndexAndSequenceNumber);
+// f[8i..8i+7] = world contact point (the first point on body 1), the normal
+// (pointing from body 1 to body 2), penetration depth, and the speed at
+// which the bodies approach along the normal at that point (m/s, > 0 when
+// closing); flags[i] bit 0 = either body is a sensor, bit 1 = new this step.
+class ContactRecorder final : public ContactListener
 {
-	::new (self) BoxShape(inHalfExtent, inConvexRadius);
-}
+public:
+	struct Row { uint32 id1, id2; float f[8]; uint32 flags; };
 
-void BodyCreationSettings_BodyCreationSettings(BodyCreationSettings *self, const Shape *inShape,
-	const RVec3 &inPosition, const Quat &inRotation, EMotionType inMotionType, ObjectLayer inObjectLayer)
+	void OnContactAdded(const Body &b1, const Body &b2, const ContactManifold &m, ContactSettings &s) override	{ Record(b1, b2, m, s, 2u); }
+	void OnContactPersisted(const Body &b1, const Body &b2, const ContactManifold &m, ContactSettings &s) override	{ Record(b1, b2, m, s, 0u); }
+
+	std::mutex			mMutex;
+	std::vector<Row>	mRows;
+
+private:
+	void Record(const Body &b1, const Body &b2, const ContactManifold &m, const ContactSettings &s, uint32 flags)
+	{
+		Row r;
+		r.id1 = b1.GetID().GetIndexAndSequenceNumber();
+		r.id2 = b2.GetID().GetIndexAndSequenceNumber();
+		RVec3 p = m.mRelativeContactPointsOn1.empty() ? m.mBaseOffset : m.GetWorldSpaceContactPointOn1(0);
+		Vec3 n = m.mWorldSpaceNormal;
+		float closing = (b1.GetPointVelocity(p) - b2.GetPointVelocity(p)).Dot(n);
+		r.f[0] = float(p.GetX()); r.f[1] = float(p.GetY()); r.f[2] = float(p.GetZ());
+		r.f[3] = n.GetX(); r.f[4] = n.GetY(); r.f[5] = n.GetZ();
+		r.f[6] = m.mPenetrationDepth; r.f[7] = closing;
+		r.flags = flags | ((s.mIsSensor || b1.IsSensor() || b2.IsSensor()) ? 1u : 0u);
+		std::lock_guard<std::mutex> lock(mMutex);
+		mRows.push_back(r);
+	}
+};
+
+ContactRecorder *ContactRecorder_New()								{ return new ContactRecorder(); }
+void ContactRecorder_Delete(ContactRecorder *r)						{ delete r; }
+ContactListener *ContactRecorder_AsListener(ContactRecorder *r)		{ return r; }
+void ContactRecorder_Clear(ContactRecorder *r)						{ std::lock_guard<std::mutex> lock(r->mMutex); r->mRows.clear(); }
+int ContactRecorder_Count(ContactRecorder *r)						{ std::lock_guard<std::mutex> lock(r->mMutex); return int(r->mRows.size()); }
+// Copies up to `max` rows into ids (2 per row), f (8 per row) and flags (1 per
+// row); returns how many it copied.
+int ContactRecorder_Read(ContactRecorder *r, uint32 *ids, float *f, uint32 *flags, int max)
 {
-	::new (self) BodyCreationSettings(inShape, inPosition, inRotation, inMotionType, inObjectLayer);
+	std::lock_guard<std::mutex> lock(r->mMutex);
+	int n = int(r->mRows.size()) < max ? int(r->mRows.size()) : max;
+	for (int i = 0; i < n; ++i)
+	{
+		const ContactRecorder::Row &row = r->mRows[i];
+		ids[2 * i] = row.id1; ids[2 * i + 1] = row.id2;
+		for (int k = 0; k < 8; ++k) f[8 * i + k] = row.f[k];
+		flags[i] = row.flags;
+	}
+	return n;
 }
-
-// ── 1. BodyInterface ──
-void BodyInterface_GetCenterOfMassPosition(const BodyInterface *bi, BodyID id, RVec3 *out)	{ *out = bi->GetCenterOfMassPosition(id); }
-void BodyInterface_GetPosition(const BodyInterface *bi, BodyID id, RVec3 *out)				{ *out = bi->GetPosition(id); }
-void BodyInterface_GetRotation(const BodyInterface *bi, BodyID id, Quat *out)					{ *out = bi->GetRotation(id); }
-void BodyInterface_GetLinearVelocity(const BodyInterface *bi, BodyID id, Vec3 *out)			{ *out = bi->GetLinearVelocity(id); }
-void BodyInterface_GetAngularVelocity(const BodyInterface *bi, BodyID id, Vec3 *out)			{ *out = bi->GetAngularVelocity(id); }
-void BodyInterface_SetPosition(BodyInterface *bi, BodyID id, const RVec3 &p, EActivation a)	{ bi->SetPosition(id, p, a); }
-void BodyInterface_SetRotation(BodyInterface *bi, BodyID id, const Quat &q, EActivation a)	{ bi->SetRotation(id, q, a); }
-void BodyInterface_SetLinearVelocity(BodyInterface *bi, BodyID id, const Vec3 &v)				{ bi->SetLinearVelocity(id, v); }
-void BodyInterface_SetAngularVelocity(BodyInterface *bi, BodyID id, const Vec3 &w)			{ bi->SetAngularVelocity(id, w); }
-void BodyInterface_AddForce(BodyInterface *bi, BodyID id, const Vec3 &f)						{ bi->AddForce(id, f); }
-void BodyInterface_AddImpulse(BodyInterface *bi, BodyID id, const Vec3 &j)					{ bi->AddImpulse(id, j); }
-void BodyInterface_AddTorque(BodyInterface *bi, BodyID id, const Vec3 &t)						{ bi->AddTorque(id, t); }
-
-// ── 1. PhysicsSystem ──
-void PhysicsSystem_SetGravity(PhysicsSystem *ps, const Vec3 &g)								{ ps->SetGravity(g); }
-void PhysicsSystem_GetGravity(const PhysicsSystem *ps, Vec3 *out)								{ *out = ps->GetGravity(); }
 
 } // namespace JoltHub

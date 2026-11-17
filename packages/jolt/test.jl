@@ -5,8 +5,8 @@
 # the jrouwe/JoltPhysics clone. Then build + wrap (about 14 minutes), the gates
 # below, and the deep test against the fresh wrapper.
 #
-# Three gates pin the package's WORKAROUNDS. Each names its GENERATOR report,
-# and each flips when the engine fix lands, as a reminder to retire it.
+# Gates pin the package's WORKAROUND and check the two retired ones stay
+# retired. Each names its GENERATOR report.
 #
 # Usage:  julia --project=/path/to/RepliBuild.jl packages/jolt/test.jl
 
@@ -40,11 +40,11 @@ SRC  = read(joinpath(JULIA_DIR, "Jolt.jl"), String)
 SYMS = read(`nm -D --defined-only $(joinpath(JULIA_DIR, "libjolt.so"))`, String)
 
 @testset "what was compiled" begin
-    # Jolt/ (138 .cpp after the recipe's exclusions), the package's shim, and
+    # Jolt/ (143 .cpp after the recipe's exclusions), the package's shim, and
     # the build's two generated units ([types] records, #107; forced inline
     # constructors and member functions, #105/#108).
-    @test count(s -> occursin("/deps/jolt/Jolt/", s), SRCS) == 138
-    @test length(SRCS) == 141
+    @test count(s -> occursin("/deps/jolt/Jolt/", s), SRCS) == 143
+    @test length(SRCS) == 146
     @test any(s -> endswith(s, "shims/jolt_hub.cpp"), SRCS)
     @test any(s -> endswith(s, "replibuild_records.cpp"), SRCS)
     @test any(s -> endswith(s, "replibuild_ctors.cpp"), SRCS)
@@ -76,28 +76,35 @@ end
     @test all(r -> r["emitted"] == true, methods)
 end
 
-@testset "WORKAROUND gates (flip when the engine fix lands)" begin
-    # GENERATOR-uint64-enum-overflow.md: overrides/ shadows upstream's
-    # LargeIslandSplitter.h, so the uint64 enum never reaches the wrap.
-    @test isfile(joinpath(PKG_DIR, "overrides", "Jolt", "Physics", "LargeIslandSplitter.h"))
-    @test !occursin("EIterationStatus", SRC)
+@testset "WORKAROUND gates" begin
+    # GENERATOR-uint64-enum-overflow.md, FIXED (engine #112): upstream's
+    # LargeIslandSplitter.h is wrapped as it is, its uint64 enum included.
+    @test !isdir(joinpath(PKG_DIR, "overrides"))
+    @test occursin("EIterationStatus", SRC)
 
-    # GENERATOR-fragment-header-in-forced-unit.md: no CPU compute backend, so
-    # WrapShaderBegin.h never enters the forced unit, and no row is declined
-    # for the namespace it leaks.
-    @test !any(s -> occursin("/Compute/CPU/", s) || endswith(s, "HairWrapper.cpp"), SRCS)
+    # GENERATOR-fragment-header-in-forced-unit.md, FIXED (engine #113): the
+    # CPU compute backend is built, WrapShaderBegin.h enters the forced unit,
+    # and no row is declined for the namespace it opens.
+    @test any(s -> occursin("/Compute/CPU/", s), SRCS)
+    @test any(s -> endswith(s, "HairWrapper.cpp"), SRCS)
     skipped = META["inline_constructors"]["skipped"]
     @test !any(r -> occursin("ShaderWrappers", r["reason"]), skipped)
 
-    # GENERATOR-simd-by-value-trapped.md: by-value Vec3/Quat is still a trap,
-    # and the shim's by-reference forms exist. When this first test fails,
-    # the engine passes __m128 records: retire the shim's by-value section.
-    @test occursin("cannot call 'JPH_BodyInterface_GetCenterOfMassPosition'", SRC)
-    for f in ("JoltHub_BodyInterface_GetCenterOfMassPosition", "JoltHub_BodyInterface_SetLinearVelocity",
-              "JoltHub_BoxShape_BoxShape", "JoltHub_BodyCreationSettings_BodyCreationSettings",
-              "JoltHub_PhysicsSystem_SetGravity", "JoltHub_Factory_New", "JoltHub_RegisterTypes")
+    # GENERATOR-simd-by-value-trapped.md, FIXED (engine #114): Vec3/Quat by
+    # value are wrapped under Jolt's own names, and the shim's by-reference
+    # forwards are gone; what the shim keeps is by design.
+    @test !occursin("cannot call 'JPH_BodyInterface_GetCenterOfMassPosition'", SRC)
+    @test !occursin("JoltHub_BodyInterface_", SRC) && !occursin("JoltHub_BoxShape_", SRC)
+    for f in ("JoltHub_Factory_New", "JoltHub_RegisterTypes", "JoltHub_ContactRecorder_New")
         @test occursin("function $f(", SRC)
     end
+
+    # GENERATOR-narrow-enum-arg-not-extended.md, FIXED (engine #115): a uint8
+    # enum argument reaches the callee zero-extended (it reads 32 bits), not
+    # as a 64-bit load of a spilled byte.
+    thunk = "_ZNK3JPH11BodyManager18GetNumActiveBodiesENS_9EBodyTypeE_thunk"
+    asm = read(`objdump -d --no-show-raw-insn --disassemble=$thunk $(joinpath(JULIA_DIR, "libjolt_thunks.so"))`, String)
+    @test occursin(r"movzbl\s+\(%r[a-z0-9]+\),%esi", asm)
 end
 
 end

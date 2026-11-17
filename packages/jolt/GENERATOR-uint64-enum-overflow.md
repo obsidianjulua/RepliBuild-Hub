@@ -1,6 +1,6 @@
 # Generator gap: an enumerator above typemax(Int64) aborts the whole wrap
 
-> **STATUS:** OPEN
+> **STATUS:** FIXED in RepliBuild.jl #112 (`9868146`); the Hub workaround is retired (recipe, test gates)
 > **PACKAGE:** jolt 5.7.0 (`cf16769`)
 > **STAGE:** wrap (C++ enum rendering → `_is_bitflag_enum`)
 > **BLOCKS:** the entire Jolt wrapper. `build` succeeds (144 sources, 158
