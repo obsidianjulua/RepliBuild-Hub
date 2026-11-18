@@ -31,7 +31,14 @@ const TOML_PATH = joinpath(PKG_DIR, "replibuild.toml")
 # ── Build ────────────────────────────────────────────────────────────────────
 
 @testset "Build pipeline" begin
-    RepliBuild.clean(TOML_PATH)
+    # deps=false keeps .replibuild_cache/deps/ (the SUNDIALS clone and its pin
+    # marker) and clears everything else, so the build below is a cold one
+    # without a fresh clone. A bare clean() deletes the clone too, turning every
+    # run into a network fetch (same choice as packages/jolt and bullet3).
+    deps_dir = joinpath(PKG_DIR, ".replibuild_cache", "deps")
+    had_clone = isdir(deps_dir)
+    RepliBuild.clean(TOML_PATH; deps = false)
+    had_clone && @test isdir(deps_dir)
     lib = RepliBuild.build(TOML_PATH)
     @test isfile(lib)
     @test endswith(lib, "libsundials.so") || endswith(lib, "libsundials.dylib")
@@ -102,8 +109,12 @@ end
 
 # ── Context lifecycle ────────────────────────────────────────────────────────
 
+# The wrapper types the context: SUNContext_Create takes Ptr{Ptr{SUNContext}}
+# (DWARF names the opaque `struct _SUNContext*`), and a Ref{Ptr{Cvoid}} no
+# longer converts to it. Everything that takes the context back is typed the
+# same way, so the Ref has to be too.
 mkctx() = begin
-    ref = Ref{Ptr{Cvoid}}(C_NULL)
+    ref = Ref{Ptr{Sundials.SUNContext}}(C_NULL)
     flag = Sundials.SUNContext_Create(Cint(0), ref)
     (flag, ref[])
 end
