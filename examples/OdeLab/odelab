@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Start OdeLab, optionally on one system:
+#
+#   odelab                # Lorenz
+#   odelab robertson      # lorenz | rossler | pendulum | robertson
+#   odelab -f [system]    # stay attached to this terminal (see output live)
+#
+# Detaches by default, like objectsim: the shell returns at once and closing the
+# terminal does not close the window. Output goes to ~/.cache/odelab/odelab.log.
+# raylib's GLFW here is X11, so this needs Xwayland's display (:1 on this
+# machine) when $DISPLAY is unset.
+set -euo pipefail
+P="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+export DISPLAY="${DISPLAY:-:1}"
+
+fg=0
+if [[ "${1:-}" == "-f" || "${1:-}" == "--foreground" ]]; then fg=1; shift; fi
+sys="${1:-lorenz}"
+case "$sys" in
+    lorenz|rossler|pendulum|robertson) ;;
+    *) echo "odelab: unknown system '$sys' (lorenz, rossler, pendulum, robertson)" >&2; exit 1 ;;
+esac
+
+[[ -f "$P/lib/sundials/Sundials.jl" && -f "$P/lib/raylib/Raylib.jl" && -f "$P/lib/imgui/Imgui.jl" ]] ||
+    { echo "odelab: the wrappers are not vendored yet; run $P/vendor.sh first" >&2; exit 1; }
+
+JULIA=$(command -v julia || echo "$HOME/.juliaup/bin/julia")
+cmd=("$JULIA" --project="$P" -e "using OdeLab; OdeLab.run(:$sys)")
+(( fg )) && exec "${cmd[@]}"
+
+log="${XDG_CACHE_HOME:-$HOME/.cache}/odelab/odelab.log"
+mkdir -p "$(dirname "$log")"
+setsid -f "${cmd[@]}" >"$log" 2>&1 </dev/null
+echo "odelab: window starting; output in $log"
