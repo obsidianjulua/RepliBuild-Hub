@@ -10,29 +10,52 @@ tag = "v7.9.0"
 commit = "312fc0f3684f27209ca9dc9249d194436eb41a7a"
 
 # ── What this package is ─────────────────────────────────────────────────────
-# CVODE: LLNL's adaptive-order, adaptive-step BDF/Adams integrator for stiff and
-# non-stiff ODE IVPs, plus the serial vector, dense/band matrices, the direct and
-# Krylov linear solvers, and the Newton/fixed-point nonlinear solvers it needs.
-# ARKODE, CVODES, IDA, IDAS and KINSOL are configured OFF and excluded below.
+# Four of LLNL's solvers in one library, serial, double precision:
+#   CVODE   adaptive-order, adaptive-step BDF/Adams ODE integrator (stiff and not)
+#   ARKODE  Runge–Kutta ODE integrators: ARKStep (explicit, implicit, IMEX),
+#           ERKStep, MRIStep (multirate), SPRKStep (symplectic), LSRKStep (low
+#           storage / super-time-stepping), SplittingStep, ForcingStep
+#   IDA     variable-order BDF integrator for DAEs, F(t, y, y') = 0
+#   KINSOL  nonlinear algebraic systems F(u) = 0: Newton with line search,
+#           Picard, fixed point with Anderson acceleration
+# plus the serial and (serial) ManyVector N_Vectors, dense/band matrices, the
+# direct and Krylov linear solvers, the Newton/fixed-point nonlinear solvers,
+# and ARKODE's step-size controllers and adjoint checkpointing.
+#
+# CVODES and IDAS stay out, and not for size: they are CVODE and IDA plus
+# sensitivity analysis under the SAME function names (cvodes.c:477 and
+# cvode.c:240 both define CVodeCreate; idas.c:412 and ida.c:282 both define
+# IDACreate). Upstream builds each into its own library; in one library the
+# pair cannot coexist. Swapping CVODE for CVODES (and IDA for IDAS) is the way to
+# get sensitivities.
 #
 # ── Why the exclude list is hand-inverted, not taken from the proposal ───────
 # SUNDIALS does not build one library. cmake configures TWENTY-TWO object
 # libraries and links them into per-solver .so's. `SysConfigGen.toml_fragment`
 # picks the single largest target (sundials_core_obj_shared, 26 TUs) and proposes
 # excluding everything else — which would wrap SUNDIALS' infrastructure with NO
-# ODE SOLVER IN IT. The list below is the inverse: the union of the ten targets
-# that make up a working serial CVODE, 55 TUs.
+# ODE SOLVER IN IT. The list below is the inverse: the union of the targets that
+# make up serial CVODE, ARKODE, IDA and KINSOL.
 #
 # That union is legitimate under one flag set, and this is checked rather than
-# assumed twice over:
+# assumed:
 #   * cmake's own compile_commands.json gives sundials_context.c (core),
 #     cvode.c (cvode) and nvector_serial.c (nvecserial) BYTE-IDENTICAL flags,
 #     down to the same -Dsundials_core_EXPORTS. Upstream already compiles the
 #     whole union with one flag set; the per-target split is a link-time
 #     packaging choice, not a compile-time one.
+#   * ARKODE, IDA and KINSOL (added 2026-11-18, from the clone already on disk)
+#     are declared in their CMakeLists exactly as CVODE is — one
+#     sundials_add_library() with no COMPILE_DEFINITIONS of their own (CVODE's
+#     only ones are for its excluded CUDA/HIP fused kernels). Read from the
+#     CMakeLists, not from a compile_commands.json: harvest.jl clones, and this
+#     expansion was done without a new clone.
 #   * sundials_export.h expands BOTH branches of `#ifdef sundials_core_EXPORTS`
 #     to __attribute__((visibility("default"))) on ELF, and there is ONE export
 #     header for the whole project rather than one per target.
+#   * the captured sundials_config.h has no per-solver switch (its template,
+#     include/sundials/sundials_config.in, only switches TPLs and build-wide
+#     features), so enabling more solvers does not change it.
 # harvest.jl re-checks the first of those on every version bump.
 exclude = [
     # not library code
@@ -40,12 +63,12 @@ exclude = [
     "bindings/",
     "examples/",          # 227 files, each with main()
     "test/",              # 157 files
-    # solvers this package does not ship
-    "src/arkode/",
+    # solvers this package does not ship: same symbol names as CVODE / IDA
     "src/cvodes/",
-    "src/ida/",
     "src/idas/",
-    "src/kinsol/",
+    # ARKODE's XBraid (parallel-in-time) interface: needs the XBraid TPL and is
+    # its own target upstream (add_subdirectory under SUNDIALS_ENABLE_XBRAID)
+    "src/arkode/xbraid/",
     # Fortran interface — 84 .f90 plus their C shims. RepliBuild only walks
     # .c/.cpp so the .f90 are inert, but the fmod_* dirs hold C code too.
     # Substring match, so this covers every solver's copy at once.
@@ -63,10 +86,14 @@ exclude = [
     # package with a stray .cpp cannot work; the file has to go.
     "src/cvode/cvode_fused_gpu.cpp",
     "src/cvode/cvode_fused_stubs.c",
-    # N_Vector implementations other than serial
+    # N_Vector implementations other than serial. ManyVector is NOT here: ARKODE
+    # needs it (arkode_arkstep.c / arkode_erkstep.c call
+    # N_VGetSubvector_ManyVector in their adjoint code, and upstream links
+    # sundials_nvecmanyvector_obj into sundials_arkode). nvector_manyvector.c
+    # compiled without -DMANYVECTOR_BUILD_WITH_MPI is the serial ManyVector;
+    # upstream's MPI ManyVector is the same file built again with that define.
     "src/nvector/cuda/",
     "src/nvector/hip/",
-    "src/nvector/manyvector/",
     "src/nvector/mpiplusx/",
     "src/nvector/openmp/",
     "src/nvector/openmpdev/",
@@ -141,8 +168,8 @@ include_dirs = [
 
 [link]
 # LTO off, as in every other Hub package: the whole-module llvmcall payload is
-# scale-limited, and at 55 TUs this is one of the larger C packages in the Hub.
-# Tier 1 slicing stays off — CVODE does real numerical work per call, so FFI
+# scale-limited, and with ARKODE, IDA and KINSOL in it this is one of the larger C packages in the Hub.
+# Tier 1 slicing stays off — these solvers do real numerical work per call, so FFI
 # overhead is not the cost that matters.
 enable_lto = false
 optimization_level = "2"
@@ -154,10 +181,13 @@ type = "shared"
 
 [wrap]
 language = "c"
-# The four headers a CVODE caller actually needs: the integrator, the vector it
-# integrates, and the matrix + linear solver the Newton iteration factors with.
+# The headers the value macros below come from: each solver's main header,
+# plus the vector, matrix and linear solver a caller sets up alongside.
 shim_headers = [
     "cvode/cvode.h",
+    "arkode/arkode.h",
+    "ida/ida.h",
+    "kinsol/kinsol.h",
     "nvector/nvector_serial.h",
     "sunmatrix/sunmatrix_dense.h",
     "sunlinsol/sunlinsol_dense.h",
@@ -167,12 +197,14 @@ shim_headers = [
 # Earned from the first wrap, not guessed. Two kinds turned up.
 #
 # SUNDIALS' *SUN*-prefixed constants really are enums — SUNLogLevel, SUNErrCode_,
-# N_Vector_ID, SUNMatrix_ID, SUNLinearSolver_ID all came through DWARF untouched.
-# CVODE's do not: cvode.h:38-73 declares every CV_* constant as a bare #define,
-# so the preprocessor erased all of them and the wrapper had no way to name the
-# method, the task mode, or a single return code. They are shimmed below.
+# N_Vector_ID, SUNMatrix_ID, SUNLinearSolver_ID all came through DWARF untouched,
+# and so do ARKODE's table IDs (ARKODE_ERKTableID, ARKODE_SPRKMethodID, …).
+# The solvers' own constants do not: cvode.h, arkode.h, ida.h and kinsol.h declare
+# every CV_* / ARK_* / IDA_* / KIN_* constant as a bare #define, so the
+# preprocessor erased all of them and the wrapper had no way to name a method, a
+# task mode, or a single return code. They are shimmed below.
 #
-# The three varargs are printf-style — fixed args end in a format string, then `...`.
+# The varargs are printf-style — fixed args end in a format string, then `...`.
 # Only the VARIADIC types are listed; the fixed args come from DWARF.
 [wrap.varargs]
 # Re-checked by hand against the headers at this commit (v7.9.0):
@@ -185,6 +217,18 @@ shim_headers = [
 #   void SUNGlobalFallbackErrHandler(int line, const char* func, const char* file,
 #                                    const char* msgfmt, SUNErrCode err_code, ...)
 #                                            src/sundials/sundials_errors.c:138
+#   void arkProcessError(ARKodeMem, int error_code, int line, const char* func,
+#                        const char* file, const char* msgfmt, ...)
+#                                            src/arkode/arkode_impl.h:627
+#   void IDAProcessError(IDAMem, int error_code, int line, const char* func,
+#                        const char* file, const char* msgfmt, ...)
+#                                            src/ida/ida_impl.h:440
+#   void KINProcessError(KINMem, int error_code, int line, const char* func,
+#                        const char* file, const char* msgfmt, ...)
+#                                            src/kinsol/kinsol_impl.h:383
+#   void KINPrintInfo(KINMem, int info_code, const char* module,
+#                     const char* fname, const char* msgfmt, ...)
+#                                            src/kinsol/kinsol_impl.h:388
 proven_at = "312fc0f3684f27209ca9dc9249d194436eb41a7a"
 
 # The public one — SUNDIALS_EXPORT in sundials_logger.h. This is how you get
@@ -207,6 +251,33 @@ cvProcessError = [
     ["Cstring", "Cint"],
 ]
 
+# ARKODE's, IDA's and KINSOL's twins of cvProcessError: internal, exported, what
+# each solver calls on every error path.
+arkProcessError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+IDAProcessError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+KINProcessError = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+    ["Cstring", "Cint"],
+]
+# KINSOL's informational messages (print level ≥ 1) go through this one.
+KINPrintInfo = [
+    ["Cstring"],
+    ["Cint"],
+    ["Cdouble"],
+]
+
 # The handler CVODE falls back to when no SUNContext error handler is set.
 # Note the fixed args end with SUNErrCode err_code AFTER the format string —
 # unusual ordering, and a reason to let DWARF supply the fixed half rather than
@@ -218,19 +289,35 @@ SUNGlobalFallbackErrHandler = [
 ]
 
 # ── Owned char* returns ──────────────────────────────────────────────────────
-# The three *GetReturnFlagName functions this package ships malloc a fresh
-# buffer on every call (cvode_io.c:1804, cvode_diag.c:251, cvode_ls.c:863) and
-# the caller frees it with plain free(). Without this the wrapper copies to a
-# Julia String and leaks the C buffer each call. The ARKode/IDA/KINSOL twins
-# are excluded from the build above.
+# Every *GetReturnFlagName this package ships mallocs a fresh buffer on every call
+# and the caller frees it with plain free(): cvode_io.c:1804, cvode_diag.c:251,
+# cvode_ls.c:863, arkode_io.c:3316, arkode_ls.c:1588, ida_io.c:1559,
+# ida_ls.c:771, kinsol_io.c:1187, kinsol_ls.c:590. ARKODE's deprecated
+# per-stepper names (ARKStep…, ERKStep…, MRIStep…, SPRKStep…) return
+# ARKodeGetReturnFlagName's buffer unchanged, so they own theirs too. Without
+# this the wrapper copies to a Julia String and leaks the C buffer each call.
 [wrap.cstring_owned]
 CVodeGetReturnFlagName = "free"
 CVodeGetLinReturnFlagName = "free"
 CVDiagGetReturnFlagName = "free"
+ARKodeGetReturnFlagName = "free"
+ARKodeGetLinReturnFlagName = "free"
+ARKStepGetReturnFlagName = "free"
+ARKStepGetLinReturnFlagName = "free"
+ERKStepGetReturnFlagName = "free"
+MRIStepGetReturnFlagName = "free"
+MRIStepGetLinReturnFlagName = "free"
+SPRKStepGetReturnFlagName = "free"
+IDAGetReturnFlagName = "free"
+IDAGetLinReturnFlagName = "free"
+KINGetReturnFlagName = "free"
+KINGetLinReturnFlagName = "free"
 
 # ── Value macros ─────────────────────────────────────────────────────────────
-# Every CV_* constant in cvode.h is a #define, not an enum member, so none of
-# them survived preprocessing. Without these a caller cannot say "use BDF" or
+# Every CV_* / ARK_* / IDA_* / KIN_* constant is a #define, not an enum member, so
+# none of them survived preprocessing. The ones shimmed are what a caller passes
+# (methods, task modes, strategies) and the returns it branches on; the rest are
+# a CVodeGetReturnFlagName-style call away. Without these a caller cannot say "use BDF" or
 # compare a return code against success — they would have to hardcode 2 and 0
 # against a header they cannot see. All are plain int.
 # Re-checked by hand against include/cvode/cvode.h at this commit; line numbers
@@ -266,6 +353,101 @@ ret = "int"
 [wrap.macros.CV_MEM_NULL]
 ret = "int"
 [wrap.macros.CV_ILL_INPUT]
+ret = "int"
+
+# ── ARKODE — include/arkode/arkode.h ──
+# itask argument to ARKodeEvolve — arkode.h:49-50
+[wrap.macros.ARK_NORMAL]
+ret = "int"
+[wrap.macros.ARK_ONE_STEP]
+ret = "int"
+# ARKodeSetInterpolantType — arkode.h:73-74
+[wrap.macros.ARK_INTERP_HERMITE]
+ret = "int"
+[wrap.macros.ARK_INTERP_LAGRANGE]
+ret = "int"
+# success/normal returns — arkode.h:78-80
+[wrap.macros.ARK_SUCCESS]
+ret = "int"
+[wrap.macros.ARK_TSTOP_RETURN]
+ret = "int"
+[wrap.macros.ARK_ROOT_RETURN]
+ret = "int"
+# failures — arkode.h:84-107
+[wrap.macros.ARK_TOO_MUCH_WORK]
+ret = "int"
+[wrap.macros.ARK_TOO_MUCH_ACC]
+ret = "int"
+[wrap.macros.ARK_ERR_FAILURE]
+ret = "int"
+[wrap.macros.ARK_CONV_FAILURE]
+ret = "int"
+[wrap.macros.ARK_RHSFUNC_FAIL]
+ret = "int"
+[wrap.macros.ARK_MEM_NULL]
+ret = "int"
+[wrap.macros.ARK_ILL_INPUT]
+ret = "int"
+
+# ── IDA — include/ida/ida.h ──
+# itask argument to IDASolve — ida.h:37-38
+[wrap.macros.IDA_NORMAL]
+ret = "int"
+[wrap.macros.IDA_ONE_STEP]
+ret = "int"
+# icopt argument to IDACalcIC — ida.h:41-42
+[wrap.macros.IDA_YA_YDP_INIT]
+ret = "int"
+[wrap.macros.IDA_Y_INIT]
+ret = "int"
+# success/normal returns — ida.h:46-48
+[wrap.macros.IDA_SUCCESS]
+ret = "int"
+[wrap.macros.IDA_TSTOP_RETURN]
+ret = "int"
+[wrap.macros.IDA_ROOT_RETURN]
+ret = "int"
+# failures — ida.h:52-74
+[wrap.macros.IDA_TOO_MUCH_WORK]
+ret = "int"
+[wrap.macros.IDA_ERR_FAIL]
+ret = "int"
+[wrap.macros.IDA_CONV_FAIL]
+ret = "int"
+[wrap.macros.IDA_RES_FAIL]
+ret = "int"
+[wrap.macros.IDA_MEM_NULL]
+ret = "int"
+[wrap.macros.IDA_ILL_INPUT]
+ret = "int"
+
+# ── KINSOL — include/kinsol/kinsol.h ──
+# globalization strategy argument to KINSol — kinsol.h:76-79
+[wrap.macros.KIN_NONE]
+ret = "int"
+[wrap.macros.KIN_LINESEARCH]
+ret = "int"
+[wrap.macros.KIN_PICARD]
+ret = "int"
+[wrap.macros.KIN_FP]
+ret = "int"
+# success returns — kinsol.h:38-40
+[wrap.macros.KIN_SUCCESS]
+ret = "int"
+[wrap.macros.KIN_INITIAL_GUESS_OK]
+ret = "int"
+[wrap.macros.KIN_STEP_LT_STPTOL]
+ret = "int"
+# failures — kinsol.h:44-56
+[wrap.macros.KIN_MEM_NULL]
+ret = "int"
+[wrap.macros.KIN_ILL_INPUT]
+ret = "int"
+[wrap.macros.KIN_LINESEARCH_NONCONV]
+ret = "int"
+[wrap.macros.KIN_MAXITER_REACHED]
+ret = "int"
+[wrap.macros.KIN_SYSFUNC_FAIL]
 ret = "int"
 
 [types]

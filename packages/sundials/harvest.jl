@@ -46,7 +46,14 @@ try
 
     # The -D set keeps the build lean. SUNDIALS configures 22 separate object
     # libraries; every optional package/TPL left ON adds targets and link deps.
-    # We want core + CVODE + the serial/dense/Krylov stack and nothing else.
+    # We want core + CVODE + ARKODE + IDA + KINSOL + the serial/dense/Krylov
+    # stack and nothing else. (CVODES and IDAS stay OFF: same function names as
+    # CVODE and IDA, so they cannot share one library — see replibuild.toml.)
+    #
+    # The solver switches do not reach the captured headers: the
+    # sundials_config.in template has no per-solver define. When ARKODE, IDA and
+    # KINSOL were added (2026-11-18) the config/ captured with them OFF was kept
+    # as-is for that reason, without re-running this script (it clones).
     #
     # PRECISION and INDEX_SIZE are pinned EXPLICITLY rather than inherited from
     # cmake's defaults — they are the two probes that silently change the ABI of
@@ -55,13 +62,13 @@ try
         name      = "sundials",
         clone_rel = ".replibuild_cache/deps/sundials",
         args      = [
-            # solvers: CVODE only
+            # solvers: CVODE, ARKODE, IDA, KINSOL
             "-DSUNDIALS_ENABLE_CVODE=ON",
             "-DSUNDIALS_ENABLE_CVODES=OFF",
-            "-DSUNDIALS_ENABLE_ARKODE=OFF",
-            "-DSUNDIALS_ENABLE_IDA=OFF",
+            "-DSUNDIALS_ENABLE_ARKODE=ON",
+            "-DSUNDIALS_ENABLE_IDA=ON",
             "-DSUNDIALS_ENABLE_IDAS=OFF",
-            "-DSUNDIALS_ENABLE_KINSOL=OFF",
+            "-DSUNDIALS_ENABLE_KINSOL=ON",
             # no Fortran interface — 84 .f90 in src/ we never want in the picture
             "-DSUNDIALS_ENABLE_FORTRAN=OFF",
             "-DBUILD_FORTRAN_MODULE_INTERFACE=OFF",
@@ -99,7 +106,7 @@ try
             "-DSUNDIALS_ENABLE_PYTHON=OFF",
             # vectors / matrices / linear solvers: serial + dense + Krylov
             "-DSUNDIALS_ENABLE_NVECTOR_SERIAL=ON",
-            "-DSUNDIALS_ENABLE_NVECTOR_MANYVECTOR=OFF",
+            "-DSUNDIALS_ENABLE_NVECTOR_MANYVECTOR=ON",   # ARKODE's adjoint code calls it
             "-DSUNDIALS_ENABLE_SUNMATRIX_DENSE=ON",
             "-DSUNDIALS_ENABLE_SUNMATRIX_BAND=ON",
             "-DSUNDIALS_ENABLE_SUNMATRIX_SPARSE=OFF",
@@ -117,8 +124,8 @@ try
 
     # NOTE: uniform(probe) here reports the CHOSEN target (sundials_core_obj_shared,
     # 26 TUs). SUNDIALS configures 22 object libraries and the probe picks the
-    # largest; the manifest deliberately compiles the UNION of core + cvode + the
-    # serial/dense/Krylov impls. That union is legitimate under one flag set only
+    # largest; the manifest deliberately compiles the UNION of core + the four
+    # solvers + the serial/dense/Krylov impls. That union is legitimate under one flag set only
     # because every target's sole distinguishing define is <target>_EXPORTS, and
     # sundials_export.h expands both branches of that conditional to
     # __attribute__((visibility("default"))) on ELF — there is ONE export header
@@ -156,7 +163,8 @@ try
               "capture layout no longer matches the include form the sources use")
 
     println("\n── proposal (reference only; replibuild.toml is hand-maintained) ──")
-    println(toml_fragment(probe; language="c", shim_headers=["cvode/cvode.h"]))
+    println(toml_fragment(probe; language="c",
+                          shim_headers=["cvode/cvode.h", "arkode/arkode.h", "ida/ida.h", "kinsol/kinsol.h"]))
 finally
     rm(checkout; recursive=true, force=true)
 end

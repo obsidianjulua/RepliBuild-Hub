@@ -173,10 +173,10 @@ language = "c"
 tags = ["crypto", "password-hashing", "kdf"]
 
 [sundials]
-description = "SUNDIALS CVODE — LLNL's adaptive BDF/Adams ODE integrator, serial vectors, dense/band + Krylov linear solvers"
+description = "SUNDIALS — CVODE (BDF/Adams), ARKODE (explicit/implicit/IMEX, multirate, symplectic Runge–Kutta), IDA (DAEs) and KINSOL (nonlinear systems); serial vectors, dense/band + Krylov linear solvers"
 version = "7.9.0"
 language = "c"
-tags = ["ode", "numerics", "solver", "integrator", "scientific-computing"]
+tags = ["ode", "dae", "nonlinear", "numerics", "solver", "integrator", "runge-kutta", "symplectic", "scientific-computing"]
 
 [onednn]
 description = "oneDNN 3.11.3 — Intel deep-learning primitives, CPU + Intel GPU (OpenCL / Arc A750 XEHPG)"
